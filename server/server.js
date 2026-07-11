@@ -814,6 +814,21 @@ async function initDb() {
       updatedAt TEXT,
       UNIQUE(examId, studentId)
     );
+
+    CREATE TABLE IF NOT EXISTS timetable_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      className TEXT NOT NULL,
+      dayOfWeek TEXT NOT NULL,
+      period TEXT NOT NULL,
+      subject TEXT,
+      teacherId TEXT,
+      teacherName TEXT,
+      room TEXT,
+      branchId TEXT,
+      createdAt TEXT,
+      updatedAt TEXT,
+      UNIQUE(className, dayOfWeek, period)
+    );
   `);
 
   try { await db.exec("ALTER TABLE allocations ADD COLUMN branchId TEXT;"); } catch(e) {}
@@ -1452,6 +1467,61 @@ async function main() {
     } catch (err) {
       console.error('Submit exam marks error:', err);
       res.status(500).json({ error: 'Failed to submit marks' });
+    }
+  });
+
+  // ─── Timetable ──────────────────────────────────────────────────────────────
+
+  app.get('/api/timetable', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM timetable_entries WHERE 1=1';
+      const params = [];
+      if (req.query.className) { query += ' AND className = ?'; params.push(req.query.className); }
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error('List timetable error:', err);
+      res.status(500).json({ error: 'Failed to load timetable' });
+    }
+  });
+
+  app.post('/api/timetable', async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (!body.className || !body.dayOfWeek || !body.period) {
+        return res.status(400).json({ error: 'className, dayOfWeek and period are required' });
+      }
+      const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO timetable_entries (className, dayOfWeek, period, subject, teacherId, teacherName, room, branchId, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(className, dayOfWeek, period) DO UPDATE SET
+           subject=excluded.subject, teacherId=excluded.teacherId, teacherName=excluded.teacherName,
+           room=excluded.room, branchId=excluded.branchId, updatedAt=excluded.updatedAt`,
+        body.className, body.dayOfWeek, body.period, body.subject || '', body.teacherId || null, body.teacherName || null,
+        body.room || '', branchId, now, now
+      );
+      const row = await db.get(
+        'SELECT * FROM timetable_entries WHERE className = ? AND dayOfWeek = ? AND period = ?',
+        body.className, body.dayOfWeek, body.period
+      );
+      res.status(201).json(row);
+    } catch (err) {
+      console.error('Save timetable entry error:', err);
+      res.status(500).json({ error: 'Failed to save timetable entry' });
+    }
+  });
+
+  app.delete('/api/timetable/:id', async (req, res) => {
+    try {
+      await db.run('DELETE FROM timetable_entries WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Delete timetable entry error:', err);
+      res.status(500).json({ error: 'Failed to delete timetable entry' });
     }
   });
 
