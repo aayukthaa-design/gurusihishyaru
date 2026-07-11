@@ -1,4 +1,5 @@
 import { createStore, useStoreValue } from './store';
+import { apiFetch } from './apiClient';
 
 export interface TeacherRecord {
   id: string;
@@ -42,36 +43,49 @@ interface TeacherFormPayload {
   profilePhoto?: string;
 }
 
-const STORAGE_KEY = 'guru-shishyaru-teachers';
-
-const today = new Date();
-
-// Start with no demo teachers - keep teacher list empty until real data is imported
-const seedTeachers: TeacherRecord[] = [];
-
-function readTeachers(): TeacherRecord[] {
-  if (typeof window === 'undefined') return seedTeachers;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return seedTeachers;
-    const parsed = JSON.parse(raw) as TeacherRecord[];
-    if (!Array.isArray(parsed) || parsed.length === 0) return seedTeachers;
-    return parsed;
-  } catch {
-    return seedTeachers;
-  }
+function mapApiTeacher(row: any): TeacherRecord {
+  return {
+    id: row.id,
+    employeeId: row.id,
+    fullName: `${row.firstName || ''} ${row.lastName || ''}`.trim(),
+    gender: row.gender || '',
+    dob: row.dob || '',
+    phone: row.mobile || row.phone || '',
+    email: row.email || '',
+    address: row.address || '',
+    qualification: row.qualification || '',
+    experience: row.experience || '',
+    specialization: row.specialization || row.subjects || '',
+    branchId: row.branchId || '',
+    dateOfJoining: row.dateOfJoining || '',
+    username: row.email || row.mobile || '',
+    password: '',
+    employmentType: row.employmentType || '',
+    status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+    profilePhoto: row.profilePhoto || '',
+    role: 'teacher',
+  };
 }
 
-function persistTeachers(teachers: TeacherRecord[]) {
-  if (typeof window === 'undefined') return;
+const teacherStore = createStore<TeacherRecord[]>([]);
+
+export async function refreshTeachers(branchId?: string): Promise<TeacherRecord[]> {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(teachers));
-  } catch {
-    // ignore
+    const res = await apiFetch(`/api/teachers${branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''}`);
+    if (res.ok) {
+      const data = await res.json();
+      const mapped = Array.isArray(data) ? data.map(mapApiTeacher) : [];
+      teacherStore.setState(mapped);
+      return mapped;
+    }
+  } catch (err) {
+    console.error('Failed to fetch teachers:', err);
   }
+  return teacherStore.getState();
 }
 
-const teacherStore = createStore<TeacherRecord[]>(readTeachers());
+// Initial load
+void refreshTeachers();
 
 export function getTeachers(): TeacherRecord[] {
   return teacherStore.getState();
@@ -81,89 +95,75 @@ export function useTeachers() {
   return useStoreValue(teacherStore);
 }
 
-function generateEmployeeId(existing: TeacherRecord[]) {
-  const next = existing.length + 1;
-  return `EMP${String(next).padStart(3, '0')}`;
+function splitName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/);
+  return { firstName: parts[0] || '', lastName: parts.slice(1).join(' ') };
 }
 
-function generateTeacherId(existing: TeacherRecord[]) {
-  const next = existing.length + 1;
-  return `TCH${String(next).padStart(3, '0')}`;
-}
-
-function isEmailTaken(email: string, existing: TeacherRecord[], ignoreId?: string) {
-  return existing.some((teacher) => teacher.email.toLowerCase() === email.toLowerCase() && teacher.id !== ignoreId);
-}
-
-function isUsernameTaken(username: string, existing: TeacherRecord[], ignoreId?: string) {
-  return existing.some((teacher) => teacher.username.toLowerCase() === username.toLowerCase() && teacher.id !== ignoreId);
-}
-
-function isPhoneTaken(phone: string, existing: TeacherRecord[], ignoreId?: string) {
-  return existing.some((teacher) => teacher.phone === phone && teacher.id !== ignoreId);
-}
-
-function normalizeTeacher(input: TeacherFormPayload, branchId: string, existing: TeacherRecord[], id?: string): TeacherRecord {
-  const employeeId = input.employeeId || generateEmployeeId(existing);
-  const teacherId = id || generateTeacherId(existing);
-  return {
-    id: teacherId,
-    employeeId,
-    fullName: input.fullName.trim(),
-    gender: input.gender,
-    dob: input.dob,
-    phone: input.phone,
-    email: input.email.trim(),
-    address: input.address.trim(),
-    qualification: input.qualification.trim(),
-    experience: input.experience.trim(),
-    specialization: input.specialization.trim(),
-    branchId,
-    dateOfJoining: input.dateOfJoining,
-    username: input.username.trim(),
-    password: input.password,
-    employmentType: input.employmentType,
-    status: input.status,
-    profilePhoto: input.profilePhoto,
-    role: 'teacher',
-  };
-}
-
-export function addTeacher(input: TeacherFormPayload, branchId: string) {
-  const existing = teacherStore.getState();
+export async function addTeacher(input: TeacherFormPayload, branchId: string): Promise<{ success: boolean; error?: string; teacher?: TeacherRecord }> {
   if (!input.fullName.trim()) return { success: false, error: 'Full name is required.' };
-  if (!input.email.trim()) return { success: false, error: 'Email is required.' };
-  if (!input.username.trim()) return { success: false, error: 'Username is required.' };
   if (!input.phone.trim()) return { success: false, error: 'Phone number is required.' };
-  if (!input.password || input.password !== input.confirmPassword) return { success: false, error: 'Passwords do not match.' };
-  if (isEmailTaken(input.email, existing)) return { success: false, error: 'Email is already in use.' };
-  if (isUsernameTaken(input.username, existing)) return { success: false, error: 'Username is already in use.' };
   if (!/^\d{10}$/.test(input.phone.replace(/\D/g, ''))) return { success: false, error: 'Phone number must be 10 digits.' };
-  if (isPhoneTaken(input.phone, existing)) return { success: false, error: 'Phone number is already in use.' };
+  if (input.password && input.password !== input.confirmPassword) return { success: false, error: 'Passwords do not match.' };
 
-  const teacher = normalizeTeacher(input, branchId, existing);
-  const next = [teacher, ...existing];
-  teacherStore.setState(next);
-  persistTeachers(next);
-  return { success: true, teacher };
+  const { firstName, lastName } = splitName(input.fullName);
+  try {
+    const res = await apiFetch('/api/teachers', {
+      method: 'POST',
+      body: {
+        firstName, lastName, fullName: input.fullName.trim(),
+        gender: input.gender, dob: input.dob, phone: input.phone, mobile: input.phone,
+        email: input.email.trim(), address: input.address.trim(),
+        qualification: input.qualification.trim(), experience: input.experience.trim(),
+        specialization: input.specialization.trim(), branchId,
+        dateOfJoining: input.dateOfJoining, password: input.password || undefined,
+        employmentType: input.employmentType, status: input.status, profilePhoto: input.profilePhoto,
+      },
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { success: false, error: data.error || 'Unable to create teacher.' };
+    }
+    const created = mapApiTeacher(await res.json());
+    await refreshTeachers();
+    return { success: true, teacher: created };
+  } catch (err) {
+    console.error('addTeacher error:', err);
+    return { success: false, error: 'Connection to server failed.' };
+  }
 }
 
-export function updateTeacher(id: string, input: TeacherFormPayload, branchId: string) {
-  const existing = teacherStore.getState();
+export async function updateTeacher(id: string, input: TeacherFormPayload, branchId: string): Promise<{ success: boolean; error?: string; teacher?: TeacherRecord }> {
   if (!input.fullName.trim()) return { success: false, error: 'Full name is required.' };
-  if (!input.email.trim()) return { success: false, error: 'Email is required.' };
-  if (!input.username.trim()) return { success: false, error: 'Username is required.' };
   if (!input.phone.trim()) return { success: false, error: 'Phone number is required.' };
-  if (!input.password || input.password !== input.confirmPassword) return { success: false, error: 'Passwords do not match.' };
-  if (isEmailTaken(input.email, existing, id)) return { success: false, error: 'Email is already in use.' };
-  if (isUsernameTaken(input.username, existing, id)) return { success: false, error: 'Username is already in use.' };
   if (!/^\d{10}$/.test(input.phone.replace(/\D/g, ''))) return { success: false, error: 'Phone number must be 10 digits.' };
-  if (isPhoneTaken(input.phone, existing, id)) return { success: false, error: 'Phone number is already in use.' };
+  if (input.password && input.password !== input.confirmPassword) return { success: false, error: 'Passwords do not match.' };
 
-  const next = existing.map((teacher) => teacher.id === id ? normalizeTeacher(input, branchId, existing, id) : teacher);
-  teacherStore.setState(next);
-  persistTeachers(next);
-  return { success: true, teacher: next.find((teacher) => teacher.id === id) };
+  const { firstName, lastName } = splitName(input.fullName);
+  try {
+    const res = await apiFetch(`/api/teachers/${id}`, {
+      method: 'PUT',
+      body: {
+        firstName, lastName, fullName: input.fullName.trim(),
+        gender: input.gender, dob: input.dob, phone: input.phone, mobile: input.phone,
+        email: input.email.trim(), address: input.address.trim(),
+        qualification: input.qualification.trim(), experience: input.experience.trim(),
+        specialization: input.specialization.trim(), branchId,
+        dateOfJoining: input.dateOfJoining, password: input.password || undefined,
+        employmentType: input.employmentType, status: input.status, profilePhoto: input.profilePhoto,
+      },
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { success: false, error: data.error || 'Unable to update teacher.' };
+    }
+    const updated = mapApiTeacher(await res.json());
+    await refreshTeachers();
+    return { success: true, teacher: updated };
+  } catch (err) {
+    console.error('updateTeacher error:', err);
+    return { success: false, error: 'Connection to server failed.' };
+  }
 }
 
 export function getTeachersForBranch(branchId?: string) {

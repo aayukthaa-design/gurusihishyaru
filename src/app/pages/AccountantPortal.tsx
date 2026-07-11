@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router';
-import { SEED_TEACHERS, Teacher, getTeacherProfiles } from './TeacherManagement';
+import { SEED_TEACHERS, Teacher, useTeacherProfiles } from './TeacherManagement';
 import { generateSalarySlip, generateSalarySlipData } from '../lib/reportExport';
 import { archiveSalarySlip, buildSalarySnapshot, calculateSalaryFromClasses, getSalaryPerClassRecord, getSalaryRecordsForView, getSalarySlipArchive, getTeacherAttendanceHistory, markSalaryPaid, unlockSalary, type AttendanceSummary, type SalaryPerClassRecord, type SalaryRecord, type SalarySlipArchive, type SalaryStatus, upsertSalaryRecord } from '../lib/teacherSalaryService';
 import { Header } from '../components/Header';
@@ -117,7 +117,7 @@ export function AccountantPortal() {
   const [allocations, setAllocations] = useState<AllocationRecord[]>([]);
   const [reports, setReports] = useState<MonthlyReport[]>([]);
   const [loading, setLoading] = useState(false);
-  const teacherProfiles = useMemo(() => getTeacherProfiles(), []);
+  const teacherProfiles = useTeacherProfiles();
   const [salaryMonth, setSalaryMonth] = useState(new Date().toISOString().slice(0, 7));
   const [salaryBranchFilter, setSalaryBranchFilter] = useState(isSuperAdmin ? '' : myBranchId);
   const [salaryTeacherFilter, setSalaryTeacherFilter] = useState('');

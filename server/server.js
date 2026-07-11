@@ -752,7 +752,69 @@ async function initDb() {
       createdAt TEXT,
       updatedAt TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS teacher_profiles (
+      id TEXT PRIMARY KEY,
+      qualification TEXT,
+      experience TEXT,
+      subjects TEXT,
+      department TEXT,
+      salaryType TEXT DEFAULT 'Monthly Fixed',
+      salaryAmount REAL DEFAULT 0,
+      monthlySalary REAL,
+      salaryPerClass REAL,
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS admissions (
+      id TEXT PRIMARY KEY,
+      applicantName TEXT NOT NULL,
+      grade TEXT,
+      appliedDate TEXT,
+      contactNumber TEXT,
+      email TEXT,
+      branchId TEXT,
+      status TEXT DEFAULT 'Enquiry',
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS teacher_tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT,
+      teacherId TEXT,
+      teacherName TEXT,
+      branchId TEXT,
+      priority TEXT DEFAULT 'medium',
+      dueDate TEXT,
+      dueTime TEXT,
+      relatedClass TEXT,
+      relatedSubject TEXT,
+      attachmentUrl TEXT,
+      status TEXT DEFAULT 'pending',
+      progress INTEGER DEFAULT 0,
+      completionRemarks TEXT,
+      createdAt TEXT,
+      updatedAt TEXT
+    );
   `);
+
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN branchId TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN status TEXT DEFAULT 'Assigned';"); } catch(e) {}
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN students INTEGER DEFAULT 0;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN weeklyHours INTEGER DEFAULT 0;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN teacherName TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN createdAt TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN updatedAt TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN gender TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN dob TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN address TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN employmentType TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN profilePhoto TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN dateOfJoining TEXT;"); } catch(e) {}
+  try { await db.exec("DELETE FROM allocations WHERE teacherId IN ('teacher_1','teacher_2','teacher_3','teacher_4');"); } catch(e) {}
 
   // Seed default SMS settings
 
@@ -1121,6 +1183,167 @@ async function main() {
     }
   });
 
+  // ─── Teachers CRUD (users with role=teacher + HR profile extension) ───────
+
+  const TEACHER_PROFILE_COLUMNS = ['qualification', 'experience', 'subjects', 'department', 'salaryType', 'salaryAmount', 'monthlySalary', 'salaryPerClass', 'gender', 'dob', 'address', 'employmentType', 'profilePhoto', 'dateOfJoining'];
+  const TEACHER_JOIN_SELECT = `SELECT u.*, ${TEACHER_PROFILE_COLUMNS.map((c) => `tp.${c}`).join(', ')} FROM users u LEFT JOIN teacher_profiles tp ON tp.id = u.id`;
+
+  function mapTeacherRow(row) {
+    const roles = parseJsonList(row.roles);
+    const nameParts = String(row.name || '').trim().split(/\s+/);
+    return {
+      id: row.id,
+      firstName: nameParts[0] || row.name || '',
+      lastName: nameParts.slice(1).join(' ') || '',
+      mobile: row.mobile,
+      phone: row.mobile,
+      email: row.email || '',
+      branchId: row.branchId || undefined,
+      status: row.status,
+      roles,
+      qualification: row.qualification || '',
+      experience: row.experience || '',
+      subjects: row.subjects || '',
+      specialization: row.subjects || '',
+      department: row.department || '',
+      salaryType: row.salaryType || 'Monthly Fixed',
+      salaryAmount: row.salaryAmount || 0,
+      monthlySalary: row.monthlySalary ?? null,
+      salaryPerClass: row.salaryPerClass ?? null,
+      gender: row.gender || '',
+      dob: row.dob || '',
+      address: row.address || '',
+      employmentType: row.employmentType || '',
+      profilePhoto: row.profilePhoto || '',
+      dateOfJoining: row.dateOfJoining || '',
+      createdAt: row.createdAt,
+    };
+  }
+
+  app.get('/api/teachers', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = `${TEACHER_JOIN_SELECT} WHERE u.roles LIKE '%teacher%'`;
+      const params = [];
+      if (branchId) { query += ' AND u.branchId = ?'; params.push(branchId); }
+      query += ' ORDER BY u.name';
+      const rows = await db.all(query, ...params);
+      res.json(rows.map(mapTeacherRow));
+    } catch (err) {
+      console.error('List teachers error:', err);
+      res.status(500).json({ error: 'Failed to load teachers' });
+    }
+  });
+
+  app.post('/api/teachers', async (req, res) => {
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const body = req.body || {};
+      const mobile = body.mobile || body.phone;
+      if (!body.firstName || !mobile) {
+        return res.status(400).json({ error: 'First name and phone/mobile are required' });
+      }
+      const name = body.fullName || `${body.firstName} ${body.lastName || ''}`.trim();
+      const id = `USR${Date.now()}`;
+      const initialPassword = body.password || mobile;
+      const passwordHash = await bcrypt.hash(initialPassword, BCRYPT_ROUNDS);
+      const now = new Date().toISOString();
+      const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
+      await db.run(
+        `INSERT INTO users (id, name, email, mobile, passwordHash, roles, branchId, status, mustChangePassword, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        id, name, body.email || null, mobile, passwordHash, JSON.stringify(['teacher']), branchId, body.status || 'Active', now, now
+      );
+      await db.run(
+        `INSERT INTO teacher_profiles (id, qualification, experience, subjects, department, salaryType, salaryAmount, monthlySalary, salaryPerClass, gender, dob, address, employmentType, profilePhoto, dateOfJoining, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        id, body.qualification || '', body.experience || '', body.subjects || body.specialization || '', body.department || '',
+        body.salaryType || 'Monthly Fixed', Number(body.salaryAmount || 0),
+        body.monthlySalary !== undefined && body.monthlySalary !== '' ? Number(body.monthlySalary) : null,
+        body.salaryPerClass !== undefined && body.salaryPerClass !== '' ? Number(body.salaryPerClass) : null,
+        body.gender || '', body.dob || '', body.address || '', body.employmentType || '', body.profilePhoto || '', body.dateOfJoining || '',
+        now, now
+      );
+      const row = await db.get(`${TEACHER_JOIN_SELECT} WHERE u.id = ?`, id);
+      res.status(201).json(mapTeacherRow(row));
+    } catch (err) {
+      console.error('Create teacher error:', err);
+      if (String(err.message || '').includes('UNIQUE')) {
+        return res.status(409).json({ error: 'A user with this email or mobile already exists' });
+      }
+      res.status(500).json({ error: 'Failed to create teacher' });
+    }
+  });
+
+  app.put('/api/teachers/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM users WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Teacher not found' });
+      const body = req.body || {};
+      const name = body.fullName || (body.firstName ? `${body.firstName} ${body.lastName || ''}`.trim() : existing.name);
+      const email = body.email ?? existing.email;
+      const mobile = body.mobile ?? body.phone ?? existing.mobile;
+      const branchId = resolveBranchId(req, body.branchId) ?? existing.branchId;
+      const status = body.status ?? existing.status;
+      const now = new Date().toISOString();
+      await db.run(
+        `UPDATE users SET name=?, email=?, mobile=?, branchId=?, status=?, updatedAt=? WHERE id=?`,
+        name, email, mobile, branchId, status, now, req.params.id
+      );
+      const existingProfile = await db.get('SELECT * FROM teacher_profiles WHERE id = ?', req.params.id);
+      const merged = {
+        qualification: body.qualification ?? existingProfile?.qualification ?? '',
+        experience: body.experience ?? existingProfile?.experience ?? '',
+        subjects: body.subjects ?? body.specialization ?? existingProfile?.subjects ?? '',
+        department: body.department ?? existingProfile?.department ?? '',
+        salaryType: body.salaryType ?? existingProfile?.salaryType ?? 'Monthly Fixed',
+        salaryAmount: body.salaryAmount !== undefined ? Number(body.salaryAmount) : (existingProfile?.salaryAmount ?? 0),
+        monthlySalary: body.monthlySalary !== undefined ? Number(body.monthlySalary) : (existingProfile?.monthlySalary ?? null),
+        salaryPerClass: body.salaryPerClass !== undefined ? Number(body.salaryPerClass) : (existingProfile?.salaryPerClass ?? null),
+        gender: body.gender ?? existingProfile?.gender ?? '',
+        dob: body.dob ?? existingProfile?.dob ?? '',
+        address: body.address ?? existingProfile?.address ?? '',
+        employmentType: body.employmentType ?? existingProfile?.employmentType ?? '',
+        profilePhoto: body.profilePhoto ?? existingProfile?.profilePhoto ?? '',
+        dateOfJoining: body.dateOfJoining ?? existingProfile?.dateOfJoining ?? '',
+      };
+      if (existingProfile) {
+        await db.run(
+          `UPDATE teacher_profiles SET qualification=?, experience=?, subjects=?, department=?, salaryType=?, salaryAmount=?, monthlySalary=?, salaryPerClass=?, gender=?, dob=?, address=?, employmentType=?, profilePhoto=?, dateOfJoining=?, updatedAt=? WHERE id=?`,
+          merged.qualification, merged.experience, merged.subjects, merged.department, merged.salaryType, merged.salaryAmount, merged.monthlySalary, merged.salaryPerClass,
+          merged.gender, merged.dob, merged.address, merged.employmentType, merged.profilePhoto, merged.dateOfJoining, now, req.params.id
+        );
+      } else {
+        await db.run(
+          `INSERT INTO teacher_profiles (id, qualification, experience, subjects, department, salaryType, salaryAmount, monthlySalary, salaryPerClass, gender, dob, address, employmentType, profilePhoto, dateOfJoining, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          req.params.id, merged.qualification, merged.experience, merged.subjects, merged.department, merged.salaryType, merged.salaryAmount, merged.monthlySalary, merged.salaryPerClass,
+          merged.gender, merged.dob, merged.address, merged.employmentType, merged.profilePhoto, merged.dateOfJoining, now, now
+        );
+      }
+      if (body.password) {
+        const passwordHash = await bcrypt.hash(body.password, BCRYPT_ROUNDS);
+        await db.run('UPDATE users SET passwordHash=?, mustChangePassword=0 WHERE id=?', passwordHash, req.params.id);
+      }
+      const row = await db.get(`${TEACHER_JOIN_SELECT} WHERE u.id = ?`, req.params.id);
+      res.json(mapTeacherRow(row));
+    } catch (err) {
+      console.error('Update teacher error:', err);
+      res.status(500).json({ error: 'Failed to update teacher' });
+    }
+  });
+
+  app.delete('/api/teachers/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      await db.run(`UPDATE users SET status='Inactive', updatedAt=? WHERE id=?`, new Date().toISOString(), req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Deactivate teacher error:', err);
+      res.status(500).json({ error: 'Failed to deactivate teacher' });
+    }
+  });
+
   app.post('/api/exams', upload.single('attachment'), async (req, res) => {
     try {
       const body = req.body;
@@ -1161,6 +1384,233 @@ async function main() {
       };
     }
     res.json({ classes, allocations: mapped });
+  });
+
+  app.get('/api/allocations/all', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = `SELECT a.*, u.name as resolvedTeacherName FROM allocations a LEFT JOIN users u ON u.id = a.teacherId WHERE 1=1`;
+      const params = [];
+      if (branchId) { query += ' AND a.branchId = ?'; params.push(branchId); }
+      query += ' ORDER BY a.createdAt DESC';
+      const rows = await db.all(query, ...params);
+      res.json(rows.map(r => ({
+        id: String(r.id),
+        teacherId: r.teacherId,
+        teacherName: r.resolvedTeacherName || r.teacherName || '',
+        class: r.className,
+        subject: r.subject,
+        batch: r.batch,
+        branchId: r.branchId,
+        students: r.students || 0,
+        weeklyHours: r.weeklyHours || 0,
+        status: r.status || 'Assigned',
+      })));
+    } catch (err) {
+      console.error('List allocations error:', err);
+      res.status(500).json({ error: 'Failed to load allocations' });
+    }
+  });
+
+  app.post('/api/allocations', async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (!body.teacherId || !body.class || !body.subject) {
+        return res.status(400).json({ error: 'teacherId, class and subject are required' });
+      }
+      const teacher = await db.get('SELECT name FROM users WHERE id = ?', body.teacherId);
+      const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
+      const now = new Date().toISOString();
+      const result = await db.run(
+        `INSERT INTO allocations (teacherId, teacherName, className, subject, batch, branchId, students, weeklyHours, status, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        body.teacherId, teacher?.name || '', body.class, body.subject, body.batch || '', branchId,
+        Number(body.students || 0), Number(body.weeklyHours || 0), body.status || 'Assigned', now, now
+      );
+      const row = await db.get('SELECT * FROM allocations WHERE id = ?', result.lastID);
+      res.status(201).json({
+        id: String(row.id), teacherId: row.teacherId, teacherName: row.teacherName,
+        class: row.className, subject: row.subject, batch: row.batch, branchId: row.branchId,
+        students: row.students || 0, weeklyHours: row.weeklyHours || 0, status: row.status,
+      });
+    } catch (err) {
+      console.error('Create allocation error:', err);
+      res.status(500).json({ error: 'Failed to create allocation' });
+    }
+  });
+
+  app.put('/api/allocations/:id', async (req, res) => {
+    try {
+      const existing = await db.get('SELECT * FROM allocations WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Allocation not found' });
+      const body = req.body || {};
+      const teacherId = body.teacherId ?? existing.teacherId;
+      const teacher = teacherId !== existing.teacherId ? await db.get('SELECT name FROM users WHERE id = ?', teacherId) : null;
+      const now = new Date().toISOString();
+      await db.run(
+        `UPDATE allocations SET teacherId=?, teacherName=?, className=?, subject=?, batch=?, students=?, weeklyHours=?, status=?, updatedAt=? WHERE id=?`,
+        teacherId, teacher ? teacher.name : (body.teacherName ?? existing.teacherName),
+        body.class ?? existing.className, body.subject ?? existing.subject, body.batch ?? existing.batch,
+        body.students !== undefined ? Number(body.students) : existing.students,
+        body.weeklyHours !== undefined ? Number(body.weeklyHours) : existing.weeklyHours,
+        body.status ?? existing.status, now, req.params.id
+      );
+      const row = await db.get('SELECT * FROM allocations WHERE id = ?', req.params.id);
+      res.json({
+        id: String(row.id), teacherId: row.teacherId, teacherName: row.teacherName,
+        class: row.className, subject: row.subject, batch: row.batch, branchId: row.branchId,
+        students: row.students || 0, weeklyHours: row.weeklyHours || 0, status: row.status,
+      });
+    } catch (err) {
+      console.error('Update allocation error:', err);
+      res.status(500).json({ error: 'Failed to update allocation' });
+    }
+  });
+
+  app.delete('/api/allocations/:id', async (req, res) => {
+    try {
+      await db.run(`UPDATE allocations SET status='Removed', updatedAt=? WHERE id=?`, new Date().toISOString(), req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Remove allocation error:', err);
+      res.status(500).json({ error: 'Failed to remove allocation' });
+    }
+  });
+
+  // ─── Admissions CRM ─────────────────────────────────────────────────────────
+
+  const ADMISSION_WORKFLOW_NEXT = {
+    submit: 'Application Submitted',
+    verify: 'Document Verification',
+    schedule: 'Interview Scheduled',
+    complete: 'Interview Completed',
+    approve: 'Approved',
+    enroll: 'Enrolled',
+    reject: 'Rejected',
+  };
+
+  app.get('/api/admissions', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM admissions WHERE 1=1';
+      const params = [];
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      query += ' ORDER BY createdAt DESC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error('List admissions error:', err);
+      res.status(500).json({ error: 'Failed to load admissions' });
+    }
+  });
+
+  app.post('/api/admissions', async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (!body.applicantName) return res.status(400).json({ error: 'Applicant name is required' });
+      const id = `ADM${Date.now()}`;
+      const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO admissions (id, applicantName, grade, appliedDate, contactNumber, email, branchId, status, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,'Enquiry',?,?)`,
+        id, body.applicantName, body.grade || '', body.appliedDate || now.slice(0, 10), body.contactNumber || '', body.email || '', branchId, now, now
+      );
+      const row = await db.get('SELECT * FROM admissions WHERE id = ?', id);
+      res.status(201).json(row);
+    } catch (err) {
+      console.error('Create admission error:', err);
+      res.status(500).json({ error: 'Failed to create admission' });
+    }
+  });
+
+  app.patch('/api/admissions/:id/action', async (req, res) => {
+    try {
+      const action = String(req.body?.action || '');
+      const nextStatus = ADMISSION_WORKFLOW_NEXT[action];
+      if (!nextStatus) return res.status(400).json({ error: 'Unknown workflow action' });
+      const existing = await db.get('SELECT * FROM admissions WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Admission not found' });
+      await db.run('UPDATE admissions SET status=?, updatedAt=? WHERE id=?', nextStatus, new Date().toISOString(), req.params.id);
+      const row = await db.get('SELECT * FROM admissions WHERE id = ?', req.params.id);
+      res.json(row);
+    } catch (err) {
+      console.error('Admission workflow error:', err);
+      res.status(500).json({ error: 'Failed to update admission' });
+    }
+  });
+
+  // ─── Teacher Tasks ──────────────────────────────────────────────────────────
+
+  app.get('/api/teacher-tasks', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM teacher_tasks WHERE 1=1';
+      const params = [];
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      if (req.query.teacherId) { query += ' AND teacherId = ?'; params.push(req.query.teacherId); }
+      query += ' ORDER BY createdAt DESC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error('List teacher tasks error:', err);
+      res.status(500).json({ error: 'Failed to load tasks' });
+    }
+  });
+
+  app.post('/api/teacher-tasks', async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (!body.title) return res.status(400).json({ error: 'Title is required' });
+      const id = `T${Date.now()}`;
+      const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO teacher_tasks (id, title, description, teacherId, teacherName, branchId, priority, dueDate, dueTime, relatedClass, relatedSubject, attachmentUrl, status, progress, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',0,?,?)`,
+        id, body.title, body.description || '', body.teacherId || null, body.teacherName || null, branchId,
+        body.priority || 'medium', body.dueDate || null, body.dueTime || null, body.relatedClass || null, body.relatedSubject || null,
+        body.attachmentUrl || null, now, now
+      );
+      const row = await db.get('SELECT * FROM teacher_tasks WHERE id = ?', id);
+      res.status(201).json(row);
+    } catch (err) {
+      console.error('Create teacher task error:', err);
+      res.status(500).json({ error: 'Failed to create task' });
+    }
+  });
+
+  app.put('/api/teacher-tasks/:id', async (req, res) => {
+    try {
+      const existing = await db.get('SELECT * FROM teacher_tasks WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Task not found' });
+      const body = req.body || {};
+      const progress = body.progress !== undefined ? Number(body.progress) : existing.progress;
+      const status = body.status ?? (progress >= 100 ? 'completed' : progress > 0 ? 'in-progress' : existing.status);
+      const now = new Date().toISOString();
+      await db.run(
+        `UPDATE teacher_tasks SET title=?, description=?, teacherId=?, teacherName=?, priority=?, dueDate=?, dueTime=?, relatedClass=?, relatedSubject=?, attachmentUrl=?, status=?, progress=?, completionRemarks=?, updatedAt=? WHERE id=?`,
+        body.title ?? existing.title, body.description ?? existing.description, body.teacherId ?? existing.teacherId, body.teacherName ?? existing.teacherName,
+        body.priority ?? existing.priority, body.dueDate ?? existing.dueDate, body.dueTime ?? existing.dueTime,
+        body.relatedClass ?? existing.relatedClass, body.relatedSubject ?? existing.relatedSubject, body.attachmentUrl ?? existing.attachmentUrl,
+        status, progress, body.completionRemarks ?? existing.completionRemarks, now, req.params.id
+      );
+      const row = await db.get('SELECT * FROM teacher_tasks WHERE id = ?', req.params.id);
+      res.json(row);
+    } catch (err) {
+      console.error('Update teacher task error:', err);
+      res.status(500).json({ error: 'Failed to update task' });
+    }
+  });
+
+  app.delete('/api/teacher-tasks/:id', async (req, res) => {
+    try {
+      await db.run('DELETE FROM teacher_tasks WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Delete teacher task error:', err);
+      res.status(500).json({ error: 'Failed to delete task' });
+    }
   });
 
   app.get('/api/school-exam-schedules', async (req, res) => {

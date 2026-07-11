@@ -9,7 +9,7 @@ import { Textarea } from '../components/ui/textarea';
 import { getBranches } from '../lib/branchService';
 import { useAuth } from '../auth/AuthContext';
 import { getTeachersForBranch } from '../lib/teacherService';
-import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, TaskRecord } from '../lib/taskService';
+import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, refreshTasks, TaskRecord } from '../lib/taskService';
 
 export function TeacherTasks() {
   const { user } = useAuth();
@@ -34,6 +34,10 @@ export function TeacherTasks() {
     const unsubscribe = subscribeTasks(() => setTasks(taskService.getTasks()));
     return unsubscribe;
   }, []);
+
+  React.useEffect(() => {
+    void refreshTasks(user?.role === 'super_admin' ? {} : { branchId: user?.branchId, teacherId: user?.role === 'teacher' ? user.id : undefined });
+  }, [user?.role, user?.branchId, user?.id]);
 
   const stats = getTaskStats(tasks);
 

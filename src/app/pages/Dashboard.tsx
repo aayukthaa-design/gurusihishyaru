@@ -573,12 +573,12 @@ export function Dashboard() {
     ];
   }, [branchFilter, isSuperAdmin]);
 
-  const handleTeacherSave = () => {
+  const handleTeacherSave = async () => {
     if (!user?.branchId) {
       setFeedback('Please sign in with an admin branch to create a teacher.');
       return;
     }
-    const result = addTeacher({
+    const result = await addTeacher({
       ...teacherForm,
       confirmPassword: teacherForm.confirmPassword,
       status: teacherForm.status,

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName } from '../lib/branchService';
-import { getTeacherProfiles, type Teacher } from './TeacherManagement';
+import { useTeacherProfiles, type Teacher } from './TeacherManagement';
 import {
   getSalaryPerClassRecord,
   getSalaryRecordForMonth,
@@ -33,7 +33,7 @@ const statusOptions: Array<{ value: TeacherAttendanceStatus | 'all'; label: stri
 export function TeacherAttendance() {
   const { user } = useAuth();
   const branches = getBranches();
-  const teachers = useMemo(() => getTeacherProfiles(), []);
+  const teachers = useTeacherProfiles();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const isReadOnly = user?.role === 'accountant' || user?.role === 'teacher';
 

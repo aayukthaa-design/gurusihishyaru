@@ -1,5 +1,6 @@
 import { addNotification } from './notificationService';
 import { getBranchName } from './branchService';
+import { apiFetch } from './apiClient';
 
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
 
@@ -23,35 +24,33 @@ export interface TaskRecord {
   updatedAt: string;
 }
 
-const STORAGE_KEY = 'guru_teacher_tasks';
-
 let taskState: TaskRecord[] = [];
 const listeners = new Set<() => void>();
-
-function loadTasks(): TaskRecord[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as TaskRecord[];
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch (e) {
-    // ignore
-  }
-  return [];
-}
-
-function persist() {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(taskState));
-}
 
 function emit() {
   listeners.forEach((l) => l());
 }
 
-taskState = loadTasks();
+export async function refreshTasks(params: { branchId?: string; teacherId?: string } = {}): Promise<TaskRecord[]> {
+  try {
+    const query = new URLSearchParams();
+    if (params.branchId) query.set('branchId', params.branchId);
+    if (params.teacherId) query.set('teacherId', params.teacherId);
+    const res = await apiFetch(`/api/teacher-tasks?${query.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      taskState = Array.isArray(data) ? data : [];
+      emit();
+      return taskState;
+    }
+  } catch (err) {
+    console.error('Failed to fetch teacher tasks:', err);
+  }
+  return taskState;
+}
+
+// Initial load
+void refreshTasks();
 
 export function getTasks(): TaskRecord[] {
   return taskState;
@@ -62,44 +61,51 @@ export function subscribeTasks(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function createTask(payload: Omit<TaskRecord, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'progress'>) {
-  const task: TaskRecord = {
-    ...payload,
-    id: `T${String(Date.now())}`,
-    status: 'pending',
-    progress: 0,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  } as TaskRecord;
-  taskState = [task, ...taskState];
-  persist();
-  emit();
+export async function createTask(payload: Omit<TaskRecord, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'progress'>): Promise<TaskRecord | null> {
+  try {
+    const res = await apiFetch('/api/teacher-tasks', { method: 'POST', body: payload });
+    if (!res.ok) return null;
+    const task = await res.json();
+    await refreshTasks();
 
-  // Notify assigned teacher
-  if (task.teacherId) {
-    addNotification({
-      title: 'New Task Assigned',
-      message: `${task.title} has been assigned to you${task.branchId ? ` (${getBranchName(task.branchId)})` : ''}`,
-      type: 'info',
-      teacherIds: [task.teacherId],
-      roles: ['teacher'],
-      branchId: task.branchId ?? null,
-    });
+    if (task.teacherId) {
+      addNotification({
+        title: 'New Task Assigned',
+        message: `${task.title} has been assigned to you${task.branchId ? ` (${getBranchName(task.branchId)})` : ''}`,
+        type: 'info',
+        teacherIds: [task.teacherId],
+        roles: ['teacher'],
+        branchId: task.branchId ?? null,
+      });
+    }
+
+    return task;
+  } catch (err) {
+    console.error('createTask error:', err);
+    return null;
   }
-
-  return task;
 }
 
-export function updateTask(taskId: string, updates: Partial<TaskRecord>) {
-  taskState = taskState.map((t) => (t.id === taskId ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t));
-  persist();
-  emit();
+export async function updateTask(taskId: string, updates: Partial<TaskRecord>): Promise<void> {
+  try {
+    const res = await apiFetch(`/api/teacher-tasks/${taskId}`, { method: 'PUT', body: updates });
+    if (res.ok) {
+      await refreshTasks();
+    }
+  } catch (err) {
+    console.error('updateTask error:', err);
+  }
 }
 
-export function deleteTask(taskId: string) {
-  taskState = taskState.filter((t) => t.id !== taskId);
-  persist();
-  emit();
+export async function deleteTask(taskId: string): Promise<void> {
+  try {
+    const res = await apiFetch(`/api/teacher-tasks/${taskId}`, { method: 'DELETE' });
+    if (res.ok) {
+      await refreshTasks();
+    }
+  } catch (err) {
+    console.error('deleteTask error:', err);
+  }
 }
 
 export function getTasksForTeacher(teacherId?: string, branchId?: string) {
@@ -117,33 +123,35 @@ export function getTaskStats(tasks?: TaskRecord[]) {
 }
 
 export function assignTask(taskId: string, teacherId?: string, teacherName?: string) {
-  updateTask(taskId, { teacherId, teacherName });
-  const task = taskState.find((t) => t.id === taskId);
-  if (task && teacherId) {
-    addNotification({
-      title: 'Task Assigned',
-      message: `${task.title} was assigned to you`,
-      type: 'info',
-      teacherIds: [teacherId],
-      roles: ['teacher'],
-      branchId: task.branchId ?? null,
-    });
-  }
+  void updateTask(taskId, { teacherId, teacherName }).then(() => {
+    const task = taskState.find((t) => t.id === taskId);
+    if (task && teacherId) {
+      addNotification({
+        title: 'Task Assigned',
+        message: `${task.title} was assigned to you`,
+        type: 'info',
+        teacherIds: [teacherId],
+        roles: ['teacher'],
+        branchId: task.branchId ?? null,
+      });
+    }
+  });
 }
 
 export function setTaskProgress(taskId: string, progress: number, remarks?: string) {
   const status = progress >= 100 ? 'completed' : progress > 0 ? 'in-progress' : 'pending';
-  updateTask(taskId, { progress, status, completionRemarks: remarks });
-  const task = taskState.find((t) => t.id === taskId);
-  if (task && status === 'completed') {
-    addNotification({
-      title: 'Task Completed',
-      message: `${task.title} marked completed by ${task.teacherName ?? 'teacher'}`,
-      type: 'success',
-      roles: ['admin', 'super_admin'],
-      branchId: task.branchId ?? null,
-    });
-  }
+  void updateTask(taskId, { progress, status, completionRemarks: remarks }).then(() => {
+    const task = taskState.find((t) => t.id === taskId);
+    if (task && status === 'completed') {
+      addNotification({
+        title: 'Task Completed',
+        message: `${task.title} marked completed by ${task.teacherName ?? 'teacher'}`,
+        type: 'success',
+        roles: ['admin', 'super_admin'],
+        branchId: task.branchId ?? null,
+      });
+    }
+  });
 }
 
 export function exportTasksCSV(tasks?: TaskRecord[]) {

@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { getBranches } from '../lib/branchService';
-import { Edit2, Trash2 } from 'lucide-react';
+import { Edit2, Trash2, Plus } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
 import { addNotification } from '../lib/notificationService';
-import { updateAllocationAPI, removeAllocationAPI } from '../lib/api';
+import { apiFetch } from '../lib/apiClient';
+import { useTeacherProfiles, refreshTeacherProfiles } from './TeacherManagement';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,28 +24,45 @@ export interface Allocation {
   status: 'Assigned' | 'Pending' | 'Removed';
 }
 
-const TEACHERS = [
-  { id: 'TCH001', name: 'Kavitha Rao', subjects: ['Mathematics'] },
-  { id: 'TCH002', name: 'Ramesh Kumar', subjects: ['Physics', 'Chemistry'] },
-  { id: 'TCH003', name: 'Sunita Patil', subjects: ['English'] },
-  { id: 'TCH004', name: 'Mahesh Gowda', subjects: ['Biology'] },
-  { id: 'TCH005', name: 'Anjali Singh', subjects: ['Computer Science'] },
-];
 const CLASSES = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B', '10th C', '11th A', '11th B', '12th A', '12th B'];
 const BATCHES = ['Batch A', 'Batch B', 'Batch C', 'Morning', 'Evening'];
 const ALL_SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];
 
-// No demo allocations - keep allocations empty until real data is imported
-const SEED: Allocation[] = [];
+const EMPTY_FORM = { teacherId: '', teacherName: '', class: CLASSES[0], subject: ALL_SUBJECTS[0], batch: BATCHES[0], students: 0, weeklyHours: 0 };
 
 export function ClassAllocation() {
   const { user } = useAuth();
   const branches = getBranches();
-  const [allocations, setAllocations] = useState<Allocation[]>(SEED);
+  const teachers = useTeacherProfiles();
+  const [allocations, setAllocations] = useState<Allocation[]>([]);
+  const [loading, setLoading] = useState(true);
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [editOpen, setEditOpen] = useState(false);
   const [selected, setSelected] = useState<Allocation | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addForm, setAddForm] = useState(EMPTY_FORM);
   const visibleAllocations = allocations.filter((allocation) => user?.role === 'super_admin' ? (!branchFilter || allocation.branchId === branchFilter) : (!user?.branchId || allocation.branchId === user.branchId));
+
+  const loadAllocations = async () => {
+    setLoading(true);
+    try {
+      const scopedBranch = user?.role === 'super_admin' ? branchFilter : user?.branchId;
+      const res = await apiFetch(`/api/allocations/all${scopedBranch ? `?branchId=${encodeURIComponent(scopedBranch)}` : ''}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAllocations(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error('Failed to load allocations', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadAllocations();
+    void refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+  }, [user?.role, user?.branchId, branchFilter]);
 
   const openEdit = (alloc: Allocation) => {
     setSelected({ ...alloc });
@@ -58,18 +76,21 @@ export function ClassAllocation() {
 
   async function saveChanges() {
     if (!selected) return;
-
-    // Optimistic update of UI
-    setAllocations((prev) => prev.map((a) => (a.id === selected.id ? selected : a)));
-
-    const ok = await updateAllocationAPI(selected);
-      if (ok) {
-        addNotification({ title: 'Allocation Updated', message: `Allocation ${selected.id} updated on server`, type: 'success', classNames: [selected.class], teacherIds: [selected.teacherId], roles: ['teacher'] });
+    try {
+      const res = await apiFetch(`/api/allocations/${selected.id}`, {
+        method: 'PUT',
+        body: { teacherId: selected.teacherId, class: selected.class, subject: selected.subject, batch: selected.batch, students: selected.students, weeklyHours: selected.weeklyHours },
+      });
+      if (res.ok) {
+        await loadAllocations();
+        addNotification({ title: 'Allocation Updated', message: `Allocation for ${selected.teacherName} updated`, type: 'success', classNames: [selected.class], teacherIds: [selected.teacherId], roles: ['teacher'] });
       } else {
-        addNotification({ title: 'Allocation Updated (Local)', message: `Allocation ${selected.id} updated locally (no server)`, type: 'warning', classNames: [selected.class], teacherIds: [selected.teacherId], roles: ['teacher'] });
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to update allocation.');
       }
-      addNotification({ title: `Allocation changed for ${selected.teacherName}`, message: `Your allocation for ${selected.class} - ${selected.subject} (${selected.batch}) was updated.`, type: 'info', classNames: [selected.class], teacherIds: [selected.teacherId], roles: ['teacher'] });
-
+    } catch (err) {
+      console.error(err);
+    }
     setEditOpen(false);
   }
 
@@ -77,18 +98,53 @@ export function ClassAllocation() {
     const ok = confirm('Remove this allocation? This will mark it as Removed.');
     if (!ok) return;
     const removed = allocations.find((a) => a.id === id) || null;
-
-    // Soft-delete: set status to Removed
-    setAllocations((prev) => prev.map((a) => (a.id === id ? { ...a, status: 'Removed' } : a)));
-
-    const backendOk = await removeAllocationAPI(id);
-      if (backendOk) {
-        addNotification({ title: 'Allocation Removed', message: `Allocation ${removed.id} removed on server`, type: 'warning', classNames: [removed.class], teacherIds: [removed.teacherId], roles: ['teacher'] });
-      } else {
-        addNotification({ title: 'Allocation Removed (Local)', message: `Allocation ${removed.id} marked Removed locally`, type: 'warning', classNames: [removed.class], teacherIds: [removed.teacherId], roles: ['teacher'] });
+    try {
+      const res = await apiFetch(`/api/allocations/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        await loadAllocations();
+        if (removed) {
+          addNotification({ title: 'Allocation Removed', message: `Allocation for ${removed.teacherName} removed`, type: 'warning', classNames: [removed.class], teacherIds: [removed.teacherId], roles: ['teacher'] });
+        }
       }
-      if (removed) {
-        addNotification({ title: `Allocation removed for ${removed.teacherName}`, message: `Your allocation for ${removed.class} - ${removed.subject} (${removed.batch}) was removed.`, type: 'info', classNames: [removed.class], teacherIds: [removed.teacherId], roles: ['teacher'] });
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function createAllocation() {
+    if (!addForm.teacherId) {
+      alert('Please select a teacher.');
+      return;
+    }
+    const teacher = teachers.find((t) => t.id === addForm.teacherId);
+    try {
+      const res = await apiFetch('/api/allocations', {
+        method: 'POST',
+        body: {
+          teacherId: addForm.teacherId,
+          class: addForm.class,
+          subject: addForm.subject,
+          batch: addForm.batch,
+          students: addForm.students,
+          weeklyHours: addForm.weeklyHours,
+          branchId: user?.role === 'super_admin' ? (branchFilter || undefined) : user?.branchId,
+        },
+      });
+      if (res.ok) {
+        await loadAllocations();
+        setAddOpen(false);
+        setAddForm(EMPTY_FORM);
+        addNotification({
+          title: 'New Class Allocation',
+          message: `${teacher ? `${teacher.firstName} ${teacher.lastName}` : 'Teacher'} assigned to ${addForm.class} - ${addForm.subject} (${addForm.batch})`,
+          type: 'info', classNames: [addForm.class], teacherIds: [addForm.teacherId], roles: ['teacher'],
+        });
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to create allocation.');
+      }
+    } catch (err) {
+      console.error(err);
     }
   }
 
@@ -101,14 +157,15 @@ export function ClassAllocation() {
         <p className="text-muted-foreground">Assign and manage teachers for classes, subjects and batches.</p>
       </div>
 
-      {user?.role === 'super_admin' && (
-        <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {user?.role === 'super_admin' ? (
           <select value={branchFilter} onChange={(event) => setBranchFilter(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none">
             <option value="">All Branches</option>
             {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
           </select>
-        </div>
-      )}
+        ) : <div />}
+        <Button onClick={() => setAddOpen(true)}><Plus className="mr-2 h-4 w-4" />New Allocation</Button>
+      </div>
 
       <div className="rounded-2xl border border-border bg-card shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-border">
@@ -162,6 +219,9 @@ export function ClassAllocation() {
                   </td>
                 </tr>
               ))}
+              {!loading && visibleAllocations.length === 0 && (
+                <tr><td colSpan={8} className="px-5 py-10 text-center text-sm text-muted-foreground">No class allocations yet. Click "New Allocation" to assign a teacher to a class.</td></tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -179,12 +239,12 @@ export function ClassAllocation() {
                 <label className="block text-sm font-medium">Teacher</label>
                 <select className="w-full border rounded px-2 py-1" value={selected.teacherId} onChange={(e) => {
                   const id = e.target.value;
-                  const t = TEACHERS.find((x) => x.id === id);
+                  const t = teachers.find((x) => x.id === id);
                   handleChange('teacherId', id);
-                  handleChange('teacherName', t ? t.name : '');
+                  handleChange('teacherName', t ? `${t.firstName} ${t.lastName}` : '');
                 }}>
-                  {TEACHERS.map((t) => (
-                    <option key={t.id} value={t.id}>{t.name}</option>
+                  {teachers.map((t) => (
+                    <option key={t.id} value={t.id}>{t.firstName} {t.lastName}</option>
                   ))}
                 </select>
               </div>
@@ -215,6 +275,17 @@ export function ClassAllocation() {
                   ))}
                 </select>
               </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium">Students</label>
+                  <input type="number" className="w-full border rounded px-2 py-1" value={selected.students} onChange={(e) => handleChange('students', Number(e.target.value))} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Weekly Hours</label>
+                  <input type="number" className="w-full border rounded px-2 py-1" value={selected.weeklyHours} onChange={(e) => handleChange('weeklyHours', Number(e.target.value))} />
+                </div>
+              </div>
             </div>
           )}
 
@@ -222,6 +293,65 @@ export function ClassAllocation() {
             <div className="flex gap-2">
               <Button variant="ghost" onClick={() => setEditOpen(false)}>Cancel</Button>
               <Button onClick={saveChanges}>Save Changes</Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>New Class Allocation</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 mt-2">
+            <div>
+              <label className="block text-sm font-medium">Teacher</label>
+              <select className="w-full border rounded px-2 py-1" value={addForm.teacherId} onChange={(e) => setAddForm((p) => ({ ...p, teacherId: e.target.value }))}>
+                <option value="">Select teacher…</option>
+                {teachers.map((t) => (
+                  <option key={t.id} value={t.id}>{t.firstName} {t.lastName}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium">Class</label>
+              <select className="w-full border rounded px-2 py-1" value={addForm.class} onChange={(e) => setAddForm((p) => ({ ...p, class: e.target.value }))}>
+                {CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium">Subject</label>
+              <select className="w-full border rounded px-2 py-1" value={addForm.subject} onChange={(e) => setAddForm((p) => ({ ...p, subject: e.target.value }))}>
+                {ALL_SUBJECTS.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium">Batch</label>
+              <select className="w-full border rounded px-2 py-1" value={addForm.batch} onChange={(e) => setAddForm((p) => ({ ...p, batch: e.target.value }))}>
+                {BATCHES.map((b) => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium">Students</label>
+                <input type="number" className="w-full border rounded px-2 py-1" value={addForm.students} onChange={(e) => setAddForm((p) => ({ ...p, students: Number(e.target.value) }))} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Weekly Hours</label>
+                <input type="number" className="w-full border rounded px-2 py-1" value={addForm.weeklyHours} onChange={(e) => setAddForm((p) => ({ ...p, weeklyHours: Number(e.target.value) }))} />
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => setAddOpen(false)}>Cancel</Button>
+              <Button onClick={createAllocation}>Create Allocation</Button>
             </div>
           </DialogFooter>
         </DialogContent>

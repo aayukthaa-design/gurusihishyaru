@@ -6,6 +6,8 @@ import {
   BookOpen, Plus, Search, Eye, Edit2, ChevronRight, X,
   Phone, Mail, Award, GraduationCap,
 } from 'lucide-react';
+import { apiFetch } from '../lib/apiClient';
+import { createStore, useStoreValue } from '../lib/store';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,29 +32,35 @@ export interface Teacher {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Geography', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];
-const STORAGE_KEY = 'guru-shishyaru-teachers';
 
 export const SEED_TEACHERS: Teacher[] = [];
 
-export function getTeacherProfiles(): Teacher[] {
-  if (typeof window === 'undefined') return SEED_TEACHERS;
+const teacherProfileStore = createStore<Teacher[]>(SEED_TEACHERS);
+
+export async function refreshTeacherProfiles(branchId?: string): Promise<Teacher[]> {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return SEED_TEACHERS;
-    const parsed = JSON.parse(raw) as Teacher[];
-    return Array.isArray(parsed) && parsed.length ? parsed : SEED_TEACHERS;
-  } catch {
-    return SEED_TEACHERS;
+    const res = await apiFetch(`/api/teachers${branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''}`);
+    if (res.ok) {
+      const data = await res.json();
+      const mapped = Array.isArray(data) ? data : [];
+      teacherProfileStore.setState(mapped);
+      return mapped;
+    }
+  } catch (err) {
+    console.error('Failed to fetch teacher profiles:', err);
   }
+  return teacherProfileStore.getState();
 }
 
-function persistTeacherProfiles(teachers: Teacher[]) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(teachers));
-  } catch {
-    // Ignore persistence errors
-  }
+// Initial load
+void refreshTeacherProfiles();
+
+export function getTeacherProfiles(): Teacher[] {
+  return teacherProfileStore.getState();
+}
+
+export function useTeacherProfiles(): Teacher[] {
+  return useStoreValue(teacherProfileStore);
 }
 
 const EMPTY: Omit<Teacher, 'id'> = {
@@ -73,6 +81,7 @@ function TeacherForm({
   branchOptions: Array<{ id: string; name: string }>;
   defaultBranchId?: string;
 }) {
+  const { user } = useAuth();
   const [form, setForm] = useState(initial);
   useEffect(() => {
     setForm(initial);
@@ -256,41 +265,52 @@ function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () =>
 export function TeacherManagement() {
   const { user } = useAuth();
   const branches = getBranches();
-  const [teachers, setTeachers] = useState<Teacher[]>(() => getTeacherProfiles());
+  const teachers = useTeacherProfiles();
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [panel, setPanel] = useState<'none' | 'add' | { type: 'edit' | 'view'; id: string }>('none');
+  const [formError, setFormError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+  }, [user?.role, user?.branchId, branchFilter]);
 
   const filtered = filterByBranch(teachers, user, branchFilter).filter((teacher) => {
     const matchesSearch = `${teacher.firstName} ${teacher.lastName} ${teacher.subjects} ${teacher.email}`.toLowerCase().includes(search.toLowerCase());
     return matchesSearch;
   });
 
-  const normalizeTeacher = (data: Omit<Teacher, 'id'>, id: string, branchId?: string): Teacher => ({
-    ...data,
-    id,
-    branchId: branchId || data.branchId || '',
-    department: data.department || '',
-    monthlySalary: data.monthlySalary ?? data.salaryAmount ?? 0,
-    salaryPerClass: data.salaryPerClass ?? 0,
-    salaryAmount: data.salaryType === 'Per Class' ? (data.salaryPerClass ?? data.salaryAmount ?? 0) : (data.monthlySalary ?? data.salaryAmount ?? 0),
-  });
-
-  const handleAdd = (data: Omit<Teacher, 'id'>) => {
+  const handleAdd = async (data: Omit<Teacher, 'id'>) => {
+    if (!data.firstName.trim() || !data.mobile.trim()) {
+      setFormError('First name and mobile are required.');
+      return;
+    }
     const resolvedBranchId = data.branchId || user?.branchId || branchFilter || undefined;
-    setTeachers((current) => {
-      const next = [{ id: `TCH${String(current.length + 1).padStart(3, '0')}`, ...normalizeTeacher(data, `TCH${String(current.length + 1).padStart(3, '0')}`, resolvedBranchId) }, ...current];
-      persistTeacherProfiles(next);
-      return next;
+    const res = await apiFetch('/api/teachers', {
+      method: 'POST',
+      body: { ...data, branchId: resolvedBranchId },
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setFormError(err.error || 'Unable to create teacher.');
+      return;
+    }
+    setFormError(null);
+    await refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
     setPanel('none');
   };
-  const handleEdit = (id: string, data: Omit<Teacher, 'id'>) => {
-    setTeachers((current) => {
-      const next = current.map((teacher) => teacher.id === id ? normalizeTeacher(data, teacher.id, data.branchId || teacher.branchId) : teacher);
-      persistTeacherProfiles(next);
-      return next;
+  const handleEdit = async (id: string, data: Omit<Teacher, 'id'>) => {
+    const res = await apiFetch(`/api/teachers/${id}`, {
+      method: 'PUT',
+      body: data,
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setFormError(err.error || 'Unable to update teacher.');
+      return;
+    }
+    setFormError(null);
+    await refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
     setPanel('none');
   };
 
@@ -321,8 +341,11 @@ export function TeacherManagement() {
         </div>
 
         {/* Panel */}
-        {panel === 'add' && <TeacherForm initial={EMPTY} isEdit={false} onSave={handleAdd} onClose={() => setPanel('none')} branchOptions={branches.filter((branch) => branch.status === 'Active').map(({ id, name }) => ({ id, name }))} defaultBranchId={user?.role === 'super_admin' ? branchFilter || user?.branchId : user?.branchId} />}
-        {editTeacher && <TeacherForm initial={{ ...editTeacher, branchId: editTeacher.branchId || '' }} isEdit onSave={(data) => handleEdit(editTeacher.id, data)} onClose={() => setPanel('none')} branchOptions={branches.filter((branch) => branch.status === 'Active').map(({ id, name }) => ({ id, name }))} defaultBranchId={editTeacher.branchId || (user?.role === 'super_admin' ? branchFilter || user?.branchId : user?.branchId)} />}
+        {formError && (panel === 'add' || editTeacher) && (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/8 px-4 py-3 text-sm text-destructive">{formError}</div>
+        )}
+        {panel === 'add' && <TeacherForm initial={EMPTY} isEdit={false} onSave={handleAdd} onClose={() => { setPanel('none'); setFormError(null); }} branchOptions={branches.filter((branch) => branch.status === 'Active').map(({ id, name }) => ({ id, name }))} defaultBranchId={user?.role === 'super_admin' ? branchFilter || user?.branchId : user?.branchId} />}
+        {editTeacher && <TeacherForm initial={{ ...editTeacher, branchId: editTeacher.branchId || '' }} isEdit onSave={(data) => handleEdit(editTeacher.id, data)} onClose={() => { setPanel('none'); setFormError(null); }} branchOptions={branches.filter((branch) => branch.status === 'Active').map(({ id, name }) => ({ id, name }))} defaultBranchId={editTeacher.branchId || (user?.role === 'super_admin' ? branchFilter || user?.branchId : user?.branchId)} />}
         {viewTeacher      && <TeacherProfile teacher={viewTeacher} onClose={() => setPanel('none')} />}
 
         {/* Toolbar */}

@@ -6,7 +6,7 @@ import { getStudentsForClass } from '../lib/studentService';
 import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceService';
 import { saveAttendanceAPI } from '../lib/attendanceService';
 import { saveTeacherAttendanceRecords, getAttendanceEntriesForDate, getTeacherAttendanceHistory, type TeacherAttendanceStatus, validateAttendanceDuplicate } from '../lib/teacherSalaryService';
-import { getTeacherProfiles, type Teacher } from './TeacherManagement';
+import { useTeacherProfiles, type Teacher } from './TeacherManagement';
 import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, Users, CalendarDays } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 
@@ -19,7 +19,7 @@ const TODAY_ISO = new Date().toISOString().split('T')[0];
 export function Attendance() {
   const { user } = useAuth();
   const branches = getBranches();
-  const teachers = useMemo(() => getTeacherProfiles(), []);
+  const teachers = useTeacherProfiles();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const [selectedClass, setSelectedClass] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');

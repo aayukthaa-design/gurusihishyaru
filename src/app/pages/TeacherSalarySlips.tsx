@@ -1,14 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { getTeacherProfiles, type Teacher } from './TeacherManagement';
+import { useTeacherProfiles, type Teacher } from './TeacherManagement';
 import { getSalarySlipArchives, type SalarySlipArchive } from '../lib/teacherSalaryService';
 import { getBranchName } from '../lib/branchService';
 import { Download, FileText } from 'lucide-react';
 
 export function TeacherSalarySlips() {
   const { user } = useAuth();
-  const teachers = useMemo(() => getTeacherProfiles(), []);
+  const teachers = useTeacherProfiles();
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   const archiveList = useMemo(() => {
     if (!user) return [] as SalarySlipArchive[];

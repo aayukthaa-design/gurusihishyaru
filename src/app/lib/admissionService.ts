@@ -1,5 +1,6 @@
 import type { User } from '../auth/types';
 import { addNotification } from './notificationService';
+import { apiFetch } from './apiClient';
 
 export type AdmissionStatus =
   | 'Enquiry'
@@ -24,44 +25,30 @@ export interface AdmissionRecord {
   updatedAt: string;
 }
 
-const STORAGE_KEY = 'guru_admission_crm_state';
-
-const DEFAULT_ADMISSIONS: AdmissionRecord[] = [];
-
 let admissionState: AdmissionRecord[] = [];
 const listeners = new Set<() => void>();
-
-function loadAdmissions(): AdmissionRecord[] {
-  if (typeof window === 'undefined') {
-    return DEFAULT_ADMISSIONS;
-  }
-
-  try {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored) as AdmissionRecord[];
-      if (Array.isArray(parsed) && parsed.length) {
-        return parsed;
-      }
-    }
-  } catch {
-    // fall back to empty
-  }
-
-  return DEFAULT_ADMISSIONS;
-}
-
-function persistAdmissions() {
-  if (typeof window !== 'undefined') {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(admissionState));
-  }
-}
 
 function emit() {
   listeners.forEach((listener) => listener());
 }
 
-admissionState = loadAdmissions();
+export async function refreshAdmissions(branchId?: string): Promise<AdmissionRecord[]> {
+  try {
+    const res = await apiFetch(`/api/admissions${branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''}`);
+    if (res.ok) {
+      const data = await res.json();
+      admissionState = Array.isArray(data) ? data : [];
+      emit();
+      return admissionState;
+    }
+  } catch (err) {
+    console.error('Failed to fetch admissions:', err);
+  }
+  return admissionState;
+}
+
+// Initial load
+void refreshAdmissions();
 
 export function getAdmissions(): AdmissionRecord[] {
   return admissionState;
@@ -72,57 +59,56 @@ export function subscribeAdmissions(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function createAdmission(data: Omit<AdmissionRecord, 'id' | 'status' | 'createdAt' | 'updatedAt'>): AdmissionRecord {
-  const record: AdmissionRecord = {
-    id: `ADM${String(admissionState.length + 1).padStart(3, '0')}`,
-    status: 'Enquiry',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    ...data,
-  };
-
-  admissionState = [record, ...admissionState];
-  persistAdmissions();
-  emit();
-  return record;
+export async function createAdmission(data: Omit<AdmissionRecord, 'id' | 'status' | 'createdAt' | 'updatedAt'>): Promise<AdmissionRecord | null> {
+  try {
+    const res = await apiFetch('/api/admissions', { method: 'POST', body: data });
+    if (!res.ok) return null;
+    const record = await res.json();
+    await refreshAdmissions();
+    return record;
+  } catch (err) {
+    console.error('createAdmission error:', err);
+    return null;
+  }
 }
 
-function updateStatus(admissionId: string, nextStatus: AdmissionStatus) {
-  admissionState = admissionState.map((record) =>
-    record.id === admissionId
-      ? { ...record, status: nextStatus, updatedAt: new Date().toISOString() }
-      : record
-  );
-  persistAdmissions();
-  emit();
+async function updateStatus(admissionId: string, action: 'submit' | 'verify' | 'schedule' | 'complete' | 'approve' | 'enroll' | 'reject') {
+  try {
+    const res = await apiFetch(`/api/admissions/${admissionId}/action`, { method: 'PATCH', body: { action } });
+    if (res.ok) {
+      await refreshAdmissions();
+    }
+  } catch (err) {
+    console.error('updateStatus error:', err);
+  }
 }
 
 export function submitAdmissionApplication(admissionId: string) {
-  updateStatus(admissionId, 'Application Submitted');
+  void updateStatus(admissionId, 'submit');
 }
 
 export function verifyAdmissionDocuments(admissionId: string) {
-  updateStatus(admissionId, 'Document Verification');
+  void updateStatus(admissionId, 'verify');
 }
 
 export function scheduleAdmissionInterview(admissionId: string) {
-  updateStatus(admissionId, 'Interview Scheduled');
+  void updateStatus(admissionId, 'schedule');
 }
 
 export function completeAdmissionInterview(admissionId: string) {
-  updateStatus(admissionId, 'Interview Completed');
+  void updateStatus(admissionId, 'complete');
 }
 
 export function approveAdmission(admissionId: string) {
-  updateStatus(admissionId, 'Approved');
+  void updateStatus(admissionId, 'approve');
 }
 
 export function rejectAdmission(admissionId: string) {
-  updateStatus(admissionId, 'Rejected');
+  void updateStatus(admissionId, 'reject');
 }
 
 export function enrollAdmission(admissionId: string) {
-  updateStatus(admissionId, 'Enrolled');
+  void updateStatus(admissionId, 'enroll');
 }
 
 export function enrollAdmissionByApplicantName(applicantName: string) {
@@ -131,7 +117,7 @@ export function enrollAdmissionByApplicantName(applicantName: string) {
     return undefined;
   }
 
-  updateStatus(target.id, 'Enrolled');
+  void updateStatus(target.id, 'enroll');
   return target.id;
 }
 
