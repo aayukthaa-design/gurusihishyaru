@@ -1,56 +1,39 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { Header } from '../components/Header';
 import {
   Users, Plus, Search, Shield, Edit2, Ban,
   CheckCircle2, XCircle, Eye, EyeOff, RefreshCw,
   UserCog, Wallet, ChevronRight, X,
 } from 'lucide-react';
-import { SEED_USERS } from '../auth/seedUsers';
 import { useLocation } from 'react-router';
 import { getRoleLabel } from '../auth/rbac';
 import type { Role } from '../auth/types';
 import { getBranches } from '../lib/branchService';
+import { apiJson } from '../lib/apiClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Tab = 'all' | 'admins' | 'accountants';
 
-interface ManagedUser {
+interface ApiUser {
   id: string;
-  firstName: string;
-  lastName: string;
-  email: string;
+  name: string;
+  email: string | null;
   mobile: string;
-  username: string;
-  password: string;
+  roles: Role[];
   role: Role;
+  branchId?: string;
   status: 'Active' | 'Inactive';
+  mustChangePassword: boolean;
   createdAt: string;
-  branch?: string;
-  notes?: string;
 }
 
-// ─── Seed data ────────────────────────────────────────────────────────────────
-
-const INITIAL_USERS: ManagedUser[] = SEED_USERS
-  .filter((u) => ['admin', 'accountant'].includes(u.role))
-  .map((u, i) => {
-    const parts = u.name.split(' ');
-    return {
-      id:        u.id,
-      firstName: parts[0] ?? u.name,
-      lastName:  parts[1] ?? 'User',
-      email:     u.email,
-      mobile:    `+91 98765 4${String(3210 + i).padStart(4, '0')}`,
-      username:  u.email.split('@')[0],
-      password:  'Password@123',
-      role:      u.role,
-      status:    'Active' as const,
-      createdAt: '2026-06-01',
-      branch:    'Main Center',
-      notes:     '',
-    };
-  });
+const ASSIGNABLE_ROLES: { value: Role; label: string }[] = [
+  { value: 'super_admin', label: 'Super Admin' },
+  { value: 'admin', label: 'Admin' },
+  { value: 'teacher', label: 'Teacher' },
+  { value: 'accountant', label: 'Accountant' },
+];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,9 +50,15 @@ function generatePassword(): string {
   return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }
 
+function splitName(name: string): { firstName: string; lastName: string } {
+  const parts = name.trim().split(/\s+/);
+  return { firstName: parts[0] ?? name, lastName: parts.slice(1).join(' ') || '' };
+}
+
 // ─── View Profile Panel ───────────────────────────────────────────────────────
 
-function ViewProfile({ user, onClose }: { user: ManagedUser; onClose: () => void }) {
+function ViewProfile({ user, onClose }: { user: ApiUser; onClose: () => void }) {
+  const { firstName, lastName } = splitName(user.name);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
       <div className="w-full max-w-md rounded-2xl border border-border bg-card shadow-2xl">
@@ -82,23 +71,21 @@ function ViewProfile({ user, onClose }: { user: ManagedUser; onClose: () => void
         <div className="px-6 py-5 space-y-4">
           <div className="flex items-center gap-4">
             <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-xl font-bold text-primary">
-              {user.firstName.charAt(0)}{user.lastName.charAt(0)}
+              {firstName.charAt(0)}{lastName.charAt(0)}
             </div>
             <div>
-              <p className="text-lg font-bold text-foreground">{user.firstName} {user.lastName}</p>
-              <p className="text-sm text-muted-foreground">@{user.username}</p>
+              <p className="text-lg font-bold text-foreground">{user.name}</p>
+              <p className="text-sm text-muted-foreground">{user.roles.map((r) => getRoleLabel(r)).join(' + ')}</p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             {[
-              { label: 'Email',    value: user.email },
-              { label: 'Phone',    value: user.mobile },
-              { label: 'Role',     value: getRoleLabel(user.role) },
+              { label: 'Email',    value: user.email || '-' },
+              { label: 'Mobile',   value: user.mobile },
+              { label: 'Roles',    value: user.roles.map((r) => getRoleLabel(r)).join(', ') },
               { label: 'Status',   value: user.status },
               { label: 'Joined',   value: user.createdAt.slice(0, 10) },
-              { label: 'Username', value: user.username },
-              { label: 'Branch',   value: user.branch ?? '-' },
-              { label: 'Notes',    value: user.notes ?? '-' },
+              { label: 'Branch',   value: user.roles.includes('super_admin') ? 'All Branches' : (user.branchId ?? '-') },
             ].map(({ label, value }) => (
               <div key={label} className="rounded-xl border border-border bg-secondary/50 p-3">
                 <p className="text-xs text-muted-foreground mb-0.5">{label}</p>
@@ -121,90 +108,64 @@ function ViewProfile({ user, onClose }: { user: ManagedUser; onClose: () => void
 }
 
 interface ModalProps {
-  defaultRole: 'admin' | 'accountant';
-  onSave: (user: Omit<ManagedUser, 'id' | 'createdAt'>) => void;
+  defaultRole: Role;
+  onSave: (payload: { name: string; email: string; mobile: string; roles: Role[]; branchId: string; password?: string; status: 'Active' | 'Inactive' }) => void;
   onClose: () => void;
+  initialUser?: ApiUser | null;
 }
 
-function AddUserModal({ defaultRole, onSave, onClose, initialUser }: ModalProps & { initialUser?: ManagedUser | null }) {
+function AddUserModal({ defaultRole, onSave, onClose, initialUser }: ModalProps) {
   const branches = getBranches();
   const initialPwd = generatePassword();
   const [form, setForm] = useState(() => ({
-    fullName: initialUser ? `${initialUser.firstName} ${initialUser.lastName}` : '',
-    email: initialUser ? initialUser.email : '',
+    fullName: initialUser ? initialUser.name : '',
+    email: initialUser ? initialUser.email ?? '' : '',
     mobile: initialUser ? initialUser.mobile : '',
-    username: initialUser ? initialUser.username : '',
     password: initialUser ? '' : initialPwd,
     confirmPassword: initialUser ? '' : initialPwd,
-    role: (initialUser ? initialUser.role : defaultRole) as 'admin' | 'accountant',
+    roles: initialUser ? initialUser.roles : [defaultRole],
     status: initialUser ? initialUser.status : 'Active' as 'Active' | 'Inactive',
-    branch: initialUser ? initialUser.branch ?? '' : '',
-    notes: initialUser ? initialUser.notes ?? '' : '',
+    branchId: initialUser ? initialUser.branchId ?? '' : (branches[0]?.id ?? ''),
   }));
   const [showPwd, setShowPwd] = useState(false);
-  const [errors,  setErrors]  = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const set = (k: keyof typeof form, v: string) => setForm((p) => ({ ...p, [k]: v }));
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((p) => ({ ...p, [k]: v }));
+
+  const toggleRole = (role: Role) => {
+    setForm((p) => ({
+      ...p,
+      roles: p.roles.includes(role) ? p.roles.filter((r) => r !== role) : [...p.roles, role],
+    }));
+  };
+
+  const needsBranch = !form.roles.includes('super_admin');
 
   const validate = () => {
     const e: Record<string, string> = {};
     if (!form.fullName.trim()) e.fullName = 'Required';
-    if (!form.email.trim())     e.email     = 'Required';
-    else if (!/\S+@\S+\.\S+/.test(form.email)) e.email = 'Invalid email';
-    if (!form.mobile.trim())    e.mobile    = 'Required';
-    if (!form.username.trim())  e.username  = 'Required';
-    // Password is required only when creating a new user. For edits, it's optional.
+    if (!form.mobile.trim()) e.mobile = 'Required';
+    if (form.roles.length === 0) e.roles = 'Select at least one role';
     if (!initialUser && !form.password) e.password = 'Required';
     if (form.password || form.confirmPassword) {
       if (form.password !== form.confirmPassword) e.confirmPassword = 'Passwords do not match';
     }
-    if (!form.branch.trim())    e.branch    = 'Required';
+    if (needsBranch && !form.branchId) e.branchId = 'Required';
     setErrors(e);
     return Object.keys(e).length === 0;
   };
-
-  const field = (key: string, label: string, type = 'text', placeholder = '') => (
-    <div key={key}>
-      <label className="mb-1.5 block text-sm font-medium text-foreground">
-        {label} {key !== 'notes' && <span className="text-destructive">*</span>}
-      </label>
-      {key === 'notes' ? (
-        <textarea
-          value={(form as Record<string, string>)[key]}
-          onChange={(e) => set(key as keyof typeof form, e.target.value)}
-          placeholder={placeholder}
-          className={`w-full rounded-xl border px-4 py-2.5 text-sm bg-input-background focus:outline-none focus:ring-2 focus:ring-primary/20 ${(errors as Record<string, string>)[key] ? 'border-destructive' : 'border-input focus:border-primary'}`}
-        />
-      ) : (
-        <input
-          type={type}
-          value={(form as Record<string, string>)[key]}
-          onChange={(e) => {
-            set(key as keyof typeof form, e.target.value);
-            if (key === 'email') set('username', e.target.value.split('@')[0]);
-          }}
-          placeholder={placeholder}
-          className={`w-full rounded-xl border px-4 py-2.5 text-sm bg-input-background focus:outline-none focus:ring-2 focus:ring-primary/20 ${(errors as Record<string, string>)[key] ? 'border-destructive' : 'border-input focus:border-primary'}`}
-        />
-      )}
-      {(errors as Record<string, string>)[key] && (
-        <p className="mt-1 text-xs text-destructive">{(errors as Record<string, string>)[key]}</p>
-      )}
-    </div>
-  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
       <div className="w-full max-w-lg rounded-2xl border border-border bg-card shadow-2xl">
 
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-6 py-4">
           <div>
             <h2 className="text-base font-semibold text-foreground">
-              Add New {form.role === 'admin' ? 'Admin' : 'Accountant'}
+              {initialUser ? 'Edit User' : 'Add New User'}
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Role assigned automatically. User must change password on first login.
+              A user can hold more than one role under a single login.
             </p>
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-secondary">
@@ -212,41 +173,57 @@ function AddUserModal({ defaultRole, onSave, onClose, initialUser }: ModalProps 
           </button>
         </div>
 
-        {/* Body */}
         <div className="px-6 py-5 space-y-4">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {field('fullName', 'Full Name', 'text', 'e.g. Ravi Kumar')}
-            {field('email',    'Email',     'email','ravi@tutorials.com')}
-            {field('mobile',   'Phone',     'tel',  '9876543210')}
-            {field('username', 'Username',  'text', 'ravi.kumar')}
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-foreground">Assigned Branch <span className="text-destructive">*</span></label>
-              <select value={form.branch} onChange={(e) => set('branch', e.target.value)} className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20">
-                <option value="">Select branch…</option>
-                {branches.filter((branch) => branch.status === 'Active').map((branch) => (
-                  <option key={branch.id} value={branch.name}>{branch.name}</option>
-                ))}
-              </select>
+              <label className="mb-1.5 block text-sm font-medium text-foreground">Full Name <span className="text-destructive">*</span></label>
+              <input type="text" value={form.fullName} onChange={(e) => set('fullName', e.target.value)} placeholder="e.g. Ravi Kumar"
+                className={`w-full rounded-xl border px-4 py-2.5 text-sm bg-input-background focus:outline-none focus:ring-2 focus:ring-primary/20 ${errors.fullName ? 'border-destructive' : 'border-input focus:border-primary'}`} />
+              {errors.fullName && <p className="mt-1 text-xs text-destructive">{errors.fullName}</p>}
             </div>
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-foreground">Role</label>
-              <select
-                value={form.role}
-                onChange={(e) => set('role', e.target.value)}
-                className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
-              >
-                <option value="admin">Admin</option>
-                <option value="accountant">Accountant</option>
-              </select>
+              <label className="mb-1.5 block text-sm font-medium text-foreground">Email</label>
+              <input type="email" value={form.email} onChange={(e) => set('email', e.target.value)} placeholder="ravi@tutorials.com"
+                className="w-full rounded-xl border border-input px-4 py-2.5 text-sm bg-input-background focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" />
             </div>
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-foreground">Mobile <span className="text-destructive">*</span></label>
+              <input type="tel" value={form.mobile} onChange={(e) => set('mobile', e.target.value)} placeholder="9876543210"
+                className={`w-full rounded-xl border px-4 py-2.5 text-sm bg-input-background focus:outline-none focus:ring-2 focus:ring-primary/20 ${errors.mobile ? 'border-destructive' : 'border-input focus:border-primary'}`} />
+              {errors.mobile && <p className="mt-1 text-xs text-destructive">{errors.mobile}</p>}
+            </div>
+            {needsBranch && (
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Assigned Branch <span className="text-destructive">*</span></label>
+                <select value={form.branchId} onChange={(e) => set('branchId', e.target.value)} className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20">
+                  <option value="">Select branch…</option>
+                  {branches.filter((branch) => branch.status === 'Active').map((branch) => (
+                    <option key={branch.id} value={branch.id}>{branch.name}</option>
+                  ))}
+                </select>
+                {errors.branchId && <p className="mt-1 text-xs text-destructive">{errors.branchId}</p>}
+              </div>
+            )}
           </div>
 
-          {/* Passwords */}
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-foreground">Roles <span className="text-destructive">*</span></label>
+            <div className="flex flex-wrap gap-2">
+              {ASSIGNABLE_ROLES.map(({ value, label }) => (
+                <label key={value} className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-colors ${form.roles.includes(value) ? 'border-primary bg-primary/10 text-foreground' : 'border-input text-muted-foreground hover:bg-secondary'}`}>
+                  <input type="checkbox" checked={form.roles.includes(value)} onChange={() => toggleRole(value)} className="h-4 w-4 accent-primary" />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {errors.roles && <p className="mt-1 text-xs text-destructive">{errors.roles}</p>}
+          </div>
+
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div>
               <label className="mb-1.5 block text-sm font-medium text-foreground">
                 Password
-                <span className="ml-2 text-xs font-normal text-muted-foreground">(auto-generated)</span>
+                <span className="ml-2 text-xs font-normal text-muted-foreground">{initialUser ? '(leave blank to keep unchanged)' : '(auto-generated)'}</span>
               </label>
               <div className="relative">
                 <input
@@ -264,38 +241,30 @@ function AddUserModal({ defaultRole, onSave, onClose, initialUser }: ModalProps 
                   </button>
                 </div>
               </div>
+              {errors.password && <p className="mt-1 text-xs text-destructive">{errors.password}</p>}
             </div>
-
             <div>
-              {field('confirmPassword', 'Confirm Password', 'password')}
+              <label className="mb-1.5 block text-sm font-medium text-foreground">Confirm Password</label>
+              <input type="password" value={form.confirmPassword} onChange={(e) => set('confirmPassword', e.target.value)}
+                className={`w-full rounded-xl border px-4 py-2.5 text-sm bg-input-background focus:outline-none focus:ring-2 focus:ring-primary/20 ${errors.confirmPassword ? 'border-destructive' : 'border-input focus:border-primary'}`} />
+              {errors.confirmPassword && <p className="mt-1 text-xs text-destructive">{errors.confirmPassword}</p>}
             </div>
           </div>
-
-          {field('notes', 'Notes (optional)', 'text', 'Optional notes')}
         </div>
 
-        {/* Footer */}
         <div className="flex gap-3 border-t border-border px-6 py-4">
           <button
             onClick={() => {
               if (!validate()) return;
-              // Build payload with firstName/lastName split from fullName
-              const parts = form.fullName.trim().split(/\s+/);
-              const firstName = parts.shift() || '';
-              const lastName = parts.join(' ') || 'User';
-              const payload: Omit<ManagedUser, 'id' | 'createdAt'> = {
-                firstName,
-                lastName,
-                email: form.email,
-                mobile: form.mobile,
-                username: form.username,
-                password: form.password,
-                role: form.role as Role,
-                status: form.status as 'Active' | 'Inactive',
-                branch: form.branch,
-                notes: form.notes,
-              } as Omit<ManagedUser, 'id' | 'createdAt'>;
-              onSave(payload);
+              onSave({
+                name: form.fullName.trim(),
+                email: form.email.trim(),
+                mobile: form.mobile.trim(),
+                roles: form.roles,
+                branchId: form.branchId,
+                password: form.password || undefined,
+                status: form.status,
+              });
             }}
             className="rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-95"
           >
@@ -318,32 +287,37 @@ function UserRow({
   onEdit,
   onToggle,
 }: {
-  user: ManagedUser;
+  user: ApiUser;
   onView: () => void;
   onEdit: () => void;
   onToggle: () => void;
 }) {
+  const { firstName, lastName } = splitName(user.name);
   return (
     <tr className="transition-colors hover:bg-secondary/30">
       <td className="px-5 py-4">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-bold text-primary">
-            {user.firstName.charAt(0)}{user.lastName.charAt(0)}
+            {firstName.charAt(0)}{lastName.charAt(0)}
           </div>
           <div>
-            <p className="text-sm font-semibold text-foreground">{user.firstName} {user.lastName}</p>
-            <p className="text-xs text-muted-foreground">@{user.username}</p>
+            <p className="text-sm font-semibold text-foreground">{user.name}</p>
+            <p className="text-xs text-muted-foreground">{user.mobile}</p>
           </div>
         </div>
       </td>
-      <td className="px-5 py-4 text-sm text-muted-foreground">{user.email}</td>
+      <td className="px-5 py-4 text-sm text-muted-foreground">{user.email || '-'}</td>
       <td className="px-5 py-4 text-sm text-muted-foreground hidden md:table-cell">{user.mobile}</td>
-      <td className="px-5 py-4 text-sm text-muted-foreground hidden md:table-cell">{user.branch ?? '-'}</td>
+      <td className="px-5 py-4 text-sm text-muted-foreground hidden md:table-cell">{user.roles.includes('super_admin') ? 'All Branches' : (user.branchId ?? '-')}</td>
       <td className="px-5 py-4">
-        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${ROLE_COLORS[user.role]}`}>
-          <Shield className="h-3 w-3" />
-          {getRoleLabel(user.role)}
-        </span>
+        <div className="flex flex-wrap gap-1">
+          {user.roles.map((role) => (
+            <span key={role} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${ROLE_COLORS[role]}`}>
+              <Shield className="h-3 w-3" />
+              {getRoleLabel(role)}
+            </span>
+          ))}
+        </div>
       </td>
       <td className="px-5 py-4">
         <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${
@@ -357,7 +331,6 @@ function UserRow({
       </td>
       <td className="px-5 py-4">
         <div className="flex items-center gap-1.5">
-          {/* View */}
           <button
             onClick={onView}
             className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-secondary"
@@ -366,7 +339,6 @@ function UserRow({
             <Eye className="h-3.5 w-3.5" />
             View
           </button>
-          {/* Edit */}
           <button
             onClick={onEdit}
             className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-secondary"
@@ -375,7 +347,6 @@ function UserRow({
             <Edit2 className="h-3.5 w-3.5" />
             Edit
           </button>
-          {/* Disable / Enable */}
           <button
             onClick={onToggle}
             className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
@@ -397,34 +368,35 @@ function UserRow({
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function UserManagement() {
-  const [activeTab,  setActiveTab]  = useState<Tab>('all');
-  const [search,     setSearch]     = useState('');
+  const [activeTab, setActiveTab] = useState<Tab>('all');
+  const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'Active' | 'Inactive'>('all');
-  const [showModal,  setShowModal]  = useState(false);
-  const [addingRole, setAddingRole] = useState<'admin' | 'accountant'>('admin');
-  const [users,      setUsers]      = useState<ManagedUser[]>(INITIAL_USERS);
-  const [toast,      setToast]      = useState<string | null>(null);
-  const [viewingUser, setViewingUser] = useState<ManagedUser | null>(null);
-  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
+  const [showModal, setShowModal] = useState(false);
+  const [addingRole, setAddingRole] = useState<Role>('admin');
+  const [users, setUsers] = useState<ApiUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [viewingUser, setViewingUser] = useState<ApiUser | null>(null);
+  const [editingUser, setEditingUser] = useState<ApiUser | null>(null);
   const location = useLocation();
 
-  // query / navigation handling moved below after allUsers is computed
+  const loadUsers = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const data = await apiJson<ApiUser[]>('/api/users');
+      setUsers(data);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load users');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  // Build the complete "all users" view including seed users not in INITIAL_USERS
-  const seedBase = useMemo<ManagedUser[]>(() => SEED_USERS.map((u) => {
-    const parts = u.name.split(' ');
-    return {
-      id: u.id, firstName: parts[0] ?? '', lastName: parts[1] ?? '',
-      email: u.email, mobile: '+91 98765 43210', username: u.email.split('@')[0],
-      password: 'Password@123', role: u.role, status: 'Active' as const, createdAt: '2026-06-01',
-      branch: 'Main Center', notes: '',
-    };
-  }), []);
-  const allUsers = useMemo(() => {
-    const seedIds = new Set(seedBase.map((u) => u.id));
-    const newUsers = users.filter((u) => !seedIds.has(u.id));
-    return [...seedBase, ...newUsers];
-  }, [seedBase, users]);
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
 
   useEffect(() => {
     try {
@@ -433,56 +405,32 @@ export function UserManagement() {
       if (tabParam === 'admins' || tabParam === 'accountants') {
         setActiveTab(tabParam as Tab);
       }
-
       const action = params.get('action');
       if (action === 'add-admin') {
         setAddingRole('admin');
         setShowModal(true);
-        return;
-      }
-      if (action === 'add-accountant') {
+      } else if (action === 'add-accountant') {
         setAddingRole('accountant');
         setShowModal(true);
-        return;
       }
-      if (action === 'edit') {
-        const id = params.get('id');
-        if (id) {
-          const u = allUsers.find((x) => x.id === id);
-          if (u) {
-            setEditingUser(u);
-            setActiveTab(u.role === 'admin' ? 'admins' : 'accountants');
-            return;
-          }
-        }
-      }
-
-      // fallback: navigation state
-      const st = (location as any).state;
-      if (st && st.openAdd) {
-        const role = st.role ?? (tabParam === 'admins' ? 'admin' : tabParam === 'accountants' ? 'accountant' : 'admin');
-        setAddingRole(role);
-        setShowModal(true);
-      }
-    } catch (e) {
+    } catch {
       // ignore malformed search
     }
-  }, [location.search, location.state]);
+  }, [location.search]);
 
   const byTab = activeTab === 'all'
-    ? allUsers
+    ? users
     : activeTab === 'admins'
-    ? users.filter((u) => u.role === 'admin')
-    : users.filter((u) => u.role === 'accountant');
+    ? users.filter((u) => u.roles.includes('admin'))
+    : users.filter((u) => u.roles.includes('accountant'));
 
   const filtered = byTab.filter((u) => {
-    const matchSearch = `${u.firstName} ${u.lastName} ${u.email} ${u.username}`
-      .toLowerCase().includes(search.toLowerCase());
+    const matchSearch = `${u.name} ${u.email ?? ''} ${u.mobile}`.toLowerCase().includes(search.toLowerCase());
     const matchStatus = statusFilter === 'all' || u.status === statusFilter;
     return matchSearch && matchStatus;
   });
 
-  const openAdd = (role: 'admin' | 'accountant') => {
+  const openAdd = (role: Role) => {
     setEditingUser(null);
     setAddingRole(role);
     setShowModal(true);
@@ -493,72 +441,83 @@ export function UserManagement() {
     setEditingUser(null);
   };
 
-  const handleSave = (data: Omit<ManagedUser, 'id' | 'createdAt'>) => {
-    const newUser: ManagedUser = { ...data, id: `usr_${Date.now()}`, createdAt: new Date().toISOString() };
-    setUsers((prev) => [newUser, ...prev]);
-    setShowModal(false);
-    setActiveTab(data.role === 'admin' ? 'admins' : 'accountants');
-    const label = data.role === 'admin' ? 'Admin' : 'Accountant';
-    setToast(`✓ ${label} account created for ${data.firstName} ${data.lastName}`);
-    setTimeout(() => setToast(null), 4000);
+  const handleSave = async (payload: { name: string; email: string; mobile: string; roles: Role[]; branchId: string; password?: string; status: 'Active' | 'Inactive' }) => {
+    try {
+      await apiJson('/api/users', { method: 'POST', body: payload });
+      setShowModal(false);
+      setToast(`✓ Account created for ${payload.name}`);
+      setTimeout(() => setToast(null), 4000);
+      void loadUsers();
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : 'Failed to create user');
+      setTimeout(() => setToast(null), 4000);
+    }
   };
 
-  const handleEditSave = (data: Omit<ManagedUser, 'id' | 'createdAt'>) => {
+  const handleEditSave = async (payload: { name: string; email: string; mobile: string; roles: Role[]; branchId: string; password?: string; status: 'Active' | 'Inactive' }) => {
     if (!editingUser) return;
-    setUsers((prev) => prev.map((u) =>
-      u.id === editingUser.id ? { ...u, ...data } : u
-    ));
-    setEditingUser(null);
-    setToast(`✓ User ${data.firstName} ${data.lastName} updated`);
-    setTimeout(() => setToast(null), 4000);
+    try {
+      await apiJson(`/api/users/${editingUser.id}`, { method: 'PUT', body: payload });
+      setEditingUser(null);
+      setToast(`✓ User ${payload.name} updated`);
+      setTimeout(() => setToast(null), 4000);
+      void loadUsers();
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : 'Failed to update user');
+      setTimeout(() => setToast(null), 4000);
+    }
   };
 
-  const toggleStatus = (id: string) => {
-    setUsers((prev) => prev.map((u) =>
-      u.id === id ? { ...u, status: u.status === 'Active' ? 'Inactive' : 'Active' } : u
-    ));
+  const toggleStatus = async (user: ApiUser) => {
+    const nextStatus = user.status === 'Active' ? 'Inactive' : 'Active';
+    try {
+      await apiJson(`/api/users/${user.id}`, { method: 'PUT', body: { status: nextStatus } });
+      void loadUsers();
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : 'Failed to update status');
+      setTimeout(() => setToast(null), 4000);
+    }
   };
+
+  const adminCount = useMemo(() => users.filter((u) => u.roles.includes('admin')).length, [users]);
+  const accountantCount = useMemo(() => users.filter((u) => u.roles.includes('accountant')).length, [users]);
+  const activeCount = useMemo(() => users.filter((u) => u.status === 'Active').length, [users]);
 
   return (
     <div className="flex-1 bg-background">
       <Header title="User Management" />
 
-      {/* Toast */}
       {toast && (
         <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3 rounded-2xl bg-primary px-5 py-3 text-sm font-medium text-primary-foreground shadow-xl">
           {toast}
         </div>
       )}
 
-      {/* View Profile Modal */}
       {viewingUser && (
         <ViewProfile user={viewingUser} onClose={() => setViewingUser(null)} />
       )}
 
-      {/* Edit Modal */}
       {editingUser && (
         <AddUserModal
-          defaultRole={editingUser.role as 'admin' | 'accountant'}
+          defaultRole={editingUser.roles[0] ?? 'admin'}
           onSave={handleEditSave}
           onClose={closeModal}
           initialUser={editingUser}
         />
       )}
 
-      {/* Add Modal */}
       {showModal && (
         <AddUserModal defaultRole={addingRole} onSave={handleSave} onClose={closeModal} initialUser={null} />
       )}
 
       <div className="max-w-6xl mx-auto p-6 space-y-6">
 
-        {/* Stats */}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           {[
-            { label: 'Total Users', value: allUsers.length,                                       icon: Users,        color: 'text-sky-600 dark:text-sky-400' },
-            { label: 'Admins',      value: users.filter((u) => u.role === 'admin').length,         icon: UserCog,      color: 'text-violet-600 dark:text-violet-400' },
-            { label: 'Accountants', value: users.filter((u) => u.role === 'accountant').length,    icon: Wallet,       color: 'text-teal-600 dark:text-teal-400' },
-            { label: 'Active',      value: users.filter((u) => u.status === 'Active').length,      icon: CheckCircle2, color: 'text-green-600 dark:text-green-400' },
+            { label: 'Total Users', value: users.length, icon: Users, color: 'text-sky-600 dark:text-sky-400' },
+            { label: 'Admins', value: adminCount, icon: UserCog, color: 'text-violet-600 dark:text-violet-400' },
+            { label: 'Accountants', value: accountantCount, icon: Wallet, color: 'text-teal-600 dark:text-teal-400' },
+            { label: 'Active', value: activeCount, icon: CheckCircle2, color: 'text-green-600 dark:text-green-400' },
           ].map((s) => (
             <div key={s.label} className="rounded-2xl border border-border bg-card p-5">
               <s.icon className={`h-5 w-5 mb-2 ${s.color}`} />
@@ -568,14 +527,11 @@ export function UserManagement() {
           ))}
         </div>
 
-        {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-3">
-
-          {/* Tabs */}
           <div className="flex rounded-xl border border-border overflow-hidden shrink-0">
             {([
-              { key: 'all',         label: 'All Users',   icon: Users },
-              { key: 'admins',      label: 'Admins',      icon: UserCog },
+              { key: 'all', label: 'All Users', icon: Users },
+              { key: 'admins', label: 'Admins', icon: UserCog },
               { key: 'accountants', label: 'Accountants', icon: Wallet },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button
@@ -591,19 +547,17 @@ export function UserManagement() {
             ))}
           </div>
 
-          {/* Search */}
           <div className="relative flex-1 min-w-[160px]">
             <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input
               type="search"
-              placeholder="Search name or email…"
+              placeholder="Search name, email or mobile…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full rounded-xl border border-input bg-input-background py-2.5 pl-10 pr-4 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
             />
           </div>
 
-          {/* Status filter */}
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
@@ -614,7 +568,6 @@ export function UserManagement() {
             <option value="Inactive">Inactive</option>
           </select>
 
-          {/* Add buttons */}
           <button onClick={() => openAdd('admin')} className="flex items-center gap-2 rounded-xl bg-sky-600 hover:bg-sky-700 px-4 py-2.5 text-sm font-semibold text-white transition-all active:scale-95">
             <Plus className="h-4 w-4" /> Add Admin
           </button>
@@ -623,13 +576,11 @@ export function UserManagement() {
           </button>
         </div>
 
-        {/* Context notes */}
         {activeTab === 'admins' && (
           <div className="flex items-center gap-3 rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50 dark:bg-sky-950/30 px-4 py-3">
             <UserCog className="h-4 w-4 text-sky-600 dark:text-sky-400 shrink-0" />
             <p className="text-sm text-sky-700 dark:text-sky-300">
-              Admins manage students, fees, attendance, exams, timetable and admissions.
-              <span className="ml-1 font-medium">No access to system settings or role management.</span>
+              Admins manage students, fees, attendance, exams, timetable and admissions for their assigned branch only.
             </p>
           </div>
         )}
@@ -638,12 +589,10 @@ export function UserManagement() {
             <Wallet className="h-4 w-4 text-teal-600 dark:text-teal-400 shrink-0" />
             <p className="text-sm text-teal-700 dark:text-teal-300">
               Accountants manage fees, expenses, inventory and financial reports.
-              <span className="ml-1 font-medium">No access to student management or admissions.</span>
             </p>
           </div>
         )}
 
-        {/* Table */}
         <div className="rounded-2xl border border-border bg-card shadow-sm overflow-hidden">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <h2 className="font-semibold text-foreground">
@@ -652,43 +601,55 @@ export function UserManagement() {
             </h2>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-border bg-secondary/40">
-                  {['User', 'Email', 'Mobile', 'Branch', 'Role', 'Status', 'Actions'].map((h) => (
-                    <th key={h} className={`px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground${h === 'Mobile' || h === 'Branch' ? ' hidden md:table-cell' : ''}`}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {filtered.map((u) => (
-                  <UserRow
-                    key={u.id}
-                    user={u}
-                    onView={() => setViewingUser(u)}
-                    onEdit={() => setEditingUser(u)}
-                    onToggle={() => toggleStatus(u.id)}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {filtered.length === 0 && (
+          {loading ? (
             <div className="flex flex-col items-center gap-2 py-12 text-center">
-              <Users className="h-10 w-10 text-muted-foreground/30" />
-              <p className="text-sm text-muted-foreground">No users found</p>
+              <p className="text-sm text-muted-foreground">Loading users…</p>
             </div>
-          )}
+          ) : loadError ? (
+            <div className="flex flex-col items-center gap-2 py-12 text-center">
+              <p className="text-sm text-destructive">{loadError}</p>
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-border bg-secondary/40">
+                      {['User', 'Email', 'Mobile', 'Branch', 'Roles', 'Status', 'Actions'].map((h) => (
+                        <th key={h} className={`px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground${h === 'Mobile' || h === 'Branch' ? ' hidden md:table-cell' : ''}`}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {filtered.map((u) => (
+                      <UserRow
+                        key={u.id}
+                        user={u}
+                        onView={() => setViewingUser(u)}
+                        onEdit={() => setEditingUser(u)}
+                        onToggle={() => toggleStatus(u)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
-          {filtered.length > 0 && (
-            <div className="flex items-center justify-between border-t border-border px-5 py-3">
-              <p className="text-sm text-muted-foreground">Showing {filtered.length} users</p>
-              <button className="flex items-center gap-1 text-xs text-primary hover:underline">
-                View all <ChevronRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
+              {filtered.length === 0 && (
+                <div className="flex flex-col items-center gap-2 py-12 text-center">
+                  <Users className="h-10 w-10 text-muted-foreground/30" />
+                  <p className="text-sm text-muted-foreground">No users found</p>
+                </div>
+              )}
+
+              {filtered.length > 0 && (
+                <div className="flex items-center justify-between border-t border-border px-5 py-3">
+                  <p className="text-sm text-muted-foreground">Showing {filtered.length} users</p>
+                  <button className="flex items-center gap-1 text-xs text-primary hover:underline">
+                    View all <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
 

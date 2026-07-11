@@ -19,30 +19,21 @@ const FEATURES = [
   { icon: MessageCircle,  text: 'Parent Communication' },
 ];
 
-// ─── Demo quick-access roles ──────────────────────────────────────────────────
-const DEMO_ROLES = [
-  { role: 'Super Admin', email: 'superadmin1@tutorials.com', dot: '#7C3AED', bg: 'bg-purple-50 dark:bg-purple-950/30', text: 'text-purple-700 dark:text-purple-300', border: 'border-purple-200 dark:border-purple-800' },
-  { role: 'Admin',       email: 'admin1@tutorials.com',      dot: '#0369A1', bg: 'bg-sky-50 dark:bg-sky-950/30',       text: 'text-sky-700 dark:text-sky-300',       border: 'border-sky-200 dark:border-sky-800' },
-  { role: 'Teacher',     email: 'teacher1@tutorials.com',    dot: '#15803D', bg: 'bg-green-50 dark:bg-green-950/30',   text: 'text-green-700 dark:text-green-300',   border: 'border-green-200 dark:border-green-800' },
-  { role: 'Parent',      email: '9148478969',                dot: '#B45309', bg: 'bg-amber-50 dark:bg-amber-950/30',   text: 'text-amber-700 dark:text-amber-300',   border: 'border-amber-200 dark:border-amber-800' },
-  { role: 'Accountant',  email: 'accountant1@tutorials.com', dot: '#0F766E', bg: 'bg-teal-50 dark:bg-teal-950/30',     text: 'text-teal-700 dark:text-teal-300',     border: 'border-teal-200 dark:border-teal-800' },
-] as const;
-
 // ─── Component ────────────────────────────────────────────────────────────────
 export function Login() {
   const navigate  = useNavigate();
   const location  = useLocation();
   const { login } = useAuth();
 
-  const [selectedRole, setSelectedRole] = useState<'super_admin' | 'admin' | 'teacher' | 'parent' | 'accountant'>('super_admin');
-  const [email,       setEmail]       = useState('superadmin1@tutorials.com'); // Seed initial role state
-  const [mobile,      setMobile]      = useState('');
-  const [password,    setPassword]    = useState('Password@123');
-  const [showPwd,     setShowPwd]     = useState(false);
-  const [rememberMe,  setRememberMe]  = useState(false);
-  const [isLoading,   setIsLoading]   = useState(false);
-  const [error,       setError]       = useState('');
-  const [showForgot,  setShowForgot]  = useState(false);
+  const [mode,        setMode]       = useState<'staff' | 'parent'>('staff');
+  const [email,       setEmail]      = useState('');
+  const [mobile,      setMobile]     = useState('');
+  const [password,    setPassword]   = useState('');
+  const [showPwd,     setShowPwd]    = useState(false);
+  const [rememberMe,  setRememberMe] = useState(false);
+  const [isLoading,   setIsLoading]  = useState(false);
+  const [error,       setError]      = useState('');
+  const [showForgot,  setShowForgot] = useState(false);
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotSent,  setForgotSent]  = useState(false);
 
@@ -53,33 +44,18 @@ export function Login() {
     setError('');
     setIsLoading(true);
 
-    if (selectedRole === 'parent') {
+    if (mode === 'parent') {
       const trimmedMobile = mobile.trim();
-      if (!trimmedMobile) {
-        setError('Please enter your registered mobile number.');
-        setIsLoading(false);
-        return;
-      }
-      
-      // Allow only valid 10-digit Indian mobile numbers
-      const isValidMobile = /^\d{10}$/.test(trimmedMobile);
-      if (!isValidMobile) {
-        setError('This mobile number is not registered with Guru Shishyaru Tutorials.');
+      if (!/^\d{10}$/.test(trimmedMobile)) {
+        setError('Please enter a valid 10-digit registered mobile number.');
         setIsLoading(false);
         return;
       }
 
-      // Check registered parent mobile requirement
-      if (trimmedMobile !== '9148478969') {
-        setError('This mobile number is not registered with Guru Shishyaru Tutorials.');
-        setIsLoading(false);
-        return;
-      }
-
-      const result = await login({ email: trimmedMobile, isParent: true });
+      const result = await login({ email: trimmedMobile, isParent: true, rememberMe });
       setIsLoading(false);
-      if (result.success && result.role) {
-        navigate(from || getDefaultRoute(result.role), { replace: true });
+      if (result.success && result.roles) {
+        navigate(from || getDefaultRoute(result.roles), { replace: true });
       } else {
         setError(result.error || 'This mobile number is not registered with Guru Shishyaru Tutorials.');
       }
@@ -89,8 +65,8 @@ export function Login() {
     // Standard Staff Login
     const result = await login({ email, password, rememberMe });
     setIsLoading(false);
-    if (result.success && result.role) {
-      navigate(from || getDefaultRoute(result.role), { replace: true });
+    if (result.success && result.roles) {
+      navigate(from || getDefaultRoute(result.roles), { replace: true });
     } else {
       setError(result.error ?? 'Login failed. Please try again.');
     }
@@ -203,13 +179,29 @@ export function Login() {
                 {/* Heading */}
                 <div className="mb-7">
                   <h1 className="text-3xl font-bold text-foreground">
-                    {selectedRole === 'parent' ? 'Parent Login' : 'Sign In'}
+                    {mode === 'parent' ? 'Parent Login' : 'Sign In'}
                   </h1>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {selectedRole === 'parent'
+                    {mode === 'parent'
                       ? 'Enter your registered mobile number'
                       : 'Enter your credentials to access your dashboard'}
                   </p>
+                </div>
+
+                {/* Mode toggle */}
+                <div className="mb-5 flex rounded-xl border border-border overflow-hidden">
+                  {(['staff', 'parent'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => { setMode(m); setError(''); }}
+                      className={`flex-1 py-2.5 text-sm font-semibold transition-colors ${
+                        mode === m ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-secondary'
+                      }`}
+                    >
+                      {m === 'staff' ? 'Staff & Teacher Login' : 'Parent Login'}
+                    </button>
+                  ))}
                 </div>
 
                 {/* Card */}
@@ -224,7 +216,7 @@ export function Login() {
 
                   <form onSubmit={handleLogin} className="space-y-5">
 
-                    {selectedRole === 'parent' ? (
+                    {mode === 'parent' ? (
                       /* 📱 Parent Login Input */
                       <div>
                         <label htmlFor="mobile" className="mb-1.5 block text-sm font-semibold text-foreground">
@@ -326,67 +318,12 @@ export function Login() {
                           Logging in…
                         </>
                       ) : (
-                        <>{selectedRole === 'parent' ? 'Login' : 'Sign In'} <ChevronRight className="h-4 w-4" /></>
+                        <>{mode === 'parent' ? 'Login' : 'Sign In'} <ChevronRight className="h-4 w-4" /></>
                       )}
                     </button>
                   </form>
                 </div>
 
-                {/* Role selector cards (Quick Login Cards act as role selector) */}
-                <div className="mt-6">
-                  <p className="mb-3 text-center text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-                    Select Role & Login
-                  </p>
-                  <div className="grid grid-cols-5 gap-2">
-                    {DEMO_ROLES.map((r) => {
-                      const roleKey = r.role.toLowerCase().replace(' ', '_') as 'super_admin' | 'admin' | 'teacher' | 'parent' | 'accountant';
-                      const isSelected = selectedRole === roleKey;
-
-                      return (
-                        <button
-                          key={r.role}
-                          type="button"
-                          onClick={() => {
-                            setError('');
-                            setSelectedRole(roleKey);
-                            if (roleKey === 'parent') {
-                              setMobile('9148478969');
-                            } else {
-                              setEmail(r.email);
-                              setPassword('Password@123');
-                            }
-                          }}
-                          title={r.role === 'Parent' ? `Parent\nMobile: 9148478969` : `${r.role}\n${r.email}\nPassword: Password@123`}
-                          className={`rounded-xl border px-2 py-2.5 text-center transition-all hover:scale-105 active:scale-95 ${r.bg} ${
-                            isSelected
-                              ? 'ring-2 ring-offset-2 dark:ring-offset-background border-transparent shadow-md scale-105'
-                              : r.border
-                          }`}
-                          style={{
-                            outlineColor: isSelected ? r.dot : undefined
-                          }}
-                        >
-                          <div className="mx-auto mb-1 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: r.dot }} />
-                          <span className={`block text-[10px] font-bold leading-tight ${r.text}`}>
-                            {r.role.split(' ')[0]}
-                          </span>
-                          {r.role.includes(' ') && (
-                            <span className={`block text-[10px] font-bold leading-tight ${r.text}`}>
-                              {r.role.split(' ')[1]}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <p className="mt-2.5 text-center text-xs text-muted-foreground">
-                    {selectedRole === 'parent' ? (
-                      <span>Parent Login uses registered mobile number: <span className="font-mono font-bold text-foreground">9148478969</span></span>
-                    ) : (
-                      <span>Credentials: <span className="font-mono text-foreground font-bold">{email}</span> / <span className="font-mono font-bold text-foreground">Password@123</span></span>
-                    )}
-                  </p>
-                </div>
               </>
             ) : (
               /* ── Forgot Password ── */

@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from 'react-router';
 import React from 'react';
 import { Layout } from './components/Layout';
 import { Login } from './pages/Login';
+import { SelectRole } from './pages/SelectRole';
 import { Unauthorized } from './pages/Unauthorized';
 import { Dashboard } from './pages/Dashboard';
 import { StudentManagement } from './pages/StudentManagement';
@@ -64,6 +65,14 @@ export const router = createBrowserRouter([
   {
     path: '/unauthorized',
     element: <Unauthorized />,
+  },
+  {
+    path: '/select-role',
+    element: (
+      <ProtectedRoute>
+        <SelectRole />
+      </ProtectedRoute>
+    ),
   },
 
   // Protected application routes

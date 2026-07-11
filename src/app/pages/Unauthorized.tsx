@@ -8,7 +8,7 @@ export function Unauthorized() {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const homeRoute = user ? getDefaultRoute(user.role) : '/login';
+  const homeRoute = user ? getDefaultRoute(user.roles) : '/login';
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4">

@@ -417,7 +417,7 @@ export async function exportReportToPdf(
   const revenueChart = data.charts.find((chart) => chart.title === 'Monthly Revenue');
   if (revenueChart) {
     const revenueImage = await createChartImage(revenueChart);
-    pdfService.addImage(revenueImage, 'PNG', 160, 60);
+    pdfService.addImage(revenueImage, 'PNG', pdfService.getContentWidth(), 60);
   }
   pdfService.addTable([['Metric', 'Value']], [
     ['Current Revenue', formatCurrency(revenueCurrent)],
@@ -433,7 +433,7 @@ export async function exportReportToPdf(
   const enrollmentChart = data.charts.find((chart) => chart.title === 'Student Enrollment Trend');
   if (enrollmentChart) {
     const enrollmentImage = await createChartImage(enrollmentChart);
-    pdfService.addImage(enrollmentImage, 'PNG', 160, 60);
+    pdfService.addImage(enrollmentImage, 'PNG', pdfService.getContentWidth(), 60);
   }
   pdfService.addTable([['Metric', 'Value']], [
     ['Current Admissions', formatNumber(enrollmentCurrent)],
@@ -449,7 +449,7 @@ export async function exportReportToPdf(
   const attendanceChart = data.charts.find((chart) => chart.title === 'Attendance Trend');
   if (attendanceChart) {
     const attendanceImage = await createChartImage(attendanceChart);
-    pdfService.addImage(attendanceImage, 'PNG', 160, 60);
+    pdfService.addImage(attendanceImage, 'PNG', pdfService.getContentWidth(), 60);
   }
   pdfService.addTable([['Metric', 'Value']], [
     ['Average Attendance', `${attendanceCurrent}%`],
@@ -464,7 +464,7 @@ export async function exportReportToPdf(
   const examChart = data.charts.find((chart) => chart.title === 'Exam Performance');
   if (examChart) {
     const examImage = await createChartImage(examChart);
-    pdfService.addImage(examImage, 'PNG', 160, 60);
+    pdfService.addImage(examImage, 'PNG', pdfService.getContentWidth(), 60);
   }
   pdfService.addTable([['Metric', 'Value']], [
     ['Average Marks', `${examAverage}`],
@@ -481,7 +481,7 @@ export async function exportReportToPdf(
   const feeChart = data.charts.find((chart) => chart.title === 'Fee Collection Trend');
   if (feeChart) {
     const feeImage = await createChartImage(feeChart);
-    pdfService.addImage(feeImage, 'PNG', 160, 60);
+    pdfService.addImage(feeImage, 'PNG', pdfService.getContentWidth(), 60);
   }
   pdfService.addTable([['Metric', 'Value']], [
     ['Collected Fees', formatCurrency(feeCurrent)],
@@ -701,9 +701,13 @@ function renderSalarySlip(
     theme: 'grid',
   });
 
-  const highlightY = pdfService.getCurrentY();
-  pdfService.checkPageBreak(34);
   const boxHeight = 28;
+  const boxSpacing = 10;
+  // checkPageBreak() may call doc.addPage() and reset currentY to bodyTop, so the box's
+  // Y position must be read AFTER the page-break check, not before — otherwise a stale
+  // pre-break Y (near the bottom of the old page) gets used to draw the box on the new page.
+  pdfService.checkPageBreak(boxHeight + boxSpacing);
+  const highlightY = pdfService.getCurrentY();
   doc.setDrawColor(0, 76, 153);
   doc.setFillColor(230, 240, 255);
   doc.roundedRect(marginLeft, highlightY, contentWidth, boxHeight, 2, 2, 'FD');
@@ -711,7 +715,7 @@ function renderSalarySlip(
   doc.setFont('times', 'bold');
   doc.setFontSize(14);
   doc.setTextColor(10, 35, 80);
-  doc.text('Total Payable Amount', marginLeft + 4, highlightY + 8);
+  doc.text('Total Payable Amount', marginLeft + 4, highlightY + 8, { baseline: 'top' });
 
   doc.setFontSize(18);
   doc.text(netSalary, marginLeft + contentWidth - 4, highlightY + 11, {
@@ -719,7 +723,7 @@ function renderSalarySlip(
     baseline: 'top',
   });
 
-  pdfService.setCurrentY(highlightY + boxHeight + 10);
+  pdfService.setCurrentY(highlightY + boxHeight + boxSpacing);
 
   pdfService.addSectionHeading('Administrative Details');
   pdfService.addTable([

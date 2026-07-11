@@ -6,7 +6,16 @@ export class PDFTemplateService {
   public doc: jsPDF;
   public currentY: number;
   
-  private headerHeight: number = 55; // Rendered height of the letterhead graphic (in mm)
+  // Rendered height of the letterhead graphic (in mm), measured from the top of the page.
+  // The letterhead asset is US Letter (612x792pt) while content pages are A4 (595.28x841.89pt).
+  // exportWithLetterhead() scales the letterhead to FIT (uniform scale, no distortion) and
+  // centers it, which leaves a blank margin above/below the artwork. Re-derived from the
+  // original 55mm (tuned against the old non-uniform stretch, v-scale ~1.063) as:
+  //   blank top margin (~12.6mm, from vertical centering) + scaled header graphic height
+  //   (55 / 1.063 native mm * new fit-scale 0.973 ~= 50.3mm) ≈ 63mm.
+  // Treat as a hand-tuned constant; verify visually against a rendered PDF if the letterhead
+  // asset or page size ever changes.
+  private headerHeight: number = 63;
   private footerTop: number;
   
   private bodyTop: number;
@@ -46,13 +55,26 @@ export class PDFTemplateService {
       this.currentY = y;
   }
 
+  public getContentWidth(): number {
+    return this.pageWidth - this.margins.left - this.margins.right;
+  }
+
+  // Unified vertical-rhythm formula for headings: approximate single-line text height
+  // (fontSize in pt -> mm, with the ~1.15 line-height factor baked in) plus a fixed
+  // spacing gap below the heading. Replaces three independently hand-picked constants
+  // (6+7, 6+8, 5.5+8) that produced slightly inconsistent spacing for similarly-sized
+  // headings; results stay within ~1.5mm of the previous values.
+  private headingSpacing(fontSize: number): number {
+    return fontSize * 0.4 + 8;
+  }
+
   public addTitle(title: string) {
     this.checkPageBreak(25);
     this.doc.setFont('times', 'bold');
     this.doc.setFontSize(16);
     this.doc.setTextColor(0, 0, 0);
     this.doc.text(title, this.pageWidth / 2, this.currentY, { align: 'center', baseline: 'top' });
-    this.currentY += 6 + 7;
+    this.currentY += this.headingSpacing(16);
   }
 
   public addMainHeading(heading: string) {
@@ -61,7 +83,7 @@ export class PDFTemplateService {
     this.doc.setFontSize(16);
     this.doc.setTextColor(0, 0, 0);
     this.doc.text(heading, this.margins.left, this.currentY, { align: 'left', baseline: 'top' });
-    this.currentY += 6 + 8;
+    this.currentY += this.headingSpacing(16);
   }
 
   public addSectionHeading(heading: string) {
@@ -70,7 +92,7 @@ export class PDFTemplateService {
     this.doc.setFontSize(14);
     this.doc.setTextColor(0, 0, 0);
     this.doc.text(heading, this.margins.left, this.currentY, { align: 'left', baseline: 'top' });
-    this.currentY += 5.5 + 8;
+    this.currentY += this.headingSpacing(14);
   }
 
   public addParagraph(text: string) {
@@ -107,7 +129,10 @@ export class PDFTemplateService {
       theme: 'grid',
       startY: this.currentY,
       margin: {
-        top: 0,
+        // Used by jspdf-autotable to reset cursor.y on every new page it creates internally
+        // during pagination. Must match bodyTop so continuation pages leave room for the
+        // letterhead header instead of resuming at y=0 (under/through the header band).
+        top: this.bodyTop,
         bottom: this.pageHeight - this.bodyBottom,
         left: this.margins.left,
         right: this.margins.right,
@@ -135,22 +160,15 @@ export class PDFTemplateService {
       pageBreak: 'auto',
       showHead: 'everyPage',
       tableWidth: this.pageWidth - this.margins.left - this.margins.right,
-      willDrawCell: (data) => {
-        if (data.row.section === 'body' && data.cell.raw && typeof data.cell.raw === 'string') {
-          const maxWidth = this.pageWidth - this.margins.left - this.margins.right - 6;
-          data.cell.raw = this.doc.splitTextToSize(data.cell.raw, maxWidth);
-        }
-      },
     } as UserOptions;
   }
 
   public addTable(headers: string[][] | string[], body: any[][], options: UserOptions = {}) {
     const normalizedHeaders = this.normalizeTableHeaders(headers);
 
-    if (this.currentY >= this.bodyBottom - 15) {
-      this.doc.addPage();
-      this.currentY = this.bodyTop;
-    }
+    // Reserve enough room for a header row plus at least one data row before starting the
+    // table here; reuses the shared checkPageBreak helper instead of an ad-hoc check.
+    this.checkPageBreak(30);
 
     autoTable(this.doc, {
       head: normalizedHeaders,
@@ -191,13 +209,14 @@ export class PDFTemplateService {
       this.doc.setFontSize(10);
       this.doc.setTextColor(0, 0, 0);
 
-      const generatedText = 'This is a computer-generated document and does not require a signature.';
-      this.doc.text(generatedText, this.margins.left, this.footerTop);
-
+      // NOTE: the letterhead PDF asset (public/letterhead.pdf) already has its own baked-in
+      // footer text (a disclaimer sentence + a static "Page 1") that cannot be edited since
+      // it's a fixed binary design file. We intentionally do NOT draw our own disclaimer or
+      // "Confidential" text here to avoid printing the disclaimer twice. We DO keep the
+      // dynamically-generated "Page X of Y" below, since the letterhead's baked-in "Page 1"
+      // is wrong on every page after the first and there is no way to suppress it from here.
       const dateText = new Date().toLocaleString('en-IN');
-      this.doc.text(`Generated: ${dateText}`, this.margins.left, this.footerTop + 5);
-
-      this.doc.text('Confidential', this.pageWidth / 2, this.footerTop, { align: 'center' });
+      this.doc.text(`Generated: ${dateText}`, this.margins.left, this.footerTop);
 
       const pageText = `Page ${i} of ${pageCount}`;
       this.doc.text(pageText, this.pageWidth - this.margins.right, this.footerTop, { align: 'right' });
@@ -219,16 +238,28 @@ export class PDFTemplateService {
 
       const letterheadPage = await finalDoc.embedPage(letterheadDoc.getPage(0));
       const contentPages = await finalDoc.embedPages(contentDoc.getPages());
+      const letterheadDims = letterheadPage.size();
 
       for (let i = 0; i < contentPages.length; i++) {
         const dims = contentPages[i].size();
         const page = finalDoc.addPage([dims.width, dims.height]);
 
+        // The letterhead asset is US Letter (612x792pt) but content pages are A4
+        // (595.28x841.89pt). Drawing it stretched to dims.width/height (as before) distorts
+        // the artwork non-uniformly. Instead, scale to FIT (uniform scale, preserving aspect
+        // ratio) so nothing is cut off, and center it — appropriate for a letterhead whose
+        // artwork/margins should align consistently rather than be cropped.
+        const fitScale = Math.min(dims.width / letterheadDims.width, dims.height / letterheadDims.height);
+        const lhWidth = letterheadDims.width * fitScale;
+        const lhHeight = letterheadDims.height * fitScale;
+        const lhX = (dims.width - lhWidth) / 2;
+        const lhY = (dims.height - lhHeight) / 2;
+
         page.drawPage(letterheadPage, {
-          x: 0,
-          y: 0,
-          width: dims.width,
-          height: dims.height,
+          x: lhX,
+          y: lhY,
+          width: lhWidth,
+          height: lhHeight,
         });
 
         page.drawPage(contentPages[i], {

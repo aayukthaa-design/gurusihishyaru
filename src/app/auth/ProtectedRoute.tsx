@@ -79,7 +79,7 @@ export function GuestRoute({ children }: GuestRouteProps) {
   }
 
   if (isAuthenticated && user) {
-    return <Navigate to={getDefaultRoute(user.role)} replace />;
+    return <Navigate to={getDefaultRoute(user.roles)} replace />;
   }
 
   return <>{children}</>;

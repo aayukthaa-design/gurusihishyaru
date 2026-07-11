@@ -15,10 +15,10 @@ import type {
   Role,
   User,
 } from './types';
-import { createToken, verifyToken } from './jwt';
-import { findUserByEmailOrMobile } from './seedUsers';
-import { hasModuleAccess, hasPermission, canAccessRoute } from './rbac';
+import { isTokenExpired } from './jwt';
+import { hasModuleAccess, hasPermission, canAccessRoute, getPrimaryRole } from './rbac';
 import { refreshNotifications } from '../lib/notificationService';
+import { apiFetch, setUnauthorizedHandler } from '../lib/apiClient';
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
 
@@ -31,7 +31,8 @@ type AuthAction =
   | { type: 'LOGIN_SUCCESS'; payload: { user: User; token: string } }
   | { type: 'LOGOUT' }
   | { type: 'SET_LOADING'; payload: boolean }
-  | { type: 'RESTORE_SESSION'; payload: { user: User; token: string } };
+  | { type: 'RESTORE_SESSION'; payload: { user: User; token: string } }
+  | { type: 'SWITCH_ROLE'; payload: { role: Role } };
 
 const initialState: AuthState = {
   user: null,
@@ -61,6 +62,8 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
       };
     case 'SET_LOADING':
       return { ...state, isLoading: action.payload };
+    case 'SWITCH_ROLE':
+      return state.user ? { ...state, user: { ...state.user, role: action.payload.role } } : state;
     default:
       return state;
   }
@@ -81,23 +84,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [state.user]);
 
+  // Logout
+  const logout = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(USER_KEY);
+    dispatch({ type: 'LOGOUT' });
+  }, []);
+
+  // Any authenticated API call that comes back 401 (expired/invalid/revoked
+  // token) forces a logout — the server is the real authority, not the
+  // locally-decoded exp check used only for the initial session restore.
+  useEffect(() => {
+    setUnauthorizedHandler(logout);
+    return () => setUnauthorizedHandler(null);
+  }, [logout]);
+
   // Restore session on mount
   useEffect(() => {
     const token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
     const userJson = localStorage.getItem(USER_KEY) || sessionStorage.getItem(USER_KEY);
 
-    if (token && userJson) {
-      const payload = verifyToken(token);
-      if (payload) {
-        try {
-          const user: User = JSON.parse(userJson);
-          dispatch({ type: 'RESTORE_SESSION', payload: { user, token } });
-          return;
-        } catch {
-          // fall through to logout
-        }
+    if (token && userJson && !isTokenExpired(token)) {
+      try {
+        const user: User = JSON.parse(userJson);
+        dispatch({ type: 'RESTORE_SESSION', payload: { user, token } });
+        return;
+      } catch {
+        // fall through to logout
       }
-      // Token expired or invalid — clear storage
+    }
+
+    if (token || userJson) {
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
       sessionStorage.removeItem(TOKEN_KEY);
@@ -109,31 +128,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Login
   const login = useCallback(
-    async (credentials: LoginCredentials): Promise<{ success: boolean; role?: Role; error?: string }> => {
+    async (credentials: LoginCredentials): Promise<{ success: boolean; role?: Role; roles?: Role[]; error?: string }> => {
       dispatch({ type: 'SET_LOADING', payload: true });
-
-      // Simulate async authentication delay
-      await new Promise((resolve) => setTimeout(resolve, 800));
 
       if (credentials.isParent) {
         try {
-          const response = await fetch('http://localhost:4000/api/auth/parent-login', {
+          const response = await apiFetch('/api/auth/parent-login', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mobile: credentials.email.trim() }),
+            skipAuth: true,
+            body: { mobile: credentials.email.trim() },
           });
           if (response.ok) {
             const data = await response.json();
-            if (data.success && data.user) {
-              const user = data.user;
-              const token = createToken(user, credentials.rememberMe);
+            if (data.success && data.user && data.token) {
+              const user: User = { ...data.user, roles: ['parent'] };
+              const token: string = data.token;
               const storage = credentials.rememberMe ? localStorage : sessionStorage;
 
               storage.setItem(TOKEN_KEY, token);
               storage.setItem(USER_KEY, JSON.stringify(user));
 
               dispatch({ type: 'LOGIN_SUCCESS', payload: { user, token } });
-              return { success: true, role: user.role };
+              return { success: true, role: user.role, roles: user.roles };
             }
           } else {
             const data = await response.json().catch(() => ({}));
@@ -145,45 +161,59 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           dispatch({ type: 'SET_LOADING', payload: false });
           return { success: false, error: 'Connection to server failed. Please try again.' };
         }
-      }
-
-      const seedUser = findUserByEmailOrMobile(credentials.email);
-
-      if (!seedUser) {
         dispatch({ type: 'SET_LOADING', payload: false });
-        return { success: false, error: 'No account found with this email or mobile number.' };
+        return { success: false, error: 'This mobile number is not registered with Guru Shishyaru Tutorials.' };
       }
 
-      if (credentials.password !== seedUser.password) {
+      try {
+        const response = await apiFetch('/api/auth/login', {
+          method: 'POST',
+          skipAuth: true,
+          body: {
+            identifier: credentials.email.trim(),
+            password: credentials.password,
+            rememberMe: credentials.rememberMe,
+          },
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          dispatch({ type: 'SET_LOADING', payload: false });
+          return { success: false, error: data.error || 'Invalid credentials.' };
+        }
+
+        const data = await response.json();
+        const roles: Role[] = data.user.roles;
+        const user: User = { ...data.user, role: getPrimaryRole(roles) };
+        const token: string = data.token;
+        const storage = credentials.rememberMe ? localStorage : sessionStorage;
+
+        storage.setItem(TOKEN_KEY, token);
+        storage.setItem(USER_KEY, JSON.stringify(user));
+
+        dispatch({ type: 'LOGIN_SUCCESS', payload: { user, token } });
+        return { success: true, role: user.role, roles };
+      } catch (err) {
+        console.error('Login API error:', err);
         dispatch({ type: 'SET_LOADING', payload: false });
-        return { success: false, error: 'Incorrect password. Please try again.' };
+        return { success: false, error: 'Connection to server failed. Please try again.' };
       }
-
-      // Strip password from stored user
-      const { password: _pw, ...user } = seedUser;
-
-      const token = createToken(user, credentials.rememberMe);
-      const storage = credentials.rememberMe ? localStorage : sessionStorage;
-
-      storage.setItem(TOKEN_KEY, token);
-      storage.setItem(USER_KEY, JSON.stringify(user));
-
-      dispatch({ type: 'LOGIN_SUCCESS', payload: { user, token } });
-
-      // Return role so callers can redirect without a second lookup
-      return { success: true, role: user.role };
     },
     []
   );
 
-  // Logout
-  const logout = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
-    sessionStorage.removeItem(TOKEN_KEY);
-    sessionStorage.removeItem(USER_KEY);
-    dispatch({ type: 'LOGOUT' });
-  }, []);
+  // Switch active role (multi-role users only) — UI/UX only, does not re-issue
+  // the token; server-side authorization always checks the full `roles` array.
+  const switchRole = useCallback(
+    (role: Role) => {
+      if (!state.user || !state.user.roles.includes(role)) return;
+      const updatedUser: User = { ...state.user, role };
+      const storage = localStorage.getItem(USER_KEY) ? localStorage : sessionStorage;
+      storage.setItem(USER_KEY, JSON.stringify(updatedUser));
+      dispatch({ type: 'SWITCH_ROLE', payload: { role } });
+    },
+    [state.user]
+  );
 
   // Permission check
   const checkPermission = useCallback(
@@ -216,6 +246,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ...state,
     login,
     logout,
+    switchRole,
     hasPermission: checkPermission,
     hasModuleAccess: checkModuleAccess,
     canAccess,

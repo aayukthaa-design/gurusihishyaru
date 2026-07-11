@@ -1,14 +1,21 @@
 import { Bell, Search } from 'lucide-react';
+import { useNavigate } from 'react-router';
 import { ThemeToggle } from './ThemeToggle';
 import { useAuth } from '../auth/AuthContext';
-import { getRoleLabel } from '../auth/rbac';
+import { getRoleLabel, defaultRouteForRole } from '../auth/rbac';
 
 interface HeaderProps {
   title: string;
 }
 
 export function Header({ title }: HeaderProps) {
-  const { user } = useAuth();
+  const { user, switchRole } = useAuth();
+  const navigate = useNavigate();
+
+  const handleRoleChange = (role: string) => {
+    switchRole(role as NonNullable<typeof user>['role']);
+    navigate(defaultRouteForRole(role as NonNullable<typeof user>['role']), { replace: true });
+  };
 
   return (
     <header className="sticky top-0 z-10 flex h-16 items-center justify-between border-b border-border bg-background px-6 transition-colors duration-200">
@@ -32,6 +39,20 @@ export function Header({ title }: HeaderProps) {
         </button>
 
         <ThemeToggle />
+
+        {/* Role switcher (multi-role accounts only) */}
+        {user && user.roles.length > 1 && (
+          <select
+            value={user.role}
+            onChange={(e) => handleRoleChange(e.target.value)}
+            className="hidden h-9 rounded-lg border border-border bg-card px-2 text-xs font-medium text-foreground sm:block"
+            title="Switch role"
+          >
+            {user.roles.map((role) => (
+              <option key={role} value={role}>{getRoleLabel(role)}</option>
+            ))}
+          </select>
+        )}
 
         {/* User chip */}
         {user && (

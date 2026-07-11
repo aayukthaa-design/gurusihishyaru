@@ -5,12 +5,22 @@ import fs from 'fs';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import { WhatsAppService } from './whatsappService.js';
 
 
 const PORT = process.env.PORT || 4000;
 const UPLOAD_DIR = path.resolve(process.cwd(), 'server', 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-insecure-secret-change-in-production';
+if (!process.env.JWT_SECRET) {
+  console.warn('WARNING: JWT_SECRET is not set in the environment — using an insecure development default. Set JWT_SECRET in .env before deploying.');
+}
+const TOKEN_EXPIRY = '24h';
+const REMEMBER_ME_EXPIRY = '7d';
+const BCRYPT_ROUNDS = 10;
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
@@ -728,8 +738,24 @@ async function initDb() {
     );
   `);
 
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT UNIQUE,
+      mobile TEXT UNIQUE,
+      passwordHash TEXT NOT NULL,
+      roles TEXT NOT NULL,
+      branchId TEXT,
+      status TEXT DEFAULT 'Active',
+      mustChangePassword INTEGER DEFAULT 0,
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+  `);
+
   // Seed default SMS settings
-  
+
   try { await db.exec("ALTER TABLE inventory_items ADD COLUMN uniformSize TEXT;"); } catch(e) {}
   try { await db.exec("ALTER TABLE inventory_allocations ADD COLUMN uniformSize TEXT;"); } catch(e) {}
   try { await db.exec("INSERT OR IGNORE INTO inventory_categories (name, status) VALUES ('Books', 'Active'), ('Uniform', 'Active'), ('Stationery', 'Active');"); } catch(e) {}
@@ -903,6 +929,35 @@ async function initDb() {
     await insertInv.finalize();
   }
 
+  // Seed real staff accounts (one-time; initial password = each person's own mobile number)
+  const usersCount = await db.get('SELECT COUNT(1) as c FROM users');
+  if (usersCount.c === 0) {
+    const staff = [
+      { id: 'USR001', name: 'Shwetha', email: 'shwetha931998@gmail.com', mobile: '6363099546', roles: ['super_admin'], branchId: null },
+      { id: 'USR002', name: 'Jeevana Marakala', email: 'jeevannadoor@gmail.com', mobile: '9742879907', roles: ['super_admin'], branchId: null },
+      { id: 'USR003', name: 'Keerthana G D', email: 'keerthanagd27@gmail.com', mobile: '8296776223', roles: ['admin'], branchId: 'branch_main' },
+      { id: 'USR004', name: 'Varuna M', email: 'madanu666@gmail.com', mobile: '9980522847', roles: ['admin'], branchId: 'branch_main' },
+      { id: 'USR005', name: 'Nithya R', email: 'nithyaraghu10@gmail.com', mobile: '9611963995', roles: ['teacher'], branchId: 'branch_main' },
+      { id: 'USR006', name: 'Pooja R', email: 'rameshpooja486@gmail.com', mobile: '9538542048', roles: ['teacher'], branchId: 'branch_main' },
+      { id: 'USR007', name: 'Pallavi M P', email: 'pallavimp456@gmail.com', mobile: '8431281224', roles: ['teacher'], branchId: 'branch_main' },
+      { id: 'USR008', name: 'Shalini H S', email: 'shalinihs63@gmail.com', mobile: '9945052954', roles: ['teacher'], branchId: 'branch_main' },
+      { id: 'USR009', name: 'Meghana', email: 'megharathnamegharathna@gmail.com', mobile: '9353721344', roles: ['teacher'], branchId: 'branch_main' },
+      { id: 'USR010', name: 'Mamatha P K', email: 'mamathapk0207@gmail.com', mobile: '9742448558', roles: ['teacher'], branchId: 'branch_main' },
+      { id: 'USR011', name: 'Renuka', email: 'renukajhsathish@gmail.com', mobile: '9036431738', roles: ['teacher'], branchId: 'branch_main' },
+    ];
+
+    const insertUser = await db.prepare(`
+      INSERT INTO users (id, name, email, mobile, passwordHash, roles, branchId, status, mustChangePassword, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', 0, ?, ?)
+    `);
+    for (const person of staff) {
+      const passwordHash = bcrypt.hashSync(person.mobile, BCRYPT_ROUNDS);
+      const now = new Date().toISOString();
+      await insertUser.run(person.id, person.name, person.email, person.mobile, passwordHash, JSON.stringify(person.roles), person.branchId, now, now);
+    }
+    await insertUser.finalize();
+  }
+
   return db;
 }
 
@@ -914,6 +969,157 @@ async function main() {
   const db = await initDb();
 
   app.use('/uploads', express.static(UPLOAD_DIR));
+
+  // ─── Auth helpers ───────────────────────────────────────────────────────────
+
+  function mapUserRow(row) {
+    const roles = parseJsonList(row.roles);
+    return {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      mobile: row.mobile,
+      roles,
+      role: roles[0] || 'teacher',
+      branchId: row.branchId || undefined,
+      status: row.status,
+      mustChangePassword: Boolean(row.mustChangePassword),
+      createdAt: row.createdAt,
+    };
+  }
+
+  function signToken(userRow, rememberMe) {
+    const roles = parseJsonList(userRow.roles);
+    return jwt.sign(
+      {
+        sub: userRow.id,
+        name: userRow.name,
+        email: userRow.email,
+        mobile: userRow.mobile,
+        roles,
+        branchId: userRow.branchId || null,
+      },
+      JWT_SECRET,
+      { expiresIn: rememberMe ? REMEMBER_ME_EXPIRY : TOKEN_EXPIRY }
+    );
+  }
+
+  function authMiddleware(req, res, next) {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      const payload = jwt.verify(token, JWT_SECRET);
+      req.user = payload;
+      next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Invalid or expired session' });
+    }
+  }
+
+  // Applied to every route registered below except /api/auth/* and /uploads/*.
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/auth/') || req.path.startsWith('/uploads/')) return next();
+    return authMiddleware(req, res, next);
+  });
+
+  // Non-super_admin requests are pinned to their own branch: query/body branchId
+  // is ignored and overwritten server-side, so a scoped user can never read or
+  // write another branch's data by tampering with the client.
+  function resolveBranchId(req, requestedBranchId) {
+    const roles = req.user?.roles || [];
+    if (roles.includes('super_admin')) return requestedBranchId || undefined;
+    return req.user?.branchId || undefined;
+  }
+
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const identifier = String(req.body?.identifier || '').trim();
+      const password = String(req.body?.password || '');
+      if (!identifier || !password) {
+        return res.status(400).json({ error: 'Identifier and password are required' });
+      }
+      const row = await db.get(
+        'SELECT * FROM users WHERE (LOWER(email) = LOWER(?) OR mobile = ?) AND status = ?',
+        identifier, identifier, 'Active'
+      );
+      if (!row) return res.status(401).json({ error: 'Invalid credentials' });
+
+      const match = await bcrypt.compare(password, row.passwordHash);
+      if (!match) return res.status(401).json({ error: 'Invalid credentials' });
+
+      const rememberMe = Boolean(req.body?.rememberMe);
+      const token = signToken(row, rememberMe);
+      res.json({ token, user: mapUserRow(row) });
+    } catch (err) {
+      console.error('Login error:', err);
+      res.status(500).json({ error: 'Login failed' });
+    }
+  });
+
+  // ─── Users CRUD (Super Admin manages staff accounts) ───────────────────────
+
+  app.get('/api/users', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    const rows = await db.all('SELECT * FROM users ORDER BY createdAt DESC');
+    res.json(rows.map(mapUserRow));
+  });
+
+  app.post('/api/users', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const body = req.body || {};
+      if (!body.name || !body.mobile || !Array.isArray(body.roles) || body.roles.length === 0) {
+        return res.status(400).json({ error: 'name, mobile and at least one role are required' });
+      }
+      const id = `USR${Date.now()}`;
+      const initialPassword = body.password || body.mobile;
+      const passwordHash = await bcrypt.hash(initialPassword, BCRYPT_ROUNDS);
+      const now = new Date().toISOString();
+      const branchId = body.roles.includes('super_admin') ? null : (body.branchId || null);
+      await db.run(
+        `INSERT INTO users (id, name, email, mobile, passwordHash, roles, branchId, status, mustChangePassword, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', 1, ?, ?)`,
+        id, body.name, body.email || null, body.mobile, passwordHash, JSON.stringify(body.roles), branchId, now, now
+      );
+      const row = await db.get('SELECT * FROM users WHERE id = ?', id);
+      res.status(201).json(mapUserRow(row));
+    } catch (err) {
+      console.error('Create user error:', err);
+      if (String(err.message || '').includes('UNIQUE')) {
+        return res.status(409).json({ error: 'A user with this email or mobile already exists' });
+      }
+      res.status(500).json({ error: 'Failed to create user' });
+    }
+  });
+
+  app.put('/api/users/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM users WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'User not found' });
+      const body = req.body || {};
+      const name = body.name ?? existing.name;
+      const email = body.email ?? existing.email;
+      const mobile = body.mobile ?? existing.mobile;
+      const roles = Array.isArray(body.roles) ? body.roles : parseJsonList(existing.roles);
+      const branchId = roles.includes('super_admin') ? null : (body.branchId ?? existing.branchId);
+      const status = body.status ?? existing.status;
+      await db.run(
+        `UPDATE users SET name=?, email=?, mobile=?, roles=?, branchId=?, status=?, updatedAt=? WHERE id=?`,
+        name, email, mobile, JSON.stringify(roles), branchId, status, new Date().toISOString(), req.params.id
+      );
+      if (body.password) {
+        const passwordHash = await bcrypt.hash(body.password, BCRYPT_ROUNDS);
+        await db.run('UPDATE users SET passwordHash=?, mustChangePassword=0 WHERE id=?', passwordHash, req.params.id);
+      }
+      const row = await db.get('SELECT * FROM users WHERE id = ?', req.params.id);
+      res.json(mapUserRow(row));
+    } catch (err) {
+      console.error('Update user error:', err);
+      res.status(500).json({ error: 'Failed to update user' });
+    }
+  });
 
   app.post('/api/exams', upload.single('attachment'), async (req, res) => {
     try {
@@ -1611,15 +1817,23 @@ async function main() {
       
       const studentRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', parent.id);
       const linkedStudentIds = studentRows.map(r => r.studentId);
-      
+
+      // Parent login itself is unchanged (mobile lookup, no password check —
+      // out of scope for this pass), but every other route now requires a
+      // real signed token, so a real one is issued here too, scoped to the
+      // 'parent' role, or the parent portal would 401 on its next API call.
+      const token = signToken({ id: parent.id, name: `${parent.firstName} ${parent.lastName}`, email: parent.email, mobile: parent.mobile, roles: JSON.stringify(['parent']), branchId: parent.branchId }, false);
+
       res.json({
         success: true,
+        token,
         user: {
           id: parent.id,
           name: `${parent.firstName} ${parent.lastName}`,
           email: parent.email,
           mobile: parent.mobile,
           role: 'parent',
+          roles: ['parent'],
           branchId: parent.branchId,
           linkedStudentIds: linkedStudentIds,
           status: parent.status
@@ -1634,7 +1848,8 @@ async function main() {
   // --- Students API ---
   app.get('/api/students', async (req, res) => {
     try {
-      const { className, branchId } = req.query;
+      const { className } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM students';
       const params = [];
       const conditions = [];
@@ -1669,7 +1884,8 @@ async function main() {
 
       const now = new Date().toISOString();
       const studentId = s.id || `STU${Date.now()}`;
-      
+      const branchId = resolveBranchId(req, s.branchId) || 'branch_main';
+
       // Save student
       const stmt = await db.prepare(`
         INSERT INTO students (
@@ -1681,7 +1897,7 @@ async function main() {
       `);
       await stmt.run(
         studentId, s.firstName, s.lastName, `${s.firstName} ${s.lastName}`, s.gender || 'Male', s.dob || '',
-        s.className || '', s.batch || '', s.branchId || '', s.rollNumber || '', s.admissionNumber || '',
+        s.className || '', s.batch || '', branchId, s.rollNumber || '', s.admissionNumber || '',
         s.admissionDate || now.split('T')[0], s.status || 'Active', s.fatherName || '', s.motherName || '',
         s.primaryParentName || '', s.relationship || '', s.fatherMobile || '', s.motherMobile || '',
         s.primaryParentMobile, s.parentEmail || '', s.guardianName || '', s.guardianMobile || '', s.address || ''
@@ -1703,7 +1919,7 @@ async function main() {
         await db.run(`
           INSERT INTO parents (id, firstName, lastName, mobile, email, password, branchId, status, createdAt)
           VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?)
-        `, parentId, fName, lName, s.primaryParentMobile, s.parentEmail || '', tempPassword, s.branchId || '', now);
+        `, parentId, fName, lName, s.primaryParentMobile, s.parentEmail || '', tempPassword, branchId, now);
       }
 
       // Link parent to student
@@ -1724,9 +1940,10 @@ async function main() {
     try {
       const studentId = req.params.id;
       const s = req.body;
-      
+      const branchId = resolveBranchId(req, s.branchId) || 'branch_main';
+
       const stmt = await db.prepare(`
-        UPDATE students SET 
+        UPDATE students SET
           firstName=?, lastName=?, fullName=?, gender=?, dob=?, className=?, batch=?, branchId=?,
           rollNumber=?, admissionNumber=?, admissionDate=?, status=?, fatherName=?, motherName=?,
           primaryParentName=?, relationship=?, fatherMobile=?, motherMobile=?, primaryParentMobile=?,
@@ -1734,7 +1951,7 @@ async function main() {
         WHERE id=?
       `);
       await stmt.run(
-        s.firstName, s.lastName, `${s.firstName} ${s.lastName}`, s.gender, s.dob, s.className, s.batch, s.branchId,
+        s.firstName, s.lastName, `${s.firstName} ${s.lastName}`, s.gender, s.dob, s.className, s.batch, branchId,
         s.rollNumber, s.admissionNumber, s.admissionDate, s.status, s.fatherName, s.motherName,
         s.primaryParentName, s.relationship, s.fatherMobile, s.motherMobile, s.primaryParentMobile,
         s.parentEmail, s.guardianName, s.guardianMobile, s.address, studentId
@@ -1754,7 +1971,7 @@ async function main() {
         await db.run(`
           INSERT INTO parents (id, firstName, lastName, mobile, email, password, branchId, status, createdAt)
           VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?)
-        `, parentId, fName, lName, s.primaryParentMobile, s.parentEmail || '', 'Password@123', s.branchId || '', new Date().toISOString());
+        `, parentId, fName, lName, s.primaryParentMobile, s.parentEmail || '', 'Password@123', branchId, new Date().toISOString());
       }
 
       // Re-link parent to student
@@ -2395,7 +2612,8 @@ async function main() {
   // --- Accounts Ledger Endpoints ---
   app.get('/api/ledger', async (req, res) => {
     try {
-      const { branchId, type, category, voucherNumber, date } = req.query;
+      const { type, category, voucherNumber, date } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM ledger_transactions WHERE 1=1';
       const params = [];
       if (branchId) {
@@ -2441,7 +2659,8 @@ async function main() {
 
   app.post('/api/ledger', upload.single('attachment'), async (req, res) => {
     try {
-      const { date, type, category, description, amount, paymentMode, referenceNumber, enteredBy, branchId } = req.body;
+      const { date, type, category, description, amount, paymentMode, referenceNumber, enteredBy } = req.body;
+      const branchId = resolveBranchId(req, req.body.branchId) || 'branch_main';
       const file = req.file;
 
       if (!date || !type || !category || !description || !amount || !paymentMode) {
@@ -2460,7 +2679,7 @@ async function main() {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const result = await stmt.run(
-        voucherNumber, date, type, category, description, Number(amount), paymentMode, referenceNumber || '', enteredBy || '', branchId || '',
+        voucherNumber, date, type, category, description, Number(amount), paymentMode, referenceNumber || '', enteredBy || '', branchId,
         file ? `/uploads/${file.filename}` : null, file ? file.originalname : null, file ? file.size : null
       );
       await stmt.finalize();
@@ -2529,7 +2748,7 @@ async function main() {
 
   app.get('/api/inventory', async (req, res) => {
     try {
-      const { branchId } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM inventory_items';
       const params = [];
       if (branchId) {
@@ -2546,7 +2765,8 @@ async function main() {
 
   app.post('/api/inventory', async (req, res) => {
     try {
-      const { itemName, category, description, quantity, minStock, unit, purchaseDate, supplier, purchaseCost, branchId, status } = req.body;
+      const { itemName, category, description, quantity, minStock, unit, purchaseDate, supplier, purchaseCost, status } = req.body;
+      const branchId = resolveBranchId(req, req.body.branchId) || 'branch_main';
       if (!itemName || !category || quantity === undefined || !unit || purchaseCost === undefined) {
         return res.status(400).json({ error: 'Item Name, category, quantity, unit, and purchaseCost are required.' });
       }
@@ -2561,7 +2781,7 @@ async function main() {
         VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?)
       `);
       const result = await stmt.run(
-        itemName, category, itemCode, description || '', Number(quantity), Number(quantity), Number(minStock || 0), unit, purchaseDate || '', supplier || '', Number(purchaseCost), branchId || '', status || 'Active'
+        itemName, category, itemCode, description || '', Number(quantity), Number(quantity), Number(minStock || 0), unit, purchaseDate || '', supplier || '', Number(purchaseCost), branchId, status || 'Active'
       );
       await stmt.finalize();
 

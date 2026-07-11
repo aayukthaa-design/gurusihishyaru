@@ -190,9 +190,9 @@ export function canAccessRoute(role: Role, path: string): boolean {
   return false;
 }
 
-// ─── Default post-login route per role ───────────────────────────────────────
+// ─── Default post-login route ─────────────────────────────────────────────────
 
-export function getDefaultRoute(role: Role): string {
+export function defaultRouteForRole(role: Role): string {
   switch (role) {
     case 'super_admin':
     case 'admin':
@@ -206,4 +206,30 @@ export function getDefaultRoute(role: Role): string {
     default:
       return '/';
   }
+}
+
+/** Priority order used to pick the default active role for a freshly-logged-in multi-role user. */
+export const ROLE_PRIORITY: Role[] = ['super_admin', 'admin', 'accountant', 'teacher', 'parent'];
+
+export function hasAnyRole(roles: Role[], targets: Role[]): boolean {
+  return roles.some((r) => targets.includes(r));
+}
+
+/** Highest-priority role in a user's held roles, per ROLE_PRIORITY. */
+export function getPrimaryRole(roles: Role[]): Role {
+  for (const candidate of ROLE_PRIORITY) {
+    if (roles.includes(candidate)) return candidate;
+  }
+  return roles[0] ?? 'teacher';
+}
+
+/**
+ * Route to land on right after login. A user holding more than one role lands
+ * on /select-role first (rather than guessing) since the UI/UX consequences
+ * of e.g. Super Admin mode vs Teacher mode differ enough (branch scoping in
+ * particular) that a conscious choice is safer than silently combining them.
+ */
+export function getDefaultRoute(roles: Role[]): string {
+  if (roles.length > 1) return '/select-role';
+  return defaultRouteForRole(roles[0] ?? 'teacher');
 }

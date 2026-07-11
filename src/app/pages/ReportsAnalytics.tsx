@@ -343,18 +343,41 @@ export function ReportsAnalytics() {
       } else if (reportCategory === 'expense') {
         pdfService.addTitle(`Expense Report - ${filterMonth}/${filterYear} (${branchName})`);
         const headers = ['Date', 'Voucher', 'Category', 'Amount', 'Description'];
-        const body = filteredExpenses.map(t => [t.date, t.voucherNumber, t.category, formatIndianCurrency(t.amount), t.description]);
+        const body = filteredExpense.map(t => [t.date, t.voucherNumber, t.category, formatIndianCurrency(t.amount), t.description]);
         pdfService.addTable([headers], body);
       } else if (reportCategory === 'inventory') {
         pdfService.addTitle(`Inventory Levels Report (${branchName})`);
-        const headers = ['Item Code', 'Item Name', 'Category', 'Quantity Available', 'Reorder Level'];
-        const body = inventoryLevels.map(item => [item.id, item.name, item.category, String(item.quantity), String(item.reorderLevel)]);
+        const headers = ['Item Code', 'Item Name', 'Category', 'Purchased', 'Allocated', 'Available', 'Status'];
+        const body = filteredInventoryData.map(item => [
+          item.itemCode,
+          item.itemName,
+          item.category,
+          String(item.quantity),
+          String(item.allocatedQuantity),
+          String(item.availableQuantity),
+          item.availableQuantity <= item.minStock ? 'Low Stock' : 'Normal'
+        ]);
         pdfService.addTable([headers], body);
       } else if (reportCategory === 'monthly') {
-        pdfService.addTitle(`Monthly Summaries (${branchName})`);
-        const headers = ['Month', 'Total Income', 'Total Expense', 'Net Profit', 'Status'];
-        const body = monthlyReports.map(m => [m.month, formatIndianCurrency(m.totalIncome), formatIndianCurrency(m.totalExpense), formatIndianCurrency(m.netProfit), m.status]);
-        pdfService.addTable([headers], body);
+        pdfService.addTitle(`Monthly Financial Report - ${filterMonth}/${filterYear} (${branchName})`);
+        if (selectedMonthlyReport) {
+          const headers = ['Metric', 'Value'];
+          const body = [
+            ['Total Income', formatIndianCurrency(selectedMonthlyReport.totalIncome)],
+            ['Total Expenses', formatIndianCurrency(selectedMonthlyReport.totalExpense)],
+            ['Net Balance', formatIndianCurrency(selectedMonthlyReport.netProfit)],
+            ['Inventory Purchased', `${selectedMonthlyReport.inventoryPurchased} items`],
+            ['Inventory Allocated', `${selectedMonthlyReport.inventoryAllocated} items`],
+            ['Remaining Inventory', `${selectedMonthlyReport.inventoryRemaining} items`],
+            ['Student Admissions', `${selectedMonthlyReport.studentAdmissions} enrolled`],
+            ['Status', selectedMonthlyReport.status],
+            ['Submitted Date', selectedMonthlyReport.submittedDate],
+            ['Remarks', selectedMonthlyReport.remarks || 'N/A'],
+          ];
+          pdfService.addTable([headers], body);
+        } else {
+          pdfService.addParagraph('No monthly financial report has been compiled or submitted for this period.');
+        }
       }
       
       await pdfService.exportWithLetterhead(`Category_Report_${reportCategory}.pdf`);

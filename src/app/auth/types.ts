@@ -57,11 +57,15 @@ export interface User {
   email: string;
   mobile?: string;
   name: string;
+  /** Currently active role — determines which dashboard/sidebar is shown. Always one of `roles`. */
   role: Role;
+  /** Full set of roles this account holds. Server-side authorization always checks the full set, never just `role`. */
+  roles: Role[];
   avatar?: string;
   branchId?: string;
   linkedStudentIds?: string[]; // for parents
   assignedClassIds?: string[]; // for teachers
+  mustChangePassword?: boolean;
   createdAt: string;
 }
 
@@ -73,6 +77,7 @@ export interface AuthState {
 }
 
 export interface LoginCredentials {
+  /** Email or mobile number for staff login; mobile number for parent login. */
   email: string;
   password?: string;
   rememberMe?: boolean;
@@ -80,19 +85,21 @@ export interface LoginCredentials {
 }
 
 export interface AuthContextType extends AuthState {
-  login: (credentials: LoginCredentials) => Promise<{ success: boolean; role?: Role; error?: string }>;
+  login: (credentials: LoginCredentials) => Promise<{ success: boolean; role?: Role; roles?: Role[]; error?: string }>;
   logout: () => void;
   hasPermission: (module: Module, permission: Permission) => boolean;
   hasModuleAccess: (module: Module) => boolean;
   canAccess: (path: string) => boolean;
+  /** Switches the active role for a multi-role user. UI/UX only — server-side authorization always uses the full token `roles`. */
+  switchRole: (role: Role) => void;
 }
 
-// ─── JWT Payload ──────────────────────────────────────────────────────────────
+// ─── JWT Payload (decoded client-side, never verified — the server is the source of truth) ──
 
 export interface JWTPayload {
   sub: string;       // user id
   email: string;
-  role: Role;
+  roles: Role[];
   name: string;
   branchId?: string;
   iat: number;
