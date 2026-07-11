@@ -4,7 +4,7 @@
 // the server reports the token is no longer valid.
 
 export const API_BASE =
-  (import.meta as { env?: Record<string, string> }).env?.VITE_API_BASE || 'http://localhost:4000';
+  (import.meta as { env?: Record<string, string> }).env?.VITE_API_BASE || '';
 
 const TOKEN_KEY = 'auth_token';
 

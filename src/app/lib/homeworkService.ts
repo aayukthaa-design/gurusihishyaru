@@ -4,7 +4,7 @@ import { createStore, useStoreValue } from './store';
 import { getStudentById, getStudentsByIds } from './studentService';
 import { addNotification } from './notificationService';
 
-const API_BASE = 'http://localhost:4000';
+const API_BASE = '';
 
 export interface HomeworkAttachment {
   filename: string;

@@ -196,14 +196,14 @@ export function AccountantPortal() {
   // Fetch functions
   const fetchLedger = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/ledger${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      const res = await fetch(`/api/ledger${branchFilter ? `?branchId=${branchFilter}` : ''}`);
       if (res.ok) setLedger(await res.json());
     } catch (e) { console.error(e); }
   };
 
   const fetchInventory = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/inventory${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      const res = await fetch(`/api/inventory${branchFilter ? `?branchId=${branchFilter}` : ''}`);
       const data = await res.json();
       setInventory(data);
     } catch (err) { console.error('Failed to fetch inventory:', err); }
@@ -211,7 +211,7 @@ export function AccountantPortal() {
 
   const fetchCategories = async () => {
     try {
-      const res = await fetch('http://localhost:4000/api/inventory-categories');
+      const res = await fetch('/api/inventory-categories');
       const data = await res.json();
       setCategories(data);
     } catch (err) { console.error('Failed to fetch categories:', err); }
@@ -219,14 +219,14 @@ export function AccountantPortal() {
 
   const fetchAllocations = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/inventory/allocations${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      const res = await fetch(`/api/inventory/allocations${branchFilter ? `?branchId=${branchFilter}` : ''}`);
       if (res.ok) setAllocations(await res.json());
     } catch (e) { console.error(e); }
   };
 
   const fetchReports = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      const res = await fetch(`/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
       if (res.ok) setReports(await res.json());
     } catch (e) { console.error(e); }
   };
@@ -440,7 +440,7 @@ export function AccountantPortal() {
     ledgerFormData.append('branchId', record.branchId || branchFilter || myBranchId);
 
     try {
-      const res = await fetch('http://localhost:4000/api/ledger', {
+      const res = await fetch('/api/ledger', {
         method: 'POST',
         body: ledgerFormData,
       });
@@ -634,7 +634,7 @@ export function AccountantPortal() {
     }
 
     try {
-      const res = await fetch('http://localhost:4000/api/ledger', {
+      const res = await fetch('/api/ledger', {
         method: 'POST',
         body: formData
       });
@@ -688,13 +688,13 @@ export function AccountantPortal() {
     try {
       let res;
       if (editingInvItem) {
-        res = await fetch(`http://localhost:4000/api/inventory/${editingInvItem.id}`, {
+        res = await fetch(`/api/inventory/${editingInvItem.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
       } else {
-        res = await fetch('http://localhost:4000/api/inventory', {
+        res = await fetch('/api/inventory', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -726,7 +726,7 @@ export function AccountantPortal() {
   const handleDeactivateItem = async (itemId: number) => {
     if (!confirm('Are you sure you want to deactivate this item?')) return;
     try {
-      const res = await fetch(`http://localhost:4000/api/inventory/${itemId}`, {
+      const res = await fetch(`/api/inventory/${itemId}`, {
         method: 'DELETE'
       });
       if (res.ok) await fetchInventory();
@@ -736,7 +736,7 @@ export function AccountantPortal() {
   const handleDeleteAttachment = async (ledgerId: number) => {
     if (!confirm('Are you sure you want to remove the uploaded attachment?')) return;
     try {
-      const res = await fetch(`http://localhost:4000/api/ledger/${ledgerId}/attachment`, {
+      const res = await fetch(`/api/ledger/${ledgerId}/attachment`, {
         method: 'DELETE'
       });
       if (res.ok) await fetchLedger();
@@ -774,7 +774,7 @@ export function AccountantPortal() {
     };
 
     try {
-      const res = await fetch('http://localhost:4000/api/inventory/allocate', {
+      const res = await fetch('/api/inventory/allocate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -794,7 +794,7 @@ export function AccountantPortal() {
   const handleReturnAllocation = async (allocId: number) => {
     if (!confirm('Are you sure the student is returning this inventory item? Available stock levels will increase.')) return;
     try {
-      const res = await fetch('http://localhost:4000/api/inventory/return', {
+      const res = await fetch('/api/inventory/return', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ allocationId: allocId })
@@ -884,7 +884,7 @@ export function AccountantPortal() {
     };
 
     try {
-      const res = await fetch('http://localhost:4000/api/financial-reports', {
+      const res = await fetch('/api/financial-reports', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1330,7 +1330,7 @@ export function AccountantPortal() {
                             {row.attachmentPath ? (
                               <div className="flex items-center gap-1">
                                 <a
-                                  href={`http://localhost:4000${row.attachmentPath}`}
+                                  href={`${row.attachmentPath}`}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-xs text-primary font-semibold hover:underline truncate max-w-[100px]"

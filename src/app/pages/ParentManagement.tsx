@@ -92,7 +92,7 @@ export function ParentManagement() {
 
   const loadParents = async () => {
     try {
-      const res = await fetch('http://localhost:4000/api/parents');
+      const res = await fetch('/api/parents');
       if (res.ok) {
         const list = await res.json();
         setParents(list);

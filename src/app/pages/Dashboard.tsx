@@ -146,7 +146,7 @@ export function Dashboard() {
   React.useEffect(() => {
     const loadSpecialClasses = async () => {
       try {
-        const res = await fetch(`http://localhost:4000/api/special-classes`);
+        const res = await fetch(`/api/special-classes`);
         if (res.ok) {
           const data = await res.json();
           setSpecialClasses(data);
@@ -161,7 +161,7 @@ export function Dashboard() {
   React.useEffect(() => {
     const loadStats = async () => {
       try {
-        let url = `http://localhost:4000/api/whatsapp/stats`;
+        let url = `/api/whatsapp/stats`;
         if (isTeacher) {
           url += `?role=teacher&teacherId=${encodeURIComponent(user?.id || '')}&classNames=${encodeURIComponent((user?.assignedClassIds || []).join(','))}`;
         } else {
@@ -227,35 +227,35 @@ export function Dashboard() {
 
   const fetchLedger = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/ledger?branchId=${myBranchId}`);
+      const res = await fetch(`/api/ledger?branchId=${myBranchId}`);
       if (res.ok) setLedger(await res.json());
     } catch (e) { console.error(e); }
   };
 
   const fetchInventory = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/inventory?branchId=${myBranchId}`);
+      const res = await fetch(`/api/inventory?branchId=${myBranchId}`);
       if (res.ok) setInventory(await res.json());
     } catch (e) { console.error(e); }
   };
 
   const fetchAllocations = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/inventory/allocations?branchId=${myBranchId}`);
+      const res = await fetch(`/api/inventory/allocations?branchId=${myBranchId}`);
       if (res.ok) setAllocations(await res.json());
     } catch (e) { console.error(e); }
   };
 
   const fetchReports = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/financial-reports?branchId=${myBranchId}`);
+      const res = await fetch(`/api/financial-reports?branchId=${myBranchId}`);
       if (res.ok) setReports(await res.json());
     } catch (e) { console.error(e); }
   };
 
   const fetchStudents = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/students`);
+      const res = await fetch(`/api/students`);
       if (res.ok) {
         const data = await res.json();
         setStudents(data.students || data || []);
@@ -419,7 +419,7 @@ export function Dashboard() {
     }
 
     try {
-      const res = await fetch('http://localhost:4000/api/ledger', {
+      const res = await fetch('/api/ledger', {
         method: 'POST',
         body: formData
       });

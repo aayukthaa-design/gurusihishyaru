@@ -28,7 +28,7 @@ const CLASS_OPTIONS = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B'];
 const BATCH_OPTIONS = ['Batch A', 'Batch B', 'Morning', 'Evening'];
 const SUBJECT_OPTIONS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'Computer Science'];
 
-const API_BASE = 'http://localhost:4000';
+const API_BASE = '';
 
 export function Homework() {
   const { user } = useAuth();

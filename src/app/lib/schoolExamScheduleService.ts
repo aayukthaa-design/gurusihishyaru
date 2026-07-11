@@ -23,7 +23,7 @@ export interface SchoolExamSchedule {
   teacherName?: string;
 }
 
-const API_BASE = 'http://localhost:4000';
+const API_BASE = '';
 const schoolExamStore = createStore<SchoolExamSchedule[]>([]);
 
 export function getSchoolExamStatus(startDate?: string, endDate?: string): SchoolExamSchedule['status'] {

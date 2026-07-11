@@ -76,7 +76,7 @@ export function ParentPortal() {
           
           for (const hw of studentHw) {
             try {
-              const res = await fetch(`http://localhost:4000/api/homework/${hw.id}/submissions`);
+              const res = await fetch(`/api/homework/${hw.id}/submissions`);
               if (res.ok) {
                 const subs = await res.json();
                 const hasSub = subs.some((s: any) => s.studentId === student.id);

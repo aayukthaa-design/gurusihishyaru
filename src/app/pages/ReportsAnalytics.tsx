@@ -57,7 +57,7 @@ export function ReportsAnalytics() {
 
   const fetchReports = async () => {
     try {
-      const res = await fetch(`http://localhost:4000/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      const res = await fetch(`/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
       if (res.ok) {
         setSubmittedReports(await res.json());
       }
@@ -72,7 +72,7 @@ export function ReportsAnalytics() {
 
   const handleApproveReport = async (reportId: number) => {
     try {
-      const res = await fetch(`http://localhost:4000/api/financial-reports/${reportId}/action`, {
+      const res = await fetch(`/api/financial-reports/${reportId}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'Approved', remarks: 'Approved by Super Admin' })
@@ -92,7 +92,7 @@ export function ReportsAnalytics() {
       return;
     }
     try {
-      const res = await fetch(`http://localhost:4000/api/financial-reports/${reportId}/action`, {
+      const res = await fetch(`/api/financial-reports/${reportId}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'Returned', remarks: reason })
@@ -202,10 +202,10 @@ export function ReportsAnalytics() {
         const branchParam = branchFilter ? `?branchId=${branchFilter}` : '';
         
         const [resLedger, resInv, resAlloc, resStudents] = await Promise.all([
-          fetch(`http://localhost:4000/api/ledger${branchParam}`),
-          fetch(`http://localhost:4000/api/inventory${branchParam}`),
-          fetch(`http://localhost:4000/api/inventory/allocations${branchParam}`),
-          fetch(`http://localhost:4000/api/students`)
+          fetch(`/api/ledger${branchParam}`),
+          fetch(`/api/inventory${branchParam}`),
+          fetch(`/api/inventory/allocations${branchParam}`),
+          fetch(`/api/students`)
         ]);
 
         if (resLedger.ok) setLedger(await resLedger.json());
@@ -227,7 +227,7 @@ export function ReportsAnalytics() {
   useEffect(() => {
     const loadLogs = async () => {
       try {
-        let url = `http://localhost:4000/api/whatsapp/logs`;
+        let url = `/api/whatsapp/logs`;
         const qParams = new URLSearchParams();
         if (branchFilter) qParams.append('branchId', branchFilter);
         if (user?.role) qParams.append('userRole', user.role);
@@ -589,7 +589,7 @@ export function ReportsAnalytics() {
                         <td className="px-6 py-3 text-right font-bold text-green-600">{formatIndianCurrency(t.amount)}</td>
                         <td className="px-6 py-3">
                           {t.attachmentPath ? (
-                            <a href={`http://localhost:4000${t.attachmentPath}`} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
+                            <a href={`${t.attachmentPath}`} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
                               {t.attachmentName || 'View Bill'}
                             </a>
                           ) : (
@@ -631,7 +631,7 @@ export function ReportsAnalytics() {
                         <td className="px-6 py-3 text-right font-bold text-red-500">{formatIndianCurrency(t.amount)}</td>
                         <td className="px-6 py-3">
                           {t.attachmentPath ? (
-                            <a href={`http://localhost:4000${t.attachmentPath}`} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
+                            <a href={`${t.attachmentPath}`} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
                               {t.attachmentName || 'View Bill'}
                             </a>
                           ) : (

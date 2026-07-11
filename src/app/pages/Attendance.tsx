@@ -59,7 +59,7 @@ export function Attendance() {
 
   // Fetch settings to load official tutorial contact number
   useEffect(() => {
-    fetch('http://localhost:4000/api/settings')
+    fetch('/api/settings')
       .then((res) => res.json())
       .then((data) => {
         if (data && data.official_contact) {
@@ -91,7 +91,7 @@ export function Attendance() {
       return;
     }
     setLoading(true);
-    const url = `http://localhost:4000/api/students?className=${encodeURIComponent(selectedClass)}` + 
+    const url = `/api/students?className=${encodeURIComponent(selectedClass)}` + 
                 (branchFilter ? `&branchId=${encodeURIComponent(branchFilter)}` : '');
     
     fetch(url)

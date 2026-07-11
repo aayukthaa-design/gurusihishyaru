@@ -26,7 +26,7 @@ export interface StudentRecord {
   status?: string;
 }
 
-const API_BASE = 'http://localhost:4000';
+const API_BASE = '';
 
 const today = new Date();
 

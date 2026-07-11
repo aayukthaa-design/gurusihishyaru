@@ -67,7 +67,7 @@ export function TeacherCreateExam() {
   React.useEffect(() => {
     async function loadAlloc() {
       try {
-        const base = 'http://localhost:4000';
+        const base = '';
         const resp = await fetch(`${base}/api/allocations?teacherId=${user?.id}`);
         if (!resp.ok) throw new Error('no');
         const data = await resp.json();

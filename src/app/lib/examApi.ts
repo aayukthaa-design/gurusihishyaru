@@ -1,7 +1,7 @@
 import { addExam } from './examService';
 
 // Try to POST to backend; if unavailable, fall back to in-memory addExam
-const API_BASE = 'http://localhost:4000';
+const API_BASE = '';
 
 export async function saveExamAPI(exam: any) {
   try {

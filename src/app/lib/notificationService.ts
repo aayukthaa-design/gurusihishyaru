@@ -2,7 +2,7 @@ import { PDFTemplateService } from './pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import { createStore, useStoreValue } from './store';
 
-const API_BASE = 'http://localhost:4000';
+const API_BASE = '';
 const STORAGE_KEY = 'guru-shishyaru-notifications';
 
 export type NotificationStatus = 'unread' | 'read' | 'deleted' | 'scheduled' | 'expired';
