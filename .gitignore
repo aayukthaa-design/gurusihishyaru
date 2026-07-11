@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+*.local
+
+# SQLite data files (contain runtime/user data, not source)
+server/data.db
+server/database.sqlite
+server/server/data.db
+server/uploads/
+server/server/uploads/
+
+# OS/editor
+.DS_Store

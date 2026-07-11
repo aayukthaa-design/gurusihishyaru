@@ -1,0 +1,5 @@
+Place the Guru Shishyaru Tutorials logo image file here.
+Rename it to: logo.png
+
+This file should be the exact uploaded logo image.
+Path: public/logo.png
