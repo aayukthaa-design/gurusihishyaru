@@ -1,5 +1,6 @@
 import { createStore, useStoreValue } from './store';
 import { addNotification } from './notificationService';
+import { apiFetch } from './apiClient';
 
 export interface Exam {
   id: string;
@@ -16,24 +17,54 @@ export interface Exam {
   createdAt: string;
 }
 
-const store = createStore<Exam[]>([
-  { id: 'EX001', name: 'Mid-Term Mathematics', subject: 'Mathematics', className: '10th A', batch: 'Batch A', date: '2026-06-25', maxMarks: 100, passingMarks: 35, teacherId: 'TCH001', teacherName: 'Kavitha Rao', status: 'published', createdAt: new Date().toISOString() },
-  { id: 'EX002', name: 'Unit Test — Physics',  subject: 'Physics',     className: '11th A', batch: 'Batch A', date: '2026-06-28', maxMarks: 50,  passingMarks: 20, teacherId: 'TCH002', teacherName: 'Ramesh Kumar', status: 'published', createdAt: new Date().toISOString() },
-  { id: 'EX003', name: 'English Grammar Test', subject: 'English',     className: '9th A',  batch: 'Morning', date: '2026-06-30', maxMarks: 50,  passingMarks: 20, teacherId: 'TCH003', teacherName: 'Sunita Patil', status: 'draft',     createdAt: new Date().toISOString() },
-]);
+function mapApiExam(row: any): Exam {
+  return {
+    id: String(row.id),
+    name: row.name,
+    subject: row.subject,
+    className: row.className,
+    batch: row.batch || '',
+    date: row.date,
+    maxMarks: row.maxMarks,
+    passingMarks: row.passingMarks,
+    teacherId: row.createdBy || '',
+    teacherName: row.teacherName || '',
+    status: row.status || 'draft',
+    createdAt: row.createdAt,
+  };
+}
 
-let counter = 10;
+const store = createStore<Exam[]>([]);
 
+export async function refreshExams(): Promise<Exam[]> {
+  try {
+    const res = await apiFetch('/api/exams');
+    if (res.ok) {
+      const data = await res.json();
+      const mapped = Array.isArray(data) ? data.map(mapApiExam) : [];
+      store.setState(mapped);
+      return mapped;
+    }
+  } catch (err) {
+    console.error('Failed to fetch exams:', err);
+  }
+  return store.getState();
+}
+
+// Initial load
+void refreshExams();
+
+/** Kept for the examApi.ts network-failure fallback path only. */
 export function createExam(exam: Omit<Exam, 'id' | 'createdAt' | 'status'>): Exam {
+  let counter = store.getState().length + 1;
   const newExam: Exam = {
     ...exam,
-    id: `EX${String(++counter).padStart(3, '0')}`,
+    id: `EX${String(counter).padStart(3, '0')}`,
     status: 'draft',
     createdAt: new Date().toISOString(),
   };
   store.setState((prev) => [newExam, ...prev]);
 
-  // Notify admin
   addNotification({
     title: `New Exam Created: ${newExam.name}`,
     message: `${newExam.teacherName} created a new exam for ${newExam.className} — ${newExam.subject} on ${newExam.date}`,
@@ -44,10 +75,11 @@ export function createExam(exam: Omit<Exam, 'id' | 'createdAt' | 'status'>): Exa
   return newExam;
 }
 
-export function publishExam(id: string): void {
-  store.setState((prev) =>
-    prev.map((e) => (e.id === id ? { ...e, status: 'published' } : e))
-  );
+/** Alias for createExam — used by examApi fallback */
+export const addExam = createExam;
+
+export async function publishExam(id: string): Promise<void> {
+  await updateExamStatus(id, 'published');
   const exam = store.getState().find((e) => e.id === id);
   if (exam) {
     addNotification({
@@ -60,8 +92,15 @@ export function publishExam(id: string): void {
   }
 }
 
-export function updateExamStatus(id: string, status: Exam['status']): void {
-  store.setState((prev) => prev.map((exam) => (exam.id === id ? { ...exam, status } : exam)));
+export async function updateExamStatus(id: string, status: Exam['status']): Promise<void> {
+  try {
+    const res = await apiFetch(`/api/exams/${id}`, { method: 'PUT', body: { status } });
+    if (res.ok) {
+      await refreshExams();
+    }
+  } catch (err) {
+    console.error('updateExamStatus error:', err);
+  }
 }
 
 export function subscribeExams(listener: (exams: Exam[]) => void): () => void {
@@ -75,6 +114,3 @@ export function useExams(): Exam[] {
 export function getExams(): Exam[] {
   return store.getState();
 }
-
-/** Alias for createExam — used by examApi fallback */
-export const addExam = createExam;

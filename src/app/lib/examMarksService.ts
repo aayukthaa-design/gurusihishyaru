@@ -1,4 +1,5 @@
 import { createStore } from './store';
+import { apiFetch } from './apiClient';
 
 type MarkRecord = {
   examId: string;
@@ -11,13 +12,49 @@ type MarkRecord = {
   pass: boolean;
 };
 
-const seedMarksList: MarkRecord[] = [];
-
-const marksStore = createStore<MarkRecord[]>(seedMarksList);
+const marksStore = createStore<MarkRecord[]>([]);
 
 function normalizeExamId(examId: string | number) {
   return typeof examId === 'number' ? String(examId) : examId;
 }
+
+function mapApiMark(row: any): MarkRecord {
+  return {
+    examId: String(row.examId),
+    studentId: row.studentId,
+    studentName: row.studentName || '',
+    rollNumber: row.rollNumber || '',
+    marksObtained: row.marksObtained,
+    percentage: row.percentage,
+    grade: row.grade,
+    pass: Boolean(row.pass),
+  };
+}
+
+export async function refreshMarks(examId?: string | number): Promise<MarkRecord[]> {
+  try {
+    const query = examId !== undefined ? `?examId=${encodeURIComponent(normalizeExamId(examId))}` : '';
+    const res = await apiFetch(`/api/exam-marks${query}`);
+    if (res.ok) {
+      const data = await res.json();
+      const mapped = Array.isArray(data) ? data.map(mapApiMark) : [];
+      if (examId !== undefined) {
+        // Merge in place so marks for other exams already loaded aren't discarded
+        const id = normalizeExamId(examId);
+        marksStore.setState((current) => [...current.filter((m) => m.examId !== id), ...mapped]);
+      } else {
+        marksStore.setState(mapped);
+      }
+      return mapped;
+    }
+  } catch (err) {
+    console.error('Failed to fetch exam marks:', err);
+  }
+  return marksStore.getState();
+}
+
+// Initial load of all marks (needed for cross-exam analytics views)
+void refreshMarks();
 
 export function subscribeMarks(listener: (marks: MarkRecord[]) => void) {
   return marksStore.subscribe(listener);
@@ -28,37 +65,28 @@ export function getMarksForExam(examId: string | number) {
   return marksStore.getState().filter((m) => m.examId === id);
 }
 
-function gradeFromPercentage(p: number) {
-  if (p >= 90) return 'A+';
-  if (p >= 75) return 'A';
-  if (p >= 60) return 'B';
-  if (p >= 50) return 'C';
-  if (p >= 40) return 'D';
-  return 'F';
-}
-
-export function submitMarks(
+export async function submitMarks(
   examId: string | number,
   maxMarks: number,
   passingMarks: number,
   records: { studentId: string; studentName: string; rollNumber: string; marksObtained: number }[]
-) {
+): Promise<MarkRecord[]> {
   const id = normalizeExamId(examId);
-  const processed = records.map((r) => {
-    const percentage = (r.marksObtained / maxMarks) * 100;
-    const grade = gradeFromPercentage(percentage);
-    const pass = r.marksObtained >= passingMarks;
-    return { examId: id, ...r, percentage, grade, pass } as MarkRecord;
-  });
-
-  marksStore.setState((current) => [
-    ...current.filter(
-      (m) => m.examId !== id || !processed.some((p) => p.studentId === m.studentId)
-    ),
-    ...processed,
-  ]);
-
-  return processed;
+  try {
+    const res = await apiFetch('/api/exam-marks/submit', {
+      method: 'POST',
+      body: { examId: id, maxMarks, passingMarks, records },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const mapped = Array.isArray(data) ? data.map(mapApiMark) : [];
+      marksStore.setState((current) => [...current.filter((m) => m.examId !== id), ...mapped]);
+      return mapped;
+    }
+  } catch (err) {
+    console.error('submitMarks error:', err);
+  }
+  return [];
 }
 
 export type { MarkRecord };

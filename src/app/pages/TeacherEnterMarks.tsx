@@ -2,13 +2,9 @@ import React from 'react';
 import { Header } from '../components/Header';
 import { useParams, useNavigate } from 'react-router';
 import { subscribeExams } from '../lib/examService';
-import { submitMarks, getMarksForExam } from '../lib/examMarksService';
+import { submitMarks, subscribeMarks, refreshMarks } from '../lib/examMarksService';
 import { getExamAttendanceForExam } from '../lib/examAttendanceService';
-
-// Mock students per class
-function getStudentsForClass(className: string) {
-  return Array.from({ length: 10 }, (_, i) => ({ id: `${className}_S${i + 1}`, name: `Student ${i + 1}`, roll: `${i + 1}` }));
-}
+import { getStudentsForClass as getRealStudentsForClass } from '../lib/studentService';
 
 export function TeacherEnterMarks() {
   const params = useParams();
@@ -23,17 +19,24 @@ export function TeacherEnterMarks() {
     const unsub = subscribeExams((items) => {
       const found = items.find((e: any) => e.id === examId);
       setExam(found || null);
-      if (found) setStudents(getStudentsForClass(found.className));
+      if (found) {
+        const roster = getRealStudentsForClass(found.className, found.branchId);
+        setStudents(roster.map((s) => ({ id: s.id, name: s.fullName, roll: s.rollNumber })));
+      }
     });
     return unsub;
   }, [examId]);
 
   React.useEffect(() => {
     if (!examId) return;
-    const existing = getMarksForExam(examId);
-    const map: Record<string, number> = {};
-    existing.forEach((m: any) => { map[m.studentId] = m.marksObtained; });
-    setRecords(map);
+    void refreshMarks(examId);
+    const unsub = subscribeMarks((all) => {
+      const existing = all.filter((m) => m.examId === examId);
+      const map: Record<string, number> = {};
+      existing.forEach((m) => { map[m.studentId] = m.marksObtained; });
+      setRecords(map);
+    });
+    return unsub;
   }, [examId]);
 
   if (!exam) return <div className="flex-1"><Header title="Enter Marks" /><div className="p-6">Exam not found.</div></div>;
@@ -57,7 +60,7 @@ export function TeacherEnterMarks() {
     setRecords((r) => ({ ...r, [studentId]: value }));
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
     if (!exam) return;
     setError(null);
     const max = exam.maxMarks ?? 100;
@@ -69,7 +72,7 @@ export function TeacherEnterMarks() {
       }
     }
 
-    submitMarks(examId, max, exam.passingMarks ?? Math.round(max * 0.35), payload);
+    await submitMarks(examId, max, exam.passingMarks ?? Math.round(max * 0.35), payload);
     navigate('/exams');
   }
 

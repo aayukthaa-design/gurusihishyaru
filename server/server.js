@@ -799,6 +799,21 @@ async function initDb() {
       createdAt TEXT,
       updatedAt TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS exam_marks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      examId TEXT NOT NULL,
+      studentId TEXT NOT NULL,
+      studentName TEXT,
+      rollNumber TEXT,
+      marksObtained REAL,
+      percentage REAL,
+      grade TEXT,
+      pass INTEGER,
+      createdAt TEXT,
+      updatedAt TEXT,
+      UNIQUE(examId, studentId)
+    );
   `);
 
   try { await db.exec("ALTER TABLE allocations ADD COLUMN branchId TEXT;"); } catch(e) {}
@@ -1349,7 +1364,7 @@ async function main() {
       const body = req.body;
       const attachment = req.file;
       const now = new Date().toISOString();
-      const stmt = await db.prepare(`INSERT INTO exams (name, subject, className, batch, date, maxMarks, passingMarks, description, status, createdBy, createdAt, attachmentPath, attachmentName, attachmentSize) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const stmt = await db.prepare(`INSERT INTO exams (name, subject, className, batch, date, maxMarks, passingMarks, description, status, createdBy, createdAt, attachmentPath, attachmentName, attachmentSize) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const result = await stmt.run(body.name, body.subject, body.className, body.batch || '', body.date, Number(body.maxMarks || 0), Number(body.passingMarks || 35), body.description || '', body.status || 'draft', body.createdBy || '', now, attachment ? attachment.path : null, attachment ? attachment.originalname : null, attachment ? attachment.size : null);
       await stmt.finalize();
       const exam = await db.get('SELECT * FROM exams WHERE id = ?', result.lastID);
@@ -1363,6 +1378,81 @@ async function main() {
   app.get('/api/exams', async (req, res) => {
     const rows = await db.all('SELECT * FROM exams ORDER BY date ASC');
     res.json(rows);
+  });
+
+  app.put('/api/exams/:id', async (req, res) => {
+    try {
+      const existing = await db.get('SELECT * FROM exams WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Exam not found' });
+      const body = req.body || {};
+      await db.run(
+        `UPDATE exams SET name=?, subject=?, className=?, batch=?, date=?, maxMarks=?, passingMarks=?, description=?, status=? WHERE id=?`,
+        body.name ?? existing.name, body.subject ?? existing.subject, body.className ?? existing.className, body.batch ?? existing.batch,
+        body.date ?? existing.date, body.maxMarks !== undefined ? Number(body.maxMarks) : existing.maxMarks,
+        body.passingMarks !== undefined ? Number(body.passingMarks) : existing.passingMarks,
+        body.description ?? existing.description, body.status ?? existing.status, req.params.id
+      );
+      const row = await db.get('SELECT * FROM exams WHERE id = ?', req.params.id);
+      res.json(row);
+    } catch (err) {
+      console.error('Update exam error:', err);
+      res.status(500).json({ error: 'Failed to update exam' });
+    }
+  });
+
+  // ─── Exam Marks ─────────────────────────────────────────────────────────────
+
+  function gradeFromPercentage(p) {
+    if (p >= 90) return 'A+';
+    if (p >= 75) return 'A';
+    if (p >= 60) return 'B';
+    if (p >= 50) return 'C';
+    if (p >= 40) return 'D';
+    return 'F';
+  }
+
+  app.get('/api/exam-marks', async (req, res) => {
+    try {
+      let query = 'SELECT * FROM exam_marks WHERE 1=1';
+      const params = [];
+      if (req.query.examId) { query += ' AND examId = ?'; params.push(String(req.query.examId)); }
+      const rows = await db.all(query, ...params);
+      res.json(rows.map((r) => ({ ...r, pass: Boolean(r.pass) })));
+    } catch (err) {
+      console.error('List exam marks error:', err);
+      res.status(500).json({ error: 'Failed to load marks' });
+    }
+  });
+
+  app.post('/api/exam-marks/submit', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const examId = String(body.examId);
+      const maxMarks = Number(body.maxMarks || 100);
+      const passingMarks = Number(body.passingMarks ?? Math.round(maxMarks * 0.35));
+      const records = Array.isArray(body.records) ? body.records : [];
+      const now = new Date().toISOString();
+
+      for (const r of records) {
+        const percentage = (Number(r.marksObtained) / maxMarks) * 100;
+        const grade = gradeFromPercentage(percentage);
+        const pass = Number(r.marksObtained) >= passingMarks ? 1 : 0;
+        await db.run(
+          `INSERT INTO exam_marks (examId, studentId, studentName, rollNumber, marksObtained, percentage, grade, pass, createdAt, updatedAt)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(examId, studentId) DO UPDATE SET
+             studentName=excluded.studentName, rollNumber=excluded.rollNumber, marksObtained=excluded.marksObtained,
+             percentage=excluded.percentage, grade=excluded.grade, pass=excluded.pass, updatedAt=excluded.updatedAt`,
+          examId, r.studentId, r.studentName || '', r.rollNumber || '', Number(r.marksObtained), percentage, grade, pass, now, now
+        );
+      }
+
+      const rows = await db.all('SELECT * FROM exam_marks WHERE examId = ?', examId);
+      res.json(rows.map((r) => ({ ...r, pass: Boolean(r.pass) })));
+    } catch (err) {
+      console.error('Submit exam marks error:', err);
+      res.status(500).json({ error: 'Failed to submit marks' });
+    }
   });
 
   app.get('/api/allocations', async (req, res) => {
