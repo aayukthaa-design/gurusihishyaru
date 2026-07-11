@@ -22,6 +22,7 @@ import { subscribeMarks, MarkRecord } from '../lib/examMarksService';
 import { subscribeExams, Exam } from '../lib/examService';
 import { useSchoolExamSchedules, getAttachmentUrl } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
+import { apiFetch } from '../lib/apiClient';
 
 const STUDENT_FEE_RECORDS = [
   { studentId: 'STU001', total: 5000, paid: 5000, dueDate: '2026-06-15', status: 'Paid', nextInstallment: 'Jul 01, 2026', lastPaid: 'Jun 15, 2026' },
@@ -76,10 +77,10 @@ export function ParentPortal() {
           
           for (const hw of studentHw) {
             try {
-              const res = await fetch(`/api/homework/${hw.id}/submissions`);
+              const res = await apiFetch(`/api/homework/${hw.id}/submissions`);
               if (res.ok) {
                 const subs = await res.json();
-                const hasSub = subs.some((s: any) => s.studentId === student.id);
+                const hasSub = Array.isArray(subs) && subs.some((s: any) => s.studentId === student.id);
                 if (!hasSub) {
                   pendingCount++;
                 }
@@ -101,10 +102,10 @@ export function ParentPortal() {
 
   useEffect(() => {
     if (selectedStudent?.className) {
-      fetch(`/api/special-classes?className=${selectedStudent.className}`)
+      apiFetch(`/api/special-classes?className=${selectedStudent.className}`)
         .then(res => res.json())
         .then(data => {
-          const matched = data.filter((c: any) => c.branchId === selectedStudent.branchId);
+          const matched = Array.isArray(data) ? data.filter((c: any) => c.branchId === selectedStudent.branchId) : [];
           setSpecialClasses(matched);
         })
         .catch(err => console.error('Failed to fetch special classes for parent portal', err));

@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { Header } from '../components/Header';
+import { apiFetch } from '../lib/apiClient';
 
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const periods = ['08:00-09:00', '09:00-10:00', '10:00-11:00', '11:30-12:30', '12:30-01:30', '02:00-03:00'];
@@ -27,9 +28,9 @@ export function Timetable() {
   const [specialClasses, setSpecialClasses] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch(`/api/special-classes?className=${selectedClass}`)
+    apiFetch(`/api/special-classes?className=${selectedClass}`)
       .then((res) => res.json())
-      .then((data) => setSpecialClasses(data))
+      .then((data) => setSpecialClasses(Array.isArray(data) ? data : []))
       .catch((err) => console.error('Failed to load special classes for timetable', err));
   }, [selectedClass]);
 

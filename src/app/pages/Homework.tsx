@@ -23,6 +23,7 @@ import {
   HomeworkSubmission,
   HomeworkAttachment
 } from '../lib/homeworkService';
+import { apiFetch } from '../lib/apiClient';
 
 const CLASS_OPTIONS = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B'];
 const BATCH_OPTIONS = ['Batch A', 'Batch B', 'Morning', 'Evening'];
@@ -90,7 +91,7 @@ export function Homework() {
 
   useEffect(() => {
     if (user?.role === 'teacher') {
-      fetch(`${API_BASE}/api/allocations?teacherId=${user.id}`)
+      apiFetch(`${API_BASE}/api/allocations?teacherId=${user.id}`)
         .then(res => res.json())
         .then(data => {
           if (data && data.classes && data.classes.length > 0) {

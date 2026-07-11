@@ -8,6 +8,7 @@ import { buildReportExportData, exportReportToExcel, exportReportToPdf } from '.
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { formatIndianCurrency } from '../lib/currency';
 import { utils, writeFile } from 'xlsx';
+import { apiFetch } from '../lib/apiClient';
 
 const monthlyData = [
   { month: 'Jan', revenue: 45000, students: 180 },
@@ -57,9 +58,10 @@ export function ReportsAnalytics() {
 
   const fetchReports = async () => {
     try {
-      const res = await fetch(`/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      const res = await apiFetch(`/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
       if (res.ok) {
-        setSubmittedReports(await res.json());
+        const data = await res.json();
+        setSubmittedReports(Array.isArray(data) ? data : []);
       }
     } catch (e) {
       console.error('Failed to load monthly reports', e);
@@ -72,10 +74,9 @@ export function ReportsAnalytics() {
 
   const handleApproveReport = async (reportId: number) => {
     try {
-      const res = await fetch(`/api/financial-reports/${reportId}/action`, {
+      const res = await apiFetch(`/api/financial-reports/${reportId}/action`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'Approved', remarks: 'Approved by Super Admin' })
+        body: { status: 'Approved', remarks: 'Approved by Super Admin' }
       });
       if (res.ok) {
         fetchReports();
@@ -92,10 +93,9 @@ export function ReportsAnalytics() {
       return;
     }
     try {
-      const res = await fetch(`/api/financial-reports/${reportId}/action`, {
+      const res = await apiFetch(`/api/financial-reports/${reportId}/action`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'Returned', remarks: reason })
+        body: { status: 'Returned', remarks: reason }
       });
       if (res.ok) {
         fetchReports();
@@ -202,18 +202,27 @@ export function ReportsAnalytics() {
         const branchParam = branchFilter ? `?branchId=${branchFilter}` : '';
         
         const [resLedger, resInv, resAlloc, resStudents] = await Promise.all([
-          fetch(`/api/ledger${branchParam}`),
-          fetch(`/api/inventory${branchParam}`),
-          fetch(`/api/inventory/allocations${branchParam}`),
-          fetch(`/api/students`)
+          apiFetch(`/api/ledger${branchParam}`),
+          apiFetch(`/api/inventory${branchParam}`),
+          apiFetch(`/api/inventory/allocations${branchParam}`),
+          apiFetch(`/api/students`)
         ]);
 
-        if (resLedger.ok) setLedger(await resLedger.json());
-        if (resInv.ok) setInventory(await resInv.json());
-        if (resAlloc.ok) setAllocations(await resAlloc.json());
+        if (resLedger.ok) {
+          const data = await resLedger.json();
+          setLedger(Array.isArray(data) ? data : []);
+        }
+        if (resInv.ok) {
+          const data = await resInv.json();
+          setInventory(Array.isArray(data) ? data : []);
+        }
+        if (resAlloc.ok) {
+          const data = await resAlloc.json();
+          setAllocations(Array.isArray(data) ? data : []);
+        }
         if (resStudents.ok) {
           const sData = await resStudents.json();
-          setStudents(sData.students || sData || []);
+          setStudents(Array.isArray(sData) ? sData : (sData.students || []));
         }
       } catch (err) {
         console.error('Error fetching data for simplified reports', err);
@@ -235,10 +244,10 @@ export function ReportsAnalytics() {
         if (user?.assignedClassIds) qParams.append('assignedClassIds', user.assignedClassIds.join(','));
         url += `?${qParams.toString()}`;
         
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         if (res.ok) {
           const list = await res.json();
-          setWhatsappLogs(list);
+          setWhatsappLogs(Array.isArray(list) ? list : []);
         }
       } catch (err) {
         console.error('Failed to load WhatsApp logs in reports', err);

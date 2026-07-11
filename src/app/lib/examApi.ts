@@ -1,4 +1,5 @@
 import { addExam } from './examService';
+import { apiFetch } from './apiClient';
 
 // Try to POST to backend; if unavailable, fall back to in-memory addExam
 const API_BASE = '';
@@ -18,15 +19,14 @@ export async function saveExamAPI(exam: any) {
       fd.append('status', exam.status || 'draft');
       fd.append('createdBy', exam.createdBy || '');
       fd.append('attachment', exam.attachment.file);
-      const resp = await fetch(`${API_BASE}/api/exams`, { method: 'POST', body: fd });
+      const resp = await apiFetch(`${API_BASE}/api/exams`, { method: 'POST', body: fd });
       if (!resp.ok) throw new Error('network');
       return resp.json();
     }
 
-    const resp = await fetch(`${API_BASE}/api/exams`, {
+    const resp = await apiFetch(`${API_BASE}/api/exams`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(exam),
+      body: exam,
     });
     if (!resp.ok) throw new Error('network');
     const data = await resp.json();

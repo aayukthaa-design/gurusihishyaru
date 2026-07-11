@@ -1,3 +1,5 @@
+import { apiFetch } from './apiClient';
+
 const API_BASE = '';
 
 export interface AttendanceRecord {
@@ -54,7 +56,7 @@ export async function fetchAttendance(className?: string, date?: string): Promis
     const params = new URLSearchParams();
     if (className) params.append('className', className);
     if (date) params.append('date', date);
-    const res = await fetch(`${API_BASE}/api/attendance?${params.toString()}`);
+    const res = await apiFetch(`${API_BASE}/api/attendance?${params.toString()}`);
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) return data;
@@ -73,10 +75,9 @@ export async function saveAttendanceAPI(
   markedBy?: string
 ): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/api/attendance`, {
+    const res = await apiFetch(`${API_BASE}/api/attendance`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ className, date, attendanceRecords, markedBy })
+      body: { className, date, attendanceRecords, markedBy }
     });
     return res.ok;
   } catch (err) {
@@ -100,7 +101,7 @@ export async function fetchWhatsappLogs(params: {
     if (params.userBranchId) qParams.append('userBranchId', params.userBranchId);
     if (params.assignedClassIds) qParams.append('assignedClassIds', params.assignedClassIds);
     
-    const res = await fetch(`${API_BASE}/api/whatsapp/logs?${qParams.toString()}`);
+    const res = await apiFetch(`${API_BASE}/api/whatsapp/logs?${qParams.toString()}`);
     if (res.ok) {
       return await res.json();
     }
@@ -125,7 +126,7 @@ export async function fetchWhatsappStats(params: {
     if (params.classNames) qParams.append('classNames', params.classNames);
     if (params.branchId) qParams.append('branchId', params.branchId);
     
-    const res = await fetch(`${API_BASE}/api/whatsapp/stats?${qParams.toString()}`);
+    const res = await apiFetch(`${API_BASE}/api/whatsapp/stats?${qParams.toString()}`);
     if (res.ok) {
       return await res.json();
     }
@@ -144,7 +145,7 @@ export async function fetchWhatsappStats(params: {
 
 export async function fetchWhatsappSettings(): Promise<Record<string, string>> {
   try {
-    const res = await fetch(`${API_BASE}/api/settings`);
+    const res = await apiFetch(`${API_BASE}/api/settings`);
     if (res.ok) {
       return await res.json();
     }
@@ -161,10 +162,9 @@ export async function fetchWhatsappSettings(): Promise<Record<string, string>> {
 
 export async function saveWhatsappSettingsAPI(settings: Record<string, string>): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/api/settings`, {
+    const res = await apiFetch(`${API_BASE}/api/settings`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings)
+      body: settings
     });
     return res.ok;
   } catch (err) {
@@ -175,10 +175,9 @@ export async function saveWhatsappSettingsAPI(settings: Record<string, string>):
 
 export async function sendTestWhatsappAPI(mobile: string, message: string): Promise<{ success: boolean; message?: string; error?: string }> {
   try {
-    const res = await fetch(`${API_BASE}/api/whatsapp/test`, {
+    const res = await apiFetch(`${API_BASE}/api/whatsapp/test`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mobile, message })
+      body: { mobile, message }
     });
     const data = await res.json();
     if (res.ok) {

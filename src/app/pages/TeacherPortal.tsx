@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { subscribeExams } from '../lib/examService';
 import { getTeacherExamAttendanceDashboard, subscribeExamAttendance } from '../lib/examAttendanceService';
 import { ChevronRight, CheckCircle2, Circle } from 'lucide-react';
+import { apiFetch } from '../lib/apiClient';
 
 const SCHEDULE = [
   { time: '08:00–09:00', class: 'Mathematics · 10th A', room: 'Room 201', done: true },
@@ -32,9 +33,9 @@ export function TeacherPortal() {
     const unsubscribeAttendance = subscribeExamAttendance(() => setAttendanceVersion((value) => value + 1));
     
     if (user) {
-      fetch(`/api/special-classes?teacherId=${user.id}`)
+      apiFetch(`/api/special-classes?teacherId=${user.id}`)
         .then(res => res.json())
-        .then(data => setSpecialClasses(data))
+        .then(data => setSpecialClasses(Array.isArray(data) ? data : []))
         .catch(e => console.error(e));
     }
 

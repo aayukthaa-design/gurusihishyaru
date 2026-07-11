@@ -7,6 +7,7 @@ import { getStudentsForClass } from '../lib/studentService';
 import { submitExamAttendanceRecords } from '../lib/examAttendanceService';
 import { updateExamStatus } from '../lib/examService';
 import { useNavigate } from 'react-router';
+import { apiFetch } from '../lib/apiClient';
 
 export function TeacherCreateExam() {
   const { user } = useAuth();
@@ -68,7 +69,7 @@ export function TeacherCreateExam() {
     async function loadAlloc() {
       try {
         const base = '';
-        const resp = await fetch(`${base}/api/allocations?teacherId=${user?.id}`);
+        const resp = await apiFetch(`${base}/api/allocations?teacherId=${user?.id}`);
         if (!resp.ok) throw new Error('no');
         const data = await resp.json();
         if (data.classes && data.classes.length) setClassesState(data.classes);

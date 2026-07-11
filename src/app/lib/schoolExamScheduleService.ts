@@ -1,4 +1,5 @@
 import { createStore, useStoreValue } from './store';
+import { apiFetch } from './apiClient';
 
 export interface SchoolExamSchedule {
   id: string;
@@ -37,7 +38,7 @@ export function getSchoolExamStatus(startDate?: string, endDate?: string): Schoo
 export async function refreshSchoolExamSchedules(params: Record<string, string> = {}): Promise<SchoolExamSchedule[]> {
   try {
     const query = new URLSearchParams(params);
-    const res = await fetch(`${API_BASE}/api/school-exam-schedules?${query.toString()}`);
+    const res = await apiFetch(`${API_BASE}/api/school-exam-schedules?${query.toString()}`);
     if (!res.ok) throw new Error('failed');
     const data = await res.json();
     if (Array.isArray(data)) {
@@ -64,7 +65,7 @@ export function useSchoolExamSchedules() {
 
 export async function createSchoolExamSchedule(formData: FormData): Promise<SchoolExamSchedule | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/school-exam-schedules`, {
+    const res = await apiFetch(`${API_BASE}/api/school-exam-schedules`, {
       method: 'POST',
       body: formData,
     });
@@ -80,7 +81,7 @@ export async function createSchoolExamSchedule(formData: FormData): Promise<Scho
 
 export async function updateSchoolExamSchedule(id: string, formData: FormData): Promise<SchoolExamSchedule | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/school-exam-schedules/${id}`, {
+    const res = await apiFetch(`${API_BASE}/api/school-exam-schedules/${id}`, {
       method: 'PUT',
       body: formData,
     });
@@ -96,7 +97,7 @@ export async function updateSchoolExamSchedule(id: string, formData: FormData): 
 
 export async function deleteSchoolExamSchedule(id: string): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/api/school-exam-schedules/${id}`, {
+    const res = await apiFetch(`${API_BASE}/api/school-exam-schedules/${id}`, {
       method: 'DELETE',
     });
     if (!res.ok) throw new Error('failed');

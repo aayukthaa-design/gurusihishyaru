@@ -30,6 +30,7 @@ import { addClass, getClassesForBranch } from '../lib/classService';
 import { addNotification } from '../lib/notificationService';
 import { useSchoolExamSchedules } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
+import { apiFetch } from '../lib/apiClient';
 
 // ─── Chart data ───────────────────────────────────────────────────────────────
 
@@ -146,10 +147,10 @@ export function Dashboard() {
   React.useEffect(() => {
     const loadSpecialClasses = async () => {
       try {
-        const res = await fetch(`/api/special-classes`);
+        const res = await apiFetch(`/api/special-classes`);
         if (res.ok) {
           const data = await res.json();
-          setSpecialClasses(data);
+          setSpecialClasses(Array.isArray(data) ? data : []);
         }
       } catch (err) {
         console.error('Failed to load Special Classes in dashboard', err);
@@ -167,7 +168,7 @@ export function Dashboard() {
         } else {
           url += `?branchId=${encodeURIComponent(branchFilter)}`;
         }
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         if (res.ok) {
           const data = await res.json();
           setWhatsappStats(data);
@@ -227,38 +228,50 @@ export function Dashboard() {
 
   const fetchLedger = async () => {
     try {
-      const res = await fetch(`/api/ledger?branchId=${myBranchId}`);
-      if (res.ok) setLedger(await res.json());
+      const res = await apiFetch(`/api/ledger?branchId=${myBranchId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setLedger(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   };
 
   const fetchInventory = async () => {
     try {
-      const res = await fetch(`/api/inventory?branchId=${myBranchId}`);
-      if (res.ok) setInventory(await res.json());
+      const res = await apiFetch(`/api/inventory?branchId=${myBranchId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setInventory(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   };
 
   const fetchAllocations = async () => {
     try {
-      const res = await fetch(`/api/inventory/allocations?branchId=${myBranchId}`);
-      if (res.ok) setAllocations(await res.json());
+      const res = await apiFetch(`/api/inventory/allocations?branchId=${myBranchId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAllocations(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   };
 
   const fetchReports = async () => {
     try {
-      const res = await fetch(`/api/financial-reports?branchId=${myBranchId}`);
-      if (res.ok) setReports(await res.json());
+      const res = await apiFetch(`/api/financial-reports?branchId=${myBranchId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setReports(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   };
 
   const fetchStudents = async () => {
     try {
-      const res = await fetch(`/api/students`);
+      const res = await apiFetch(`/api/students`);
       if (res.ok) {
         const data = await res.json();
-        setStudents(data.students || data || []);
+        setStudents(Array.isArray(data) ? data : (data.students || []));
       }
     } catch (e) { console.error(e); }
   };
@@ -419,7 +432,7 @@ export function Dashboard() {
     }
 
     try {
-      const res = await fetch('/api/ledger', {
+      const res = await apiFetch('/api/ledger', {
         method: 'POST',
         body: formData
       });

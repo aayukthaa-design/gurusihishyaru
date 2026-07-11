@@ -3,6 +3,7 @@ import { utils, writeFile } from 'xlsx';
 import { createStore, useStoreValue } from './store';
 import { getStudentById, getStudentsByIds } from './studentService';
 import { addNotification } from './notificationService';
+import { apiFetch } from './apiClient';
 
 const API_BASE = '';
 
@@ -71,7 +72,7 @@ export async function refreshHomework(user?: any): Promise<HomeworkAssignment[]>
       params.set('classNames', classes.join(','));
     }
     
-    const res = await fetch(`${API_BASE}/api/homework?${params.toString()}`);
+    const res = await apiFetch(`${API_BASE}/api/homework?${params.toString()}`);
     if (!res.ok) throw new Error('Backend failed');
     const data = await res.json();
     if (Array.isArray(data)) {
@@ -90,7 +91,7 @@ export async function refreshHomework(user?: any): Promise<HomeworkAssignment[]>
 // Create homework assignment (Multipart Form Data for attachments)
 export async function createHomeworkAPI(formData: FormData, user: any) {
   try {
-    const res = await fetch(`${API_BASE}/api/homework`, {
+    const res = await apiFetch(`${API_BASE}/api/homework`, {
       method: 'POST',
       body: formData,
     });
@@ -121,7 +122,7 @@ export async function createHomeworkAPI(formData: FormData, user: any) {
 // Update homework assignment
 export async function updateHomeworkAPI(id: string, formData: FormData, user: any) {
   try {
-    const res = await fetch(`${API_BASE}/api/homework/${id}`, {
+    const res = await apiFetch(`${API_BASE}/api/homework/${id}`, {
       method: 'PUT',
       body: formData,
     });
@@ -152,7 +153,7 @@ export async function updateHomeworkAPI(id: string, formData: FormData, user: an
 // Delete homework assignment
 export async function deleteHomeworkAPI(id: string, user: any) {
   try {
-    const res = await fetch(`${API_BASE}/api/homework/${id}`, {
+    const res = await apiFetch(`${API_BASE}/api/homework/${id}`, {
       method: 'DELETE',
     });
     if (!res.ok) throw new Error('Delete failed');
@@ -167,7 +168,7 @@ export async function deleteHomeworkAPI(id: string, user: any) {
 // Retrieve submissions list for homework ID
 export async function fetchSubmissionsAPI(homeworkId: string): Promise<HomeworkSubmission[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/homework/${homeworkId}/submissions`);
+    const res = await apiFetch(`${API_BASE}/api/homework/${homeworkId}/submissions`);
     if (!res.ok) throw new Error('Submissions fetch failed');
     return await res.json();
   } catch (e) {
@@ -179,7 +180,7 @@ export async function fetchSubmissionsAPI(homeworkId: string): Promise<HomeworkS
 // Submit homework (Multipart form data for single submissionFile)
 export async function submitHomeworkAPI(homeworkId: string, formData: FormData, user: any, isResubmit = false) {
   try {
-    const res = await fetch(`${API_BASE}/api/homework/${homeworkId}/submissions`, {
+    const res = await apiFetch(`${API_BASE}/api/homework/${homeworkId}/submissions`, {
       method: 'POST',
       body: formData,
     });
@@ -214,7 +215,7 @@ export async function submitHomeworkAPI(homeworkId: string, formData: FormData, 
 // Remove submission
 export async function removeSubmissionAPI(homeworkId: string, studentId: string, user: any) {
   try {
-    const res = await fetch(`${API_BASE}/api/homework/${homeworkId}/submissions/${studentId}`, {
+    const res = await apiFetch(`${API_BASE}/api/homework/${homeworkId}/submissions/${studentId}`, {
       method: 'DELETE',
     });
     if (!res.ok) throw new Error('Removal failed');
@@ -253,10 +254,9 @@ export async function reviewSubmissionAPI(
   user: any
 ) {
   try {
-    const res = await fetch(`${API_BASE}/api/homework/${homeworkId}/submissions/${studentId}/review`, {
+    const res = await apiFetch(`${API_BASE}/api/homework/${homeworkId}/submissions/${studentId}/review`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ remarks, reviewedBy }),
+      body: { remarks, reviewedBy },
     });
     if (!res.ok) throw new Error('Review failed');
     const submission = await res.json();

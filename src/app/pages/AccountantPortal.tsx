@@ -16,6 +16,7 @@ import {
   Upload, Lock, Unlock, FileText, CheckCircle, Package, AlertTriangle, RefreshCw, Wallet, CreditCard, ClipboardCheck, Boxes, FileSpreadsheet, Users
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { apiFetch } from '../lib/apiClient';
 
 interface LedgerEntry {
   id: number;
@@ -196,38 +197,47 @@ export function AccountantPortal() {
   // Fetch functions
   const fetchLedger = async () => {
     try {
-      const res = await fetch(`/api/ledger${branchFilter ? `?branchId=${branchFilter}` : ''}`);
-      if (res.ok) setLedger(await res.json());
+      const res = await apiFetch(`/api/ledger${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      if (res.ok) {
+        const data = await res.json();
+        setLedger(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   };
 
   const fetchInventory = async () => {
     try {
-      const res = await fetch(`/api/inventory${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      const res = await apiFetch(`/api/inventory${branchFilter ? `?branchId=${branchFilter}` : ''}`);
       const data = await res.json();
-      setInventory(data);
+      setInventory(Array.isArray(data) ? data : []);
     } catch (err) { console.error('Failed to fetch inventory:', err); }
   };
 
   const fetchCategories = async () => {
     try {
-      const res = await fetch('/api/inventory-categories');
+      const res = await apiFetch('/api/inventory-categories');
       const data = await res.json();
-      setCategories(data);
+      setCategories(Array.isArray(data) ? data : []);
     } catch (err) { console.error('Failed to fetch categories:', err); }
   };
 
   const fetchAllocations = async () => {
     try {
-      const res = await fetch(`/api/inventory/allocations${branchFilter ? `?branchId=${branchFilter}` : ''}`);
-      if (res.ok) setAllocations(await res.json());
+      const res = await apiFetch(`/api/inventory/allocations${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAllocations(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   };
 
   const fetchReports = async () => {
     try {
-      const res = await fetch(`/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
-      if (res.ok) setReports(await res.json());
+      const res = await apiFetch(`/api/financial-reports${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+      if (res.ok) {
+        const data = await res.json();
+        setReports(Array.isArray(data) ? data : []);
+      }
     } catch (e) { console.error(e); }
   };
 
@@ -440,7 +450,7 @@ export function AccountantPortal() {
     ledgerFormData.append('branchId', record.branchId || branchFilter || myBranchId);
 
     try {
-      const res = await fetch('/api/ledger', {
+      const res = await apiFetch('/api/ledger', {
         method: 'POST',
         body: ledgerFormData,
       });
@@ -634,7 +644,7 @@ export function AccountantPortal() {
     }
 
     try {
-      const res = await fetch('/api/ledger', {
+      const res = await apiFetch('/api/ledger', {
         method: 'POST',
         body: formData
       });
@@ -688,16 +698,14 @@ export function AccountantPortal() {
     try {
       let res;
       if (editingInvItem) {
-        res = await fetch(`/api/inventory/${editingInvItem.id}`, {
+        res = await apiFetch(`/api/inventory/${editingInvItem.id}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: payload
         });
       } else {
-        res = await fetch('/api/inventory', {
+        res = await apiFetch('/api/inventory', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: payload
         });
       }
 
@@ -726,7 +734,7 @@ export function AccountantPortal() {
   const handleDeactivateItem = async (itemId: number) => {
     if (!confirm('Are you sure you want to deactivate this item?')) return;
     try {
-      const res = await fetch(`/api/inventory/${itemId}`, {
+      const res = await apiFetch(`/api/inventory/${itemId}`, {
         method: 'DELETE'
       });
       if (res.ok) await fetchInventory();
@@ -736,7 +744,7 @@ export function AccountantPortal() {
   const handleDeleteAttachment = async (ledgerId: number) => {
     if (!confirm('Are you sure you want to remove the uploaded attachment?')) return;
     try {
-      const res = await fetch(`/api/ledger/${ledgerId}/attachment`, {
+      const res = await apiFetch(`/api/ledger/${ledgerId}/attachment`, {
         method: 'DELETE'
       });
       if (res.ok) await fetchLedger();
@@ -774,10 +782,9 @@ export function AccountantPortal() {
     };
 
     try {
-      const res = await fetch('/api/inventory/allocate', {
+      const res = await apiFetch('/api/inventory/allocate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: payload
       });
 
       if (res.ok) {
@@ -794,10 +801,9 @@ export function AccountantPortal() {
   const handleReturnAllocation = async (allocId: number) => {
     if (!confirm('Are you sure the student is returning this inventory item? Available stock levels will increase.')) return;
     try {
-      const res = await fetch('/api/inventory/return', {
+      const res = await apiFetch('/api/inventory/return', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allocationId: allocId })
+        body: { allocationId: allocId }
       });
       if (res.ok) {
         await Promise.all([fetchInventory(), fetchAllocations()]);
@@ -884,10 +890,9 @@ export function AccountantPortal() {
     };
 
     try {
-      const res = await fetch('/api/financial-reports', {
+      const res = await apiFetch('/api/financial-reports', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: payload
       });
       if (res.ok) {
         alert('Monthly Financial Report submitted successfully to Super Admin.');

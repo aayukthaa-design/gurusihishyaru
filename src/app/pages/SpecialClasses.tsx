@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
+import { apiFetch } from '../lib/apiClient';
 import { 
   Calendar, Clock, MapPin, FileText, User, Plus, Edit2, 
   Trash2, XCircle, CheckCircle2, Download, AlertCircle, RefreshCw, BarChart2 
@@ -81,17 +82,17 @@ export function SpecialClasses() {
     try {
       setLoading(true);
       const url = `/api/special-classes`;
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       const data = await res.json();
-      setClasses(data);
+      setClasses(Array.isArray(data) ? data : []);
 
-      const branchRes = await fetch('/api/branches');
+      const branchRes = await apiFetch('/api/branches');
       const branchData = await branchRes.json();
-      setBranches(branchData);
+      setBranches(Array.isArray(branchData) ? branchData : []);
 
-      const studRes = await fetch('/api/students');
+      const studRes = await apiFetch('/api/students');
       const studData = await studRes.json();
-      setStudents(studData);
+      setStudents(Array.isArray(studData) ? studData : []);
     } catch (e) {
       console.error('Error fetching data:', e);
     } finally {
@@ -182,7 +183,7 @@ export function SpecialClasses() {
         formData.append('status', 'Edited');
       }
 
-      const res = await fetch(url, {
+      const res = await apiFetch(url, {
         method,
         body: formData
       });
@@ -233,7 +234,7 @@ export function SpecialClasses() {
   const handleCancelClick = async (id: number) => {
     if (!confirm('Are you sure you want to cancel this Special Class?')) return;
     try {
-      const res = await fetch(`/api/special-classes/${id}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/special-classes/${id}`, { method: 'DELETE' });
       if (res.ok) {
         loadClasses();
       }
@@ -252,13 +253,14 @@ export function SpecialClasses() {
     
     // Fetch existing attendance
     try {
-      const res = await fetch(`/api/special-classes/${c.id}/attendance`);
+      const res = await apiFetch(`/api/special-classes/${c.id}/attendance`);
       const data: BonusAttendanceRecord[] = await res.json();
-      setExistingAttendance(data);
+      const attendanceData = Array.isArray(data) ? data : [];
+      setExistingAttendance(attendanceData);
 
       const records: Record<string, 'present' | 'absent'> = {};
       classStudents.forEach(s => {
-        const found = data.find(r => r.studentId === s.id);
+        const found = attendanceData.find(r => r.studentId === s.id);
         records[s.id] = found ? found.attendanceStatus : 'absent';
       });
       setAttendanceRecords(records);
@@ -271,15 +273,14 @@ export function SpecialClasses() {
   const handleAttendanceSubmit = async () => {
     if (!selectedClass) return;
     try {
-      const res = await fetch(`/api/special-classes/${selectedClass.id}/attendance`, {
+      const res = await apiFetch(`/api/special-classes/${selectedClass.id}/attendance`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: {
           attendanceRecords,
           markedBy: user?.name || 'Teacher',
           date: selectedClass.date,
           branchId: selectedClass.branchId
-        })
+        }
       });
       if (res.ok) {
         setIsAttendanceOpen(false);

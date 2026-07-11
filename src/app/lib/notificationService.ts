@@ -1,6 +1,7 @@
 import { PDFTemplateService } from './pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import { createStore, useStoreValue } from './store';
+import { apiFetch } from './apiClient';
 
 const API_BASE = '';
 const STORAGE_KEY = 'guru-shishyaru-notifications';
@@ -225,7 +226,7 @@ async function fetchNotificationsFromBackend(user?: NotificationUserLike | null)
     if (user?.branchId) params.set('branchId', user.branchId);
     if (user?.assignedClassIds?.length) params.set('classNames', user.assignedClassIds.join(','));
     if (user?.linkedStudentIds?.length) params.set('studentIds', user.linkedStudentIds.join(','));
-    const response = await fetch(`${API_BASE}/api/notifications?${params.toString()}`);
+    const response = await apiFetch(`${API_BASE}/api/notifications?${params.toString()}`);
     if (!response.ok) throw new Error('backend unavailable');
     const data = await response.json();
     return Array.isArray(data) ? data : null;
@@ -246,10 +247,9 @@ async function syncFromBackend(user?: NotificationUserLike | null): Promise<void
 
 async function pushNotificationToBackend(notification: AppNotification): Promise<void> {
   try {
-    const response = await fetch(`${API_BASE}/api/notifications`, {
+    const response = await apiFetch(`${API_BASE}/api/notifications`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: {
         ...notification,
         id: notification.id,
         sender: notification.sender ?? 'System',
@@ -257,7 +257,7 @@ async function pushNotificationToBackend(notification: AppNotification): Promise
         recipient: notification.recipient ?? 'All',
         recipientRole: notification.readByRole ?? '',
         branchId: notification.branchId ?? null,
-      }),
+      },
     });
     if (!response.ok) throw new Error('backend unavailable');
   } catch {
@@ -269,19 +269,17 @@ async function applyMutationToBackend(id: string, action: 'read' | 'delete' | 'r
   try {
     let response: Response;
     if (action === 'read') {
-      response = await fetch(`${API_BASE}/api/notifications/${id}/read`, {
+      response = await apiFetch(`${API_BASE}/api/notifications/${id}/read`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload || {}),
+        body: payload || {},
       });
     } else if (action === 'delete') {
-      response = await fetch(`${API_BASE}/api/notifications/${id}/delete`, {
+      response = await apiFetch(`${API_BASE}/api/notifications/${id}/delete`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload || {}),
+        body: payload || {},
       });
     } else {
-      response = await fetch(`${API_BASE}/api/notifications/${id}/restore`, { method: 'PATCH' });
+      response = await apiFetch(`${API_BASE}/api/notifications/${id}/restore`, { method: 'PATCH' });
     }
     if (!response.ok) throw new Error('backend unavailable');
   } catch {
@@ -291,10 +289,9 @@ async function applyMutationToBackend(id: string, action: 'read' | 'delete' | 'r
 
 async function applyBulkMutationToBackend(ids: string[], action: 'read' | 'delete', payload?: Record<string, string | null>): Promise<void> {
   try {
-    const response = await fetch(`${API_BASE}/api/notifications/bulk/${action}`, {
+    const response = await apiFetch(`${API_BASE}/api/notifications/bulk/${action}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids, ...payload }),
+      body: { ids, ...payload },
     });
     if (!response.ok) throw new Error('backend unavailable');
   } catch {

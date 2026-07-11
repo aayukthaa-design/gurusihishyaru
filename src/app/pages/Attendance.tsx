@@ -8,6 +8,7 @@ import { saveAttendanceAPI } from '../lib/attendanceService';
 import { saveTeacherAttendanceRecords, getAttendanceEntriesForDate, getTeacherAttendanceHistory, type TeacherAttendanceStatus, validateAttendanceDuplicate } from '../lib/teacherSalaryService';
 import { getTeacherProfiles, type Teacher } from './TeacherManagement';
 import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, Users, CalendarDays } from 'lucide-react';
+import { apiFetch } from '../lib/apiClient';
 
 
 const CLASSES = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B', '10th C', '11th A', '11th B', '12th A', '12th B'];
@@ -59,7 +60,7 @@ export function Attendance() {
 
   // Fetch settings to load official tutorial contact number
   useEffect(() => {
-    fetch('/api/settings')
+    apiFetch('/api/settings')
       .then((res) => res.json())
       .then((data) => {
         if (data && data.official_contact) {
@@ -94,7 +95,7 @@ export function Attendance() {
     const url = `/api/students?className=${encodeURIComponent(selectedClass)}` + 
                 (branchFilter ? `&branchId=${encodeURIComponent(branchFilter)}` : '');
     
-    fetch(url)
+    apiFetch(url)
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {

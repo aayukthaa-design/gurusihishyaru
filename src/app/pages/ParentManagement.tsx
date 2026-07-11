@@ -3,6 +3,7 @@ import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { Users, Plus, Search, Eye, Edit2, ChevronRight, X, Phone, Mail, UserCheck } from 'lucide-react';
+import { apiFetch } from '../lib/apiClient';
 
 interface Parent {
   id: string;
@@ -92,10 +93,10 @@ export function ParentManagement() {
 
   const loadParents = async () => {
     try {
-      const res = await fetch('/api/parents');
+      const res = await apiFetch('/api/parents');
       if (res.ok) {
         const list = await res.json();
-        setParents(list);
+        setParents(Array.isArray(list) ? list : []);
       }
     } catch (e) {
         console.error('Failed to load parents', e);

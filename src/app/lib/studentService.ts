@@ -1,4 +1,5 @@
 import { createStore, useStoreValue } from './store';
+import { apiFetch } from './apiClient';
 
 export interface StudentRecord {
   id: string;
@@ -37,7 +38,7 @@ const studentStore = createStore<StudentRecord[]>(SEED_STUDENTS);
 
 export async function refreshStudents(): Promise<StudentRecord[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/students`);
+    const res = await apiFetch(`${API_BASE}/api/students`);
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
@@ -91,10 +92,9 @@ export function getAllStudents(): StudentRecord[] {
 
 export async function addStudentAPI(student: Omit<StudentRecord, 'id'>): Promise<StudentRecord | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/students`, {
+    const res = await apiFetch(`${API_BASE}/api/students`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(student)
+      body: student
     });
     if (res.ok) {
       const saved = await res.json();
@@ -109,10 +109,9 @@ export async function addStudentAPI(student: Omit<StudentRecord, 'id'>): Promise
 
 export async function updateStudentAPI(id: string, student: Partial<StudentRecord>): Promise<StudentRecord | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/students/${id}`, {
+    const res = await apiFetch(`${API_BASE}/api/students/${id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(student)
+      body: student
     });
     if (res.ok) {
       const saved = await res.json();
