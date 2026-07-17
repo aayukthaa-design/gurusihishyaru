@@ -27,6 +27,8 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'accountant_portal',      // financial overview
       'student_performance_analytics',
       'special_classes',
+      'materials',
+      'lesson_plan',
     ],
     permissions: [
       'create',
@@ -62,6 +64,8 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'expense_management',     // day-to-day expenses
       'inventory',              // inventory management
       'special_classes',
+      'materials',               // oversight of all teachers' uploaded materials
+      'lesson_plan',              // oversight of all teachers' lesson plans
     ],
     permissions: ['create', 'read', 'update', 'delete', 'export'],
   },
@@ -83,6 +87,8 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'daily_submission', // Daily work report submission
       'special_classes',
       'school_exam_schedules',
+      'materials',         // Upload/manage own study materials (never visible to other teachers)
+      'lesson_plan',        // Plan lessons per class/subject from the textbook
     ],
     permissions: ['create', 'read', 'update'],
   },
@@ -98,6 +104,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'notification_center',
       'event_management',
       'special_classes',
+      'materials',   // View/download materials shared for their child's class
     ],
     permissions: ['read'],
   },
@@ -152,6 +159,8 @@ export const MODULE_ROUTES: Record<Module, string[]> = {
   student_performance_analytics: ['/performance-analytics'],
   special_classes:     ['/special-classes'],
   school_exam_schedules: ['/school-exam-schedules'],
+  materials:           ['/materials'],
+  lesson_plan:         ['/lesson-plan'],
 };
 
 // ─── RBAC helpers ─────────────────────────────────────────────────────────────

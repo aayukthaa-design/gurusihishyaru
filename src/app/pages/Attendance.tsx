@@ -28,6 +28,7 @@ export function Attendance() {
   const [students, setStudents] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [recentRecords, setRecentRecords] = useState<any[]>([]);
+  const [showAllRecent, setShowAllRecent] = useState(false);
   const [teacherAttendanceDate, setTeacherAttendanceDate] = useState(TODAY_ISO);
   const [teacherBranchFilter, setTeacherBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [teacherDepartmentFilter, setTeacherDepartmentFilter] = useState('');
@@ -70,15 +71,27 @@ export function Attendance() {
       .catch((err) => console.error('Failed to load official contact settings', err));
   }, []);
 
-  // Fetch recent attendance from logs/attendance to populate the list
-  const loadRecentAttendance = () => {
-    setRecentRecords([
-      { class: '10th A', date: 'Today',     present: 28, total: 30 },
-      { class: '9th B',  date: 'Today',     present: 18, total: 20 },
-      { class: '11th A', date: 'Yesterday', present: 25, total: 28 },
-      { class: '8th B',  date: 'Yesterday', present: 22, total: 25 },
-      { class: '12th A', date: '2 days ago', present: 20, total: 22 },
-    ]);
+  // Fetch recent attendance from the backend and aggregate present/total per class+date
+  const loadRecentAttendance = async () => {
+    const records = await fetchAttendanceRecords();
+    const scoped = isAdminOrSuper && branchFilter
+      ? records.filter((r: any) => CLASSES.includes(r.className))
+      : records;
+    const groups = new Map<string, { class: string; date: string; present: number; total: number; sortKey: string }>();
+    for (const r of scoped) {
+      const key = `${r.className}__${r.date}`;
+      const g = groups.get(key) || { class: r.className, date: r.date, present: 0, total: 0, sortKey: r.date };
+      g.total += 1;
+      if (r.status === 'present') g.present += 1;
+      groups.set(key, g);
+    }
+    const sorted = Array.from(groups.values()).sort((a, b) => b.sortKey.localeCompare(a.sortKey));
+    setRecentRecords(sorted.map((g) => ({
+      class: g.class,
+      date: g.date === TODAY_ISO ? 'Today' : new Date(g.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
+      present: g.present,
+      total: g.total,
+    })));
   };
 
   useEffect(() => {
@@ -598,12 +611,20 @@ export function Attendance() {
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-base font-semibold text-foreground">Recent Attendance</h2>
-            <button className="flex items-center gap-1 text-sm font-medium text-primary hover:underline">
-              View all <ChevronRight className="h-3.5 w-3.5" />
-            </button>
+            {recentRecords.length > 5 && (
+              <button
+                onClick={() => setShowAllRecent((v) => !v)}
+                className="flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+              >
+                {showAllRecent ? 'Show less' : `View all ${recentRecords.length}`} <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showAllRecent ? 'rotate-90' : ''}`} />
+              </button>
+            )}
           </div>
+          {recentRecords.length === 0 && (
+            <p className="text-sm text-muted-foreground py-4 text-center">No attendance records yet.</p>
+          )}
           <div className="space-y-2">
-            {recentRecords.map((r, i) => {
+            {recentRecords.slice(0, showAllRecent ? recentRecords.length : 5).map((r, i) => {
               const pct = Math.round((r.present / r.total) * 100);
               return (
                 <div key={i} className="flex items-center gap-4 rounded-xl border border-border bg-secondary/40 px-4 py-3">

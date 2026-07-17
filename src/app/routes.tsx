@@ -36,9 +36,10 @@ import { SystemSettings } from './pages/SystemSettings';
 import { BackupRestore } from './pages/BackupRestore';
 import { ThemeSettings } from './pages/ThemeSettings';
 import { Homework } from './pages/Homework';
+import { Materials } from './pages/Materials';
+import { LessonPlan } from './pages/LessonPlan';
 import { StudentProgress } from './pages/StudentProgress';
 import { StudentPerformanceAnalytics } from './pages/StudentPerformanceAnalytics';
-import { ThemeShowcase } from './pages/ThemeShowcase';
 import { SpecialClasses } from './pages/SpecialClasses';
 import { SchoolExamSchedulesPage } from './pages/SchoolExamSchedules';
 import { ProtectedRoute, GuestRoute } from './auth/ProtectedRoute';
@@ -204,6 +205,22 @@ export const router = createBrowserRouter([
         element: (
           <Protected module="student_progress">
             <StudentProgress />
+          </Protected>
+        ),
+      },
+      {
+        path: 'materials',
+        element: (
+          <Protected module="materials">
+            <Materials />
+          </Protected>
+        ),
+      },
+      {
+        path: 'lesson-plan',
+        element: (
+          <Protected module="lesson_plan">
+            <LessonPlan />
           </Protected>
         ),
       },
@@ -389,9 +406,6 @@ export const router = createBrowserRouter([
           </Protected>
         ),
       },
-
-      // Dev/showcase
-      { path: 'showcase', element: <ThemeShowcase /> },
     ],
   },
 

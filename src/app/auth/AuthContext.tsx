@@ -32,7 +32,8 @@ type AuthAction =
   | { type: 'LOGOUT' }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'RESTORE_SESSION'; payload: { user: User; token: string } }
-  | { type: 'SWITCH_ROLE'; payload: { role: Role } };
+  | { type: 'SWITCH_ROLE'; payload: { role: Role } }
+  | { type: 'UPDATE_USER'; payload: { user: User } };
 
 const initialState: AuthState = {
   user: null,
@@ -64,6 +65,8 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
       return { ...state, isLoading: action.payload };
     case 'SWITCH_ROLE':
       return state.user ? { ...state, user: { ...state.user, role: action.payload.role } } : state;
+    case 'UPDATE_USER':
+      return { ...state, user: action.payload.user };
     default:
       return state;
   }
@@ -126,44 +129,64 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_LOADING', payload: false });
   }, []);
 
-  // Login
+  // Parent login step 1: request a WhatsApp OTP. Deliberately does not reveal
+  // whether the mobile number is registered — the response is identical either way.
+  const requestParentOtp = useCallback(async (mobile: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const response = await apiFetch('/api/auth/parent-login/request-otp', {
+        method: 'POST',
+        skipAuth: true,
+        body: { mobile: mobile.trim() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return { success: false, error: data.error || 'Failed to send verification code.' };
+      }
+      return { success: true };
+    } catch (err) {
+      console.error('Request parent OTP error:', err);
+      return { success: false, error: 'Connection to server failed. Please try again.' };
+    }
+  }, []);
+
+  // Parent login step 2: verify the code and, on success, establish the session.
+  const verifyParentOtp = useCallback(
+    async (mobile: string, code: string, rememberMe = false): Promise<{ success: boolean; error?: string }> => {
+      dispatch({ type: 'SET_LOADING', payload: true });
+      try {
+        const response = await apiFetch('/api/auth/parent-login/verify-otp', {
+          method: 'POST',
+          skipAuth: true,
+          body: { mobile: mobile.trim(), code: code.trim() },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success || !data.user || !data.token) {
+          dispatch({ type: 'SET_LOADING', payload: false });
+          return { success: false, error: data.error || 'Invalid or expired code.' };
+        }
+
+        const user: User = { ...data.user, roles: ['parent'] };
+        const token: string = data.token;
+        const storage = rememberMe ? localStorage : sessionStorage;
+
+        storage.setItem(TOKEN_KEY, token);
+        storage.setItem(USER_KEY, JSON.stringify(user));
+
+        dispatch({ type: 'LOGIN_SUCCESS', payload: { user, token } });
+        return { success: true };
+      } catch (err) {
+        console.error('Verify parent OTP error:', err);
+        dispatch({ type: 'SET_LOADING', payload: false });
+        return { success: false, error: 'Connection to server failed. Please try again.' };
+      }
+    },
+    []
+  );
+
+  // Login (staff/teacher/admin — password-based)
   const login = useCallback(
     async (credentials: LoginCredentials): Promise<{ success: boolean; role?: Role; roles?: Role[]; error?: string }> => {
       dispatch({ type: 'SET_LOADING', payload: true });
-
-      if (credentials.isParent) {
-        try {
-          const response = await apiFetch('/api/auth/parent-login', {
-            method: 'POST',
-            skipAuth: true,
-            body: { mobile: credentials.email.trim() },
-          });
-          if (response.ok) {
-            const data = await response.json();
-            if (data.success && data.user && data.token) {
-              const user: User = { ...data.user, roles: ['parent'] };
-              const token: string = data.token;
-              const storage = credentials.rememberMe ? localStorage : sessionStorage;
-
-              storage.setItem(TOKEN_KEY, token);
-              storage.setItem(USER_KEY, JSON.stringify(user));
-
-              dispatch({ type: 'LOGIN_SUCCESS', payload: { user, token } });
-              return { success: true, role: user.role, roles: user.roles };
-            }
-          } else {
-            const data = await response.json().catch(() => ({}));
-            dispatch({ type: 'SET_LOADING', payload: false });
-            return { success: false, error: data.error || 'This mobile number is not registered with Guru Shishyaru Tutorials.' };
-          }
-        } catch (err) {
-          console.error('Parent login API error:', err);
-          dispatch({ type: 'SET_LOADING', payload: false });
-          return { success: false, error: 'Connection to server failed. Please try again.' };
-        }
-        dispatch({ type: 'SET_LOADING', payload: false });
-        return { success: false, error: 'This mobile number is not registered with Guru Shishyaru Tutorials.' };
-      }
 
       try {
         const response = await apiFetch('/api/auth/login', {
@@ -215,6 +238,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [state.user]
   );
 
+  // Patches the cached user object (both in-memory and storage) — used after
+  // actions like changing a temporary password, so a page refresh doesn't
+  // re-read the stale flag from storage and re-trigger something like the
+  // forced password-change gate.
+  const updateUser = useCallback(
+    (patch: Partial<User>) => {
+      if (!state.user) return;
+      const updatedUser: User = { ...state.user, ...patch };
+      const storage = localStorage.getItem(USER_KEY) ? localStorage : sessionStorage;
+      storage.setItem(USER_KEY, JSON.stringify(updatedUser));
+      dispatch({ type: 'UPDATE_USER', payload: { user: updatedUser } });
+    },
+    [state.user]
+  );
+
   // Permission check
   const checkPermission = useCallback(
     (module: Module, permission: Permission): boolean => {
@@ -250,6 +288,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     hasPermission: checkPermission,
     hasModuleAccess: checkModuleAccess,
     canAccess,
+    requestParentOtp,
+    verifyParentOtp,
+    updateUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -15,7 +15,8 @@ export class WhatsAppProvider {
 
 /**
  * Reusable WhatsApp Message templates with placeholders:
- * {{StudentName}}, {{Class}}, {{Branch}}, {{AttendanceDate}}, {{TutorialName}}, {{OfficialContact}}
+ * {{StudentName}}, {{Class}}, {{Branch}}, {{AttendanceDate}}, {{TutorialName}}, {{OfficialContact}},
+ * {{Subject}}, {{TeacherName}}, {{HomeworkTitle}}, {{DueDate}}
  */
 export const DEFAULT_TEMPLATES = {
   attendance_absence_alert: `📢 *{{TutorialName}}*
@@ -34,7 +35,33 @@ If this absence was unexpected, kindly contact the tutorial for clarification.
 
 Thank you.
 
-*{{TutorialName}}*`
+*{{TutorialName}}*`,
+
+  homework_update_alert: `📚 *{{TutorialName}}*
+
+Dear Parent,
+
+Homework for *{{Class}}* — *{{Subject}}* has been updated by *{{TeacherName}}*.
+
+📝 Title: {{HomeworkTitle}}
+📅 Due Date: {{DueDate}}
+
+Please check the app for full details.
+
+📞 Contact:
+{{OfficialContact}}
+
+Thank you.
+
+*{{TutorialName}}*`,
+
+  parent_login_otp: `🔐 *{{TutorialName}}*
+
+Your login verification code is: *{{OtpCode}}*
+
+This code expires in {{OtpExpiryMinutes}} minutes. Do not share this code with anyone.
+
+If you did not request this, please ignore this message.`
 };
 
 /**
@@ -43,14 +70,20 @@ Thank you.
 export function fillTemplate(templateText, data) {
   const tutorialName = data.tutorialName || data.businessName || 'Guru Shishyaru Tutorials';
   const branchName = data.branchName || '';
-  
+
   return templateText
     .replace(/\{\{StudentName\}\}/g, data.studentName || '')
     .replace(/\{\{Class\}\}/g, data.className || '')
     .replace(/\{\{Branch\}\}/g, branchName)
     .replace(/\{\{AttendanceDate\}\}/g, data.attendanceDate || '')
     .replace(/\{\{TutorialName\}\}/g, tutorialName)
-    .replace(/\{\{OfficialContact\}\}/g, data.officialContact || '');
+    .replace(/\{\{OfficialContact\}\}/g, data.officialContact || '')
+    .replace(/\{\{Subject\}\}/g, data.subject || '')
+    .replace(/\{\{TeacherName\}\}/g, data.teacherName || '')
+    .replace(/\{\{HomeworkTitle\}\}/g, data.homeworkTitle || '')
+    .replace(/\{\{DueDate\}\}/g, data.dueDate || '')
+    .replace(/\{\{OtpCode\}\}/g, data.otpCode || '')
+    .replace(/\{\{OtpExpiryMinutes\}\}/g, data.otpExpiryMinutes || '5');
 }
 
 /**
@@ -74,11 +107,31 @@ export class MockWhatsAppProvider extends WhatsAppProvider {
 /**
  * Concrete Meta Cloud API Provider (Ready for production)
  */
+// Template body parameters for providers that use pre-approved WhatsApp Business
+// templates (Meta Cloud API, Interakt) are positional ({{1}}, {{2}}...) and must
+// match the order the template was approved with — there is no name-based
+// substitution on the provider's side (that only happens locally in
+// fillTemplate() for Mock/Twilio/Gupshup). Each templateName maps to the exact
+// field order its approved template expects; messageData.templateParams can
+// override this directly for a template not listed here.
+const TEMPLATE_PARAM_ORDER = {
+  attendance_absence_alert: ['studentName', 'className', 'attendanceDate', 'officialContact'],
+  homework_update_alert: ['className', 'subject', 'teacherName', 'homeworkTitle', 'dueDate', 'officialContact'],
+  // Meta requires OTP/verification messages to use a template in the
+  // "Authentication" category — when creating this template in WhatsApp
+  // Manager, its single body variable is the code itself.
+  parent_login_otp: ['otpCode'],
+};
+
 export class MetaWhatsAppProvider extends WhatsAppProvider {
   async sendMessage(config, messageData) {
-    const { to, studentName, className, attendanceDate, officialContact } = messageData;
+    const { to } = messageData;
     const { apiToken, phoneNumberId, templateName, apiVersion } = config;
     const version = apiVersion || 'v17.0';
+    const resolvedTemplateName = templateName || 'attendance_absence_alert';
+
+    const paramOrder = TEMPLATE_PARAM_ORDER[resolvedTemplateName] || TEMPLATE_PARAM_ORDER.attendance_absence_alert;
+    const templateParams = messageData.templateParams || paramOrder.map((field) => messageData[field] || '');
 
     console.log(`[MetaWhatsAppProvider] Generating Meta API template call for ${to}...`);
     console.log(`[Meta Cloud API Payload]:
@@ -92,17 +145,12 @@ export class MetaWhatsAppProvider extends WhatsAppProvider {
         "to": "${to}",
         "type": "template",
         "template": {
-          "name": "${templateName || 'attendance_absence_alert'}",
+          "name": "${resolvedTemplateName}",
           "language": { "code": "en" },
           "components": [
             {
               "type": "body",
-              "parameters": [
-                { "type": "text", "text": "${studentName}" },
-                { "type": "text", "text": "${className}" },
-                { "type": "text", "text": "${attendanceDate}" },
-                { "type": "text", "text": "${officialContact}" }
-              ]
+              "parameters": ${JSON.stringify(templateParams.map((p) => ({ type: 'text', text: p })))}
             }
           ]
         }
@@ -122,17 +170,12 @@ export class MetaWhatsAppProvider extends WhatsAppProvider {
           to: to,
           type: 'template',
           template: {
-            name: templateName || 'attendance_absence_alert',
+            name: resolvedTemplateName,
             language: { code: 'en' },
             components: [
               {
                 type: 'body',
-                parameters: [
-                  { type: 'text', text: studentName },
-                  { type: 'text', text: className },
-                  { type: 'text', text: attendanceDate },
-                  { type: 'text', text: officialContact }
-                ]
+                parameters: templateParams.map((p) => ({ type: 'text', text: p }))
               }
             ]
           }
@@ -244,8 +287,12 @@ export class GupshupWhatsAppProvider extends WhatsAppProvider {
  */
 export class InteraktWhatsAppProvider extends WhatsAppProvider {
   async sendMessage(config, messageData) {
-    const { to, studentName, className, attendanceDate, officialContact } = messageData;
+    const { to } = messageData;
     const { apiToken, templateName } = config;
+    const resolvedTemplateName = templateName || 'attendance_absence_alert';
+
+    const paramOrder = TEMPLATE_PARAM_ORDER[resolvedTemplateName] || TEMPLATE_PARAM_ORDER.attendance_absence_alert;
+    const templateParams = messageData.templateParams || paramOrder.map((field) => messageData[field] || '');
 
     console.log(`[InteraktWhatsAppProvider] Generating Interakt call for ${to}...`);
 
@@ -262,9 +309,9 @@ export class InteraktWhatsAppProvider extends WhatsAppProvider {
           callbackData: 'attendance_alert',
           type: 'Template',
           template: {
-            name: templateName || 'attendance_absence_alert',
+            name: resolvedTemplateName,
             languageCode: 'en',
-            bodyValues: [studentName, className, attendanceDate, officialContact]
+            bodyValues: templateParams
           }
         })
       });
@@ -291,10 +338,13 @@ export class WhatsAppService {
   static getProvider(providerName, config) {
     const apiToken = config.apiToken || '';
     
-    // Fallback rule: if credentials are empty or contain default test tokens, continue using MockWhatsAppProvider
-    const hasCredentials = apiToken && 
-                           apiToken.trim() !== '' && 
-                           apiToken !== 'dummy_token_123456' && 
+    // Fallback rule: if credentials are empty or look like placeholder/example tokens,
+    // continue using MockWhatsAppProvider. 'EAAG3yZCbKvZCoBA' is NOT a real credential —
+    // it's the fixed prefix Meta's own dashboard shows in its example/sample token text,
+    // so this just catches someone pasting that example verbatim instead of a real token.
+    const hasCredentials = apiToken &&
+                           apiToken.trim() !== '' &&
+                           apiToken !== 'dummy_token_123456' &&
                            !apiToken.includes('EAAG3yZCbKvZCoBA');
 
     if (providerName === 'Mock' || !providerName || !hasCredentials) {

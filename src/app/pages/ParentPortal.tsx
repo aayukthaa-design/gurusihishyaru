@@ -23,17 +23,7 @@ import { subscribeExams, Exam } from '../lib/examService';
 import { useSchoolExamSchedules, getAttachmentUrl } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
-
-const STUDENT_FEE_RECORDS = [
-  { studentId: 'STU001', total: 5000, paid: 5000, dueDate: '2026-06-15', status: 'Paid', nextInstallment: 'Jul 01, 2026', lastPaid: 'Jun 15, 2026' },
-  { studentId: 'STU002', total: 4500, paid: 2250, dueDate: '2026-06-20', status: 'Pending', nextInstallment: 'Jun 20, 2026', lastPaid: 'May 15, 2026' },
-  { studentId: 'STU003', total: 5500, paid: 0, dueDate: '2026-06-10', status: 'Overdue', nextInstallment: 'Overdue now', lastPaid: '—' },
-  { studentId: 'STU004', total: 5000, paid: 5000, dueDate: '2026-06-18', status: 'Paid', nextInstallment: 'Jul 18, 2026', lastPaid: 'Jun 18, 2026' },
-  { studentId: 'STU005', total: 6000, paid: 3000, dueDate: '2026-06-25', status: 'Pending', nextInstallment: 'Jun 25, 2026', lastPaid: 'May 25, 2026' },
-  { studentId: 'STU006', total: 5000, paid: 5000, dueDate: '2026-06-15', status: 'Paid', nextInstallment: 'Jul 15, 2026', lastPaid: 'Jun 15, 2026' },
-  { studentId: 'STU007', total: 4500, paid: 0, dueDate: '2026-06-05', status: 'Overdue', nextInstallment: 'Overdue now', lastPaid: '—' },
-  { studentId: 'STU008', total: 5200, paid: 2600, dueDate: '2026-06-22', status: 'Pending', nextInstallment: 'Jun 22, 2026', lastPaid: 'May 22, 2026' },
-];
+import { useFeeRecords, refreshFeeRecords } from '../lib/feeService';
 
 export function ParentPortal() {
   const { user } = useAuth();
@@ -57,6 +47,11 @@ export function ParentPortal() {
   const [homeworkStats, setHomeworkStats] = useState({ total: 0, pending: 0 });
   const [exams, setExams] = useState<Exam[]>([]);
   const [allMarks, setAllMarks] = useState<MarkRecord[]>([]);
+  const feeRecords = useFeeRecords();
+
+  useEffect(() => {
+    if (user) refreshFeeRecords(user);
+  }, [user]);
 
   useEffect(() => {
     const unsubExams = subscribeExams(setExams);
@@ -116,17 +111,33 @@ export function ParentPortal() {
     return schoolExamSchedules.filter((schedule) => schedule.studentId === selectedStudent?.id);
   }, [schoolExamSchedules, selectedStudent?.id]);
 
-  const selectedStudentFee = useMemo(
-    () => STUDENT_FEE_RECORDS.find((record) => record.studentId === selectedStudent?.id),
-    [selectedStudent?.id]
+  // A student can have several fee records (Tuition, Exam, Transport…) — aggregate
+  // them into one summary tile rather than showing just one record like the old
+  // hardcoded data did.
+  const studentFeeRecords = useMemo(
+    () => feeRecords.filter((record) => record.studentId === selectedStudent?.id),
+    [feeRecords, selectedStudent?.id]
   );
+
+  const selectedStudentFee = useMemo(() => {
+    if (studentFeeRecords.length === 0) return null;
+    const total = studentFeeRecords.reduce((sum, r) => sum + r.totalAmount, 0);
+    const paid = studentFeeRecords.reduce((sum, r) => sum + r.paidAmount, 0);
+    const hasOverdue = studentFeeRecords.some((r) => r.status === 'Overdue');
+    const hasOutstanding = studentFeeRecords.some((r) => r.status !== 'Paid');
+    const status = hasOverdue ? 'Overdue' : hasOutstanding ? 'Pending' : 'Paid';
+    const upcoming = studentFeeRecords
+      .filter((r) => r.status !== 'Paid' && r.dueDate)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate))[0];
+    return { total, paid, status, dueDate: upcoming?.dueDate || '' };
+  }, [studentFeeRecords]);
 
   const feeDueAmount = selectedStudentFee ? selectedStudentFee.total - selectedStudentFee.paid : 0;
   const feeStatusLabel = selectedStudentFee?.status ?? 'Not available';
   const feeSummaryText = selectedStudentFee
     ? selectedStudentFee.status === 'Paid'
-      ? `Last paid ${selectedStudentFee.lastPaid}`
-      : `Next due ${selectedStudentFee.dueDate}`
+      ? 'All fees paid in full'
+      : `Next due ${selectedStudentFee.dueDate || 'date not set'}`
     : 'No fee record available';
 
   const studentResults = useMemo(() => {
@@ -266,7 +277,15 @@ export function ParentPortal() {
                   <p className="text-sm font-semibold text-muted-foreground">Next due details</p>
                   {selectedStudentFee ? (
                     <div className="mt-4 space-y-2">
-                      <p className="text-sm text-foreground">{selectedStudentFee.nextInstallment}</p>
+                      <p className="text-sm text-foreground">
+                        {selectedStudentFee.status === 'Paid'
+                          ? 'Nothing due'
+                          : selectedStudentFee.status === 'Overdue'
+                            ? 'Overdue now'
+                            : selectedStudentFee.dueDate
+                              ? `Due ${selectedStudentFee.dueDate}`
+                              : 'Due date not set'}
+                      </p>
                       <p className="text-lg font-semibold text-foreground">{formatIndianCurrency(feeDueAmount)}</p>
                       <p className="text-sm text-muted-foreground">Amount still owed on the current bill</p>
                     </div>

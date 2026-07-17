@@ -3,7 +3,7 @@ import { Header } from '../components/Header';
 import {
   Users, Plus, Search, Shield, Edit2, Ban,
   CheckCircle2, XCircle, Eye, EyeOff, RefreshCw,
-  UserCog, Wallet, ChevronRight, X,
+  UserCog, Wallet, X,
 } from 'lucide-react';
 import { useLocation } from 'react-router';
 import { getRoleLabel } from '../auth/rbac';
@@ -643,10 +643,7 @@ export function UserManagement() {
 
               {filtered.length > 0 && (
                 <div className="flex items-center justify-between border-t border-border px-5 py-3">
-                  <p className="text-sm text-muted-foreground">Showing {filtered.length} users</p>
-                  <button className="flex items-center gap-1 text-xs text-primary hover:underline">
-                    View all <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
+                  <p className="text-sm text-muted-foreground">Showing all {filtered.length} users</p>
                 </div>
               )}
             </>

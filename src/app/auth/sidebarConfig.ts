@@ -23,6 +23,8 @@ import {
   UserCheck,
   Link2,
   FileText,
+  Library,
+  NotebookPen,
   type LucideIcon,
 } from 'lucide-react';
 import type { Role, Module } from './types';
@@ -57,6 +59,8 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
   { name: 'Teacher Attendance', href: '/teacher-attendance', icon: Users, module: 'attendance' },
   { name: 'Exams',            href: '/exams',            icon: GraduationCap,   module: 'exam_marks' },
   { name: 'Homework',         href: '/homework',         icon: ClipboardList,  module: 'homework' },
+  { name: 'Study Materials',  href: '/materials',        icon: Library,         module: 'materials' },
+  { name: 'Lesson Plans',     href: '/lesson-plan',      icon: NotebookPen,     module: 'lesson_plan' },
   { name: 'Timetable',        href: '/timetable',        icon: Calendar,        module: 'timetable' },
   { name: 'Admissions',       href: '/admissions',       icon: UserPlus,        module: 'admission_crm' },
   { name: 'Teacher Tasks',    href: '/tasks',            icon: ListTodo,        module: 'teacher_tasks' },
@@ -101,7 +105,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
   if (role === 'super_admin') {
     return [
       { label: 'Overview',          items: allowed.filter((i) => i.module === 'dashboard') },
-      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'branch_management', 'role_management', 'special_classes'] as Module[]).includes(i.module)) },
+      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'branch_management', 'role_management', 'special_classes', 'materials', 'lesson_plan'] as Module[]).includes(i.module)) },
       { label: 'Finance & Reports', items: allowed.filter((i) => (['expense_management', 'accountant_portal', 'reports_analytics', 'student_performance_analytics'] as Module[]).includes(i.module)) },
       { label: 'System',            items: allowed.filter((i) => (['notification_center', 'system_settings', 'backup_restore', 'theme_settings'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);
@@ -111,7 +115,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
     return [
       { label: 'Overview',  items: allowed.filter((i) => i.module === 'dashboard') },
       { label: 'People',    items: allowed.filter((i) => (['student_management', 'teacher_management', 'parent_management', 'class_allocation'] as Module[]).includes(i.module)) },
-      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes'] as Module[]).includes(i.module)) },
+      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes', 'materials', 'lesson_plan'] as Module[]).includes(i.module)) },
       { label: 'Finance',   items: allowed.filter((i) => (['fee_management', 'expense_management', 'inventory'] as Module[]).includes(i.module)) },
       { label: 'More',      items: allowed.filter((i) => (['event_management', 'notification_center', 'reports_analytics'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);
@@ -120,7 +124,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
   if (role === 'teacher') {
     return [
       { label: 'Overview',  items: allowed.filter((i) => (['dashboard', 'teacher_portal'] as Module[]).includes(i.module)) },
-      { label: 'Teaching',  items: allowed.filter((i) => (['my_classes', 'attendance', 'exam_marks', 'homework', 'timetable', 'special_classes', 'school_exam_schedules'] as Module[]).includes(i.module)) },
+      { label: 'Teaching',  items: allowed.filter((i) => (['my_classes', 'attendance', 'exam_marks', 'homework', 'materials', 'lesson_plan', 'timetable', 'special_classes', 'school_exam_schedules'] as Module[]).includes(i.module)) },
       { label: 'Students',  items: allowed.filter((i) => (['student_progress'] as Module[]).includes(i.module)) },
       { label: 'Reports',   items: allowed.filter((i) => (['daily_submission', 'notification_center'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);

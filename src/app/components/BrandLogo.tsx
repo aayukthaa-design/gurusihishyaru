@@ -1,6 +1,6 @@
 /**
  * BrandLogo — uses the exact uploaded Guru Shishyaru Tutorials logo image.
- * The image must be placed at: public/logo.png
+ * The image must be placed at: public/logo.jpeg
  *
  * Props:
  *   height        — pixel height of the logo image (width is auto)

@@ -5,45 +5,74 @@ import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
 import { subscribeExams } from '../lib/examService';
 import { getTeacherExamAttendanceDashboard, subscribeExamAttendance } from '../lib/examAttendanceService';
+import { refreshTasks, getTasksForTeacher, subscribeTasks, TaskRecord } from '../lib/taskService';
 import { ChevronRight, CheckCircle2, Circle } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 
-const SCHEDULE = [
-  { time: '08:00–09:00', class: 'Mathematics · 10th A', room: 'Room 201', done: true },
-  { time: '09:00–10:00', class: 'Mathematics · 11th B', room: 'Room 201', done: true },
-  { time: '11:30–12:30', class: 'Mathematics · 10th C', room: 'Room 201', done: false },
-  { time: '02:00–03:00', class: 'Mathematics · 11th A', room: 'Room 201', done: false },
-];
+interface TimetableEntry {
+  id: number;
+  className: string;
+  dayOfWeek: string;
+  period: string;
+  subject: string;
+  teacherId: string;
+  room: string;
+}
 
-const TASKS = [
-  { text: 'Grade mid-term papers — 10th A', due: 'Jun 20', urgent: true },
-  { text: 'Submit attendance sheet', due: 'Today', urgent: true },
-  { text: 'Prepare quiz questions', due: 'Jun 22', urgent: false },
-  { text: 'Update course material', due: 'Jun 25', urgent: false },
-];
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function formatDueDate(dueDate?: string): string {
+  if (!dueDate) return '—';
+  const todayStr = new Date().toISOString().split('T')[0];
+  if (dueDate === todayStr) return 'Today';
+  return new Date(dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+}
 
 export function TeacherPortal() {
   const { user } = useAuth();
   const [exams, setExams] = useState<any[]>([]);
   const [attendanceVersion, setAttendanceVersion] = useState(0);
   const [specialClasses, setSpecialClasses] = useState<any[]>([]);
+  const [timetableEntries, setTimetableEntries] = useState<TimetableEntry[]>([]);
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
 
   useEffect(() => {
     const unsubscribeExams = subscribeExams((items) => setExams(items));
     const unsubscribeAttendance = subscribeExamAttendance(() => setAttendanceVersion((value) => value + 1));
-    
+    const unsubscribeTasks = subscribeTasks(() => setTasks(getTasksForTeacher(user?.id, user?.branchId)));
+
     if (user) {
       apiFetch(`/api/special-classes?teacherId=${user.id}`)
         .then(res => res.json())
         .then(data => setSpecialClasses(Array.isArray(data) ? data : []))
         .catch(e => console.error(e));
+
+      apiFetch(`/api/timetable?branchId=${user.branchId || ''}`)
+        .then(res => res.json())
+        .then(data => setTimetableEntries(Array.isArray(data) ? data.filter((e: TimetableEntry) => e.teacherId === user.id) : []))
+        .catch(e => console.error(e));
+
+      refreshTasks({ branchId: user.branchId, teacherId: user.id }).then(() => setTasks(getTasksForTeacher(user.id, user.branchId)));
     }
 
     return () => {
       unsubscribeExams();
       unsubscribeAttendance();
+      unsubscribeTasks();
     };
   }, [user]);
+
+  const todaySchedule = useMemo(() => {
+    const todayName = DAY_NAMES[new Date().getDay()];
+    return timetableEntries
+      .filter((e) => e.dayOfWeek === todayName)
+      .sort((a, b) => a.period.localeCompare(b.period));
+  }, [timetableEntries]);
+
+  const pendingTasks = useMemo(
+    () => tasks.filter((t) => t.status !== 'completed').slice(0, 6),
+    [tasks]
+  );
 
   const dashboard = getTeacherExamAttendanceDashboard(user, exams, []);
   void attendanceVersion;
@@ -112,40 +141,53 @@ export function TeacherPortal() {
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold text-foreground">Today's Schedule</h2>
-              <button className="flex items-center gap-1 text-xs text-primary hover:underline">
+              <Link to="/timetable" className="flex items-center gap-1 text-xs text-primary hover:underline">
                 Full timetable <ChevronRight className="h-3 w-3" />
-              </button>
+              </Link>
             </div>
             <div className="space-y-3">
-              {SCHEDULE.map((item, index) => (
-                <div key={index} className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${item.done ? 'border-border bg-muted/60 opacity-80' : 'border-primary/30 bg-primary/5'}`}>
-                  {item.done ? (
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-green-500" />
-                  ) : (
-                    <Circle className="h-4 w-4 shrink-0 text-primary" />
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground">{item.class}</p>
-                    <p className="text-xs text-muted-foreground">{item.room}</p>
+              {todaySchedule.length === 0 && (
+                <p className="text-sm text-muted-foreground py-4 text-center">No classes scheduled for today.</p>
+              )}
+              {todaySchedule.map((item) => {
+                const [, endTime] = item.period.split('-');
+                const done = endTime ? new Date().toTimeString().slice(0, 5) > endTime : false;
+                return (
+                  <div key={item.id} className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${done ? 'border-border bg-muted/60 opacity-80' : 'border-primary/30 bg-primary/5'}`}>
+                    {done ? (
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-green-500" />
+                    ) : (
+                      <Circle className="h-4 w-4 shrink-0 text-primary" />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-foreground">{item.subject} · {item.className}</p>
+                      {item.room && <p className="text-xs text-muted-foreground">{item.room}</p>}
+                    </div>
+                    <span className="text-xs font-medium text-muted-foreground shrink-0">{item.period}</span>
                   </div>
-                  <span className="text-xs font-medium text-muted-foreground shrink-0">{item.time}</span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <h2 className="mb-4 text-base font-semibold text-foreground">Pending Tasks</h2>
             <div className="space-y-3">
-              {TASKS.map((task, index) => (
-                <div key={index} className="flex items-center gap-3 rounded-xl border border-border bg-secondary/50 px-4 py-3">
-                  <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-foreground">{task.text}</p>
-                    <p className={`text-xs font-medium ${task.urgent ? 'text-red-500' : 'text-muted-foreground'}`}>Due: {task.due}</p>
+              {pendingTasks.length === 0 && (
+                <p className="text-sm text-muted-foreground py-4 text-center">No pending tasks.</p>
+              )}
+              {pendingTasks.map((task) => {
+                const urgent = task.dueDate ? task.dueDate <= new Date().toISOString().split('T')[0] : false;
+                return (
+                  <div key={task.id} className="flex items-center gap-3 rounded-xl border border-border bg-secondary/50 px-4 py-3">
+                    <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-foreground">{task.title}</p>
+                      <p className={`text-xs font-medium ${urgent ? 'text-red-500' : 'text-muted-foreground'}`}>Due: {formatDueDate(task.dueDate)}</p>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

@@ -9,6 +9,9 @@ server/database.sqlite
 server/server/data.db
 server/uploads/
 server/server/uploads/
+server/private_uploads/
+server/backups/
+server/tmp_restore/
 
 # OS/editor
 .DS_Store

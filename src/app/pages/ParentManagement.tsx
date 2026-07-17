@@ -90,17 +90,27 @@ export function ParentManagement() {
   const [search,   setSearch]   = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [panel,    setPanel]    = useState<'none' | 'add' | { type: 'edit' | 'view'; id: string }>('none');
+  const [showAll, setShowAll] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const loadParents = async () => {
+    setIsLoading(true);
+    setLoadError(null);
     try {
       const res = await apiFetch('/api/parents');
       if (res.ok) {
         const list = await res.json();
         setParents(Array.isArray(list) ? list : []);
+      } else {
+        setLoadError('Failed to load parents.');
       }
     } catch (e) {
         console.error('Failed to load parents', e);
-        setParents([]);
+        setLoadError('Failed to load parents. Check your connection and try again.');
+      } finally {
+        setIsLoading(false);
       }
   };
 
@@ -112,15 +122,34 @@ export function ParentManagement() {
     `${p.firstName} ${p.lastName} ${p.mobile} ${p.linkedStudents}`.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleAdd  = async (d: Omit<Parent, 'id'>) => {
-    // Add via Student API or mock since parent is auto-created during student admission
-    setParents((p) => [{ id: `PAR${Date.now()}`, ...d }, ...p]);
-    setPanel('none');
+  const handleAdd = async (d: Omit<Parent, 'id'>) => {
+    setSaveError(null);
+    try {
+      const res = await apiFetch('/api/parents', { method: 'POST', body: d });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to add parent');
+      }
+      await loadParents();
+      setPanel('none');
+    } catch (e: any) {
+      setSaveError(e.message || 'Failed to add parent.');
+    }
   };
 
   const handleEdit = async (id: string, d: Omit<Parent, 'id'>) => {
-    setParents((p) => p.map((x) => x.id === id ? { id, ...d } : x));
-    setPanel('none');
+    setSaveError(null);
+    try {
+      const res = await apiFetch(`/api/parents/${id}`, { method: 'PUT', body: d });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to update parent');
+      }
+      await loadParents();
+      setPanel('none');
+    } catch (e: any) {
+      setSaveError(e.message || 'Failed to update parent.');
+    }
   };
 
   const editParent = panel !== 'none' && typeof panel === 'object' && panel.type === 'edit' ? parents.find((p) => p.id === panel.id) : null;
@@ -143,6 +172,11 @@ export function ParentManagement() {
           ))}
         </div>
 
+        {saveError && (panel === 'add' || editParent) && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-400">
+            {saveError}
+          </div>
+        )}
         {panel === 'add'  && <ParentForm initial={EMPTY} isEdit={false} onSave={handleAdd} onClose={() => setPanel('none')} />}
         {editParent       && <ParentForm initial={{ ...editParent }} isEdit onSave={(d) => handleEdit(editParent.id, d)} onClose={() => setPanel('none')} />}
 
@@ -168,8 +202,17 @@ export function ParentManagement() {
           <div className="px-6 py-4 border-b border-border">
             <h2 className="font-semibold text-foreground">Parent List <span className="ml-2 text-sm font-normal text-muted-foreground">({filtered.length})</span></h2>
           </div>
+          {isLoading && (
+            <p className="px-6 py-8 text-center text-sm text-muted-foreground">Loading parents…</p>
+          )}
+          {!isLoading && loadError && (
+            <div className="px-6 py-4 text-sm text-destructive flex items-center justify-between">
+              <span>{loadError}</span>
+              <button onClick={() => void loadParents()} className="font-medium underline">Retry</button>
+            </div>
+          )}
           <div className="divide-y divide-border">
-            {filtered.slice(0, 5).map((p) => (
+            {!isLoading && filtered.slice(0, showAll ? filtered.length : 5).map((p) => (
               <div key={p.id} className="flex items-center gap-4 px-5 py-4 transition-colors hover:bg-secondary/30">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/40 text-sm font-bold text-amber-700 dark:text-amber-400">
                   {p.firstName.charAt(0)}{p.lastName.charAt(0)}
@@ -191,8 +234,8 @@ export function ParentManagement() {
           </div>
           {filtered.length > 5 && (
             <div className="border-t border-border px-6 py-4">
-              <button className="flex items-center gap-1 text-sm font-medium text-primary hover:underline">
-                View all {filtered.length} parents <ChevronRight className="h-4 w-4" />
+              <button onClick={() => setShowAll((v) => !v)} className="flex items-center gap-1 text-sm font-medium text-primary hover:underline">
+                {showAll ? 'Show less' : `View all ${filtered.length} parents`} <ChevronRight className={`h-4 w-4 transition-transform ${showAll ? 'rotate-90' : ''}`} />
               </button>
             </div>
           )}

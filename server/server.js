@@ -5,18 +5,51 @@ import fs from 'fs';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import archiver from 'archiver';
+import extract from 'extract-zip';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { WhatsAppService } from './whatsappService.js';
 
+// Safety net: every route handler already catches its own errors, but this
+// guards against anything that slips through (a missed try/catch, a
+// fire-and-forget async call that rejects) so a single bug can't take the
+// whole server down for every user.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
+
 
 const PORT = process.env.PORT || 4000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const INSECURE_DEFAULT_JWT_SECRET = 'dev-only-insecure-secret-change-in-production';
 const UPLOAD_DIR = path.resolve(process.cwd(), 'server', 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-insecure-secret-change-in-production';
+// Study material files live outside UPLOAD_DIR so they can never be reached via the
+// public /uploads static mount — the only way to fetch one is the ownership-checked
+// GET /api/materials/:id/file route.
+const PRIVATE_UPLOAD_DIR = path.resolve(process.cwd(), 'server', 'private_uploads', 'materials');
+if (!fs.existsSync(PRIVATE_UPLOAD_DIR)) fs.mkdirSync(PRIVATE_UPLOAD_DIR, { recursive: true });
+
+const BACKUP_DIR = path.resolve(process.cwd(), 'server', 'backups');
+if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+const RESTORE_TMP_DIR = path.resolve(process.cwd(), 'server', 'tmp_restore');
+if (!fs.existsSync(RESTORE_TMP_DIR)) fs.mkdirSync(RESTORE_TMP_DIR, { recursive: true });
+const DB_PATH = path.resolve(process.cwd(), 'server', 'data.db');
+
+const JWT_SECRET = process.env.JWT_SECRET || INSECURE_DEFAULT_JWT_SECRET;
 if (!process.env.JWT_SECRET) {
   console.warn('WARNING: JWT_SECRET is not set in the environment — using an insecure development default. Set JWT_SECRET in .env before deploying.');
+}
+if (IS_PRODUCTION && (!process.env.JWT_SECRET || process.env.JWT_SECRET === INSECURE_DEFAULT_JWT_SECRET)) {
+  console.error('FATAL: JWT_SECRET must be set to a strong, unique secret when NODE_ENV=production. Generate one with `openssl rand -base64 32` and set it in your environment. Refusing to start.');
+  process.exit(1);
 }
 const TOKEN_EXPIRY = '24h';
 const REMEMBER_ME_EXPIRY = '7d';
@@ -27,6 +60,14 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
 });
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
+
+const materialsStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, PRIVATE_UPLOAD_DIR),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}-${file.originalname}`),
+});
+const materialsUpload = multer({ storage: materialsStorage, limits: { fileSize: 25 * 1024 * 1024 } });
+
+const restoreUpload = multer({ dest: RESTORE_TMP_DIR, limits: { fileSize: 500 * 1024 * 1024 } });
 
 function parseJsonList(value) {
   if (!value) return [];
@@ -1050,17 +1091,197 @@ async function initDb() {
     await insertUser.finalize();
   }
 
+  // --- Study Materials, Lesson Plans & Backup History tables ---
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS materials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      subject TEXT,
+      className TEXT,
+      batch TEXT,
+      branchId TEXT,
+      teacherId TEXT,
+      teacherName TEXT,
+      storedFileName TEXT,
+      originalFileName TEXT,
+      fileSize INTEGER,
+      mimeType TEXT,
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS lesson_plans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacherId TEXT,
+      teacherName TEXT,
+      branchId TEXT,
+      className TEXT,
+      batch TEXT,
+      subject TEXT,
+      chapterTitle TEXT,
+      topic TEXT,
+      textbookReference TEXT,
+      plannedDate TEXT,
+      objectives TEXT,
+      notes TEXT,
+      status TEXT DEFAULT 'Planned',
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS backup_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT,
+      sizeBytes INTEGER,
+      createdAt TEXT,
+      createdBy TEXT,
+      type TEXT DEFAULT 'manual',
+      status TEXT DEFAULT 'success'
+    );
+  `);
+
+  // whatsapp_logs predates the homework-alert feature — add the new columns
+  // idempotently for databases created before this change.
+  try { await db.exec("ALTER TABLE whatsapp_logs ADD COLUMN type TEXT DEFAULT 'attendance';"); } catch (e) {}
+  try { await db.exec("ALTER TABLE whatsapp_logs ADD COLUMN homeworkId INTEGER;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE parents ADD COLUMN occupation TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE parents ADD COLUMN address TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE users ADD COLUMN failedLoginAttempts INTEGER DEFAULT 0;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE users ADD COLUMN lockedUntil TEXT;"); } catch (e) {}
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS otp_codes (
+      mobile TEXT PRIMARY KEY,
+      code TEXT,
+      purpose TEXT DEFAULT 'parent_login',
+      expiresAt TEXT,
+      attempts INTEGER DEFAULT 0,
+      createdAt TEXT
+    );
+  `);
+
+  await db.run('INSERT OR IGNORE INTO whatsapp_settings (key, value) VALUES (?, ?)', 'homework_template_name', 'homework_update_alert');
+
+  // --- Fee Management & Event Management tables ---
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS fee_structures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      className TEXT,
+      branchId TEXT,
+      academicYear TEXT,
+      feeType TEXT,
+      amount REAL,
+      dueDate TEXT,
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS fee_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      studentId TEXT,
+      studentName TEXT,
+      className TEXT,
+      branchId TEXT,
+      feeType TEXT,
+      academicYear TEXT,
+      totalAmount REAL,
+      paidAmount REAL DEFAULT 0,
+      dueDate TEXT,
+      status TEXT DEFAULT 'Pending',
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS fee_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      feeRecordId INTEGER,
+      studentId TEXT,
+      amount REAL,
+      paymentMode TEXT,
+      referenceNumber TEXT,
+      receivedBy TEXT,
+      paymentDate TEXT,
+      receiptNumber TEXT,
+      branchId TEXT,
+      createdAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      eventType TEXT DEFAULT 'Other',
+      date TEXT,
+      time TEXT,
+      venue TEXT,
+      expectedAttendees INTEGER DEFAULT 0,
+      branchId TEXT,
+      createdBy TEXT,
+      createdByName TEXT,
+      status TEXT DEFAULT 'Scheduled',
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+  `);
+
   return db;
 }
 
 async function main() {
   const app = express();
-  app.use(cors());
+
+  const corsOrigins = (process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (IS_PRODUCTION && corsOrigins.length === 0) {
+    console.warn('WARNING: CORS_ORIGIN is not set in production — cross-origin requests will be rejected by default. Set CORS_ORIGIN to a comma-separated list of your frontend URL(s).');
+  }
+  app.use(cors({
+    origin: corsOrigins.length > 0 ? corsOrigins : (IS_PRODUCTION ? false : true),
+    credentials: true,
+  }));
+  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.use(express.json());
 
-  const db = await initDb();
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many login attempts. Please try again later.' },
+  });
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use('/api/', apiLimiter);
 
-  app.use('/uploads', express.static(UPLOAD_DIR));
+  // Keyed by the mobile number being requested (not IP) — stops OTP-spam abuse
+  // against one number even from many different IPs, on top of the general
+  // per-IP authLimiter already applied to these routes.
+  const otpRequestLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => (req.body?.mobile ? String(req.body.mobile) : ipKeyGenerator(req.ip)),
+    message: { error: 'Too many code requests for this number. Please try again later.' },
+  });
+
+  let db = await initDb();
+  let restoreInProgress = false;
+
+  app.use((req, res, next) => {
+    if (restoreInProgress && !req.path.startsWith('/api/backup/')) {
+      return res.status(503).json({ error: 'System is restoring from backup, please try again shortly.' });
+    }
+    next();
+  });
+
+  // Uploaded files require authentication — direct URL access without a valid
+  // session token is no longer permitted (previously served with zero auth).
+  app.use('/uploads', authMiddleware, express.static(UPLOAD_DIR));
 
   // ─── Auth helpers ───────────────────────────────────────────────────────────
 
@@ -1109,9 +1330,10 @@ async function main() {
     }
   }
 
-  // Applied to every route registered below except /api/auth/* and /uploads/*.
+  // Applied to every route registered below except /api/auth/* (/uploads/* has its
+  // own dedicated authMiddleware attached directly to that mount, above).
   app.use((req, res, next) => {
-    if (req.path.startsWith('/api/auth/') || req.path.startsWith('/uploads/')) return next();
+    if (req.path.startsWith('/api/auth/')) return next();
     return authMiddleware(req, res, next);
   });
 
@@ -1124,7 +1346,10 @@ async function main() {
     return req.user?.branchId || undefined;
   }
 
-  app.post('/api/auth/login', async (req, res) => {
+  const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+  const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+
+  app.post('/api/auth/login', authLimiter, async (req, res) => {
     try {
       const identifier = String(req.body?.identifier || '').trim();
       const password = String(req.body?.password || '');
@@ -1137,8 +1362,30 @@ async function main() {
       );
       if (!row) return res.status(401).json({ error: 'Invalid credentials' });
 
+      // Per-account lockout — the IP-based authLimiter above stops a single
+      // attacker from brute-forcing, but not a distributed attempt against one
+      // specific account from many IPs. This closes that gap independently.
+      if (row.lockedUntil && new Date(row.lockedUntil) > new Date()) {
+        const minutesLeft = Math.ceil((new Date(row.lockedUntil) - new Date()) / 60000);
+        return res.status(423).json({ error: `Too many failed attempts. Try again in ${minutesLeft} minute(s).` });
+      }
+
       const match = await bcrypt.compare(password, row.passwordHash);
-      if (!match) return res.status(401).json({ error: 'Invalid credentials' });
+      if (!match) {
+        const attempts = (row.failedLoginAttempts || 0) + 1;
+        const lockedUntil = attempts >= MAX_FAILED_LOGIN_ATTEMPTS
+          ? new Date(Date.now() + LOCKOUT_DURATION_MS).toISOString()
+          : null;
+        await db.run('UPDATE users SET failedLoginAttempts=?, lockedUntil=? WHERE id=?', attempts, lockedUntil, row.id);
+        if (lockedUntil) {
+          return res.status(423).json({ error: `Too many failed attempts. Account locked for 15 minutes.` });
+        }
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      if (row.failedLoginAttempts || row.lockedUntil) {
+        await db.run('UPDATE users SET failedLoginAttempts=0, lockedUntil=NULL WHERE id=?', row.id);
+      }
 
       const rememberMe = Boolean(req.body?.rememberMe);
       const token = signToken(row, rememberMe);
@@ -1146,6 +1393,33 @@ async function main() {
     } catch (err) {
       console.error('Login error:', err);
       res.status(500).json({ error: 'Login failed' });
+    }
+  });
+
+  app.post('/api/account/change-password', async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body || {};
+      if (!currentPassword || !newPassword) {
+        return res.status(400).json({ error: 'Current and new password are required' });
+      }
+      if (String(newPassword).length < 8) {
+        return res.status(400).json({ error: 'New password must be at least 8 characters' });
+      }
+      const row = await db.get('SELECT * FROM users WHERE id = ?', req.user.sub);
+      if (!row) return res.status(404).json({ error: 'User not found' });
+
+      const match = await bcrypt.compare(currentPassword, row.passwordHash);
+      if (!match) return res.status(401).json({ error: 'Current password is incorrect' });
+
+      const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+      await db.run(
+        'UPDATE users SET passwordHash=?, mustChangePassword=0, updatedAt=? WHERE id=?',
+        newHash, new Date().toISOString(), req.user.sub
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Change password error:', err);
+      res.status(500).json({ error: 'Failed to change password' });
     }
   });
 
@@ -1251,6 +1525,10 @@ async function main() {
   }
 
   app.get('/api/teachers', async (req, res) => {
+    // Includes salary and DOB/address from teacher_profiles — restricted to
+    // admin/super_admin, not any authenticated user (previously any teacher could
+    // pull every coworker's pay and home address via this endpoint).
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = `${TEACHER_JOIN_SELECT} WHERE u.roles LIKE '%teacher%'`;
@@ -1375,6 +1653,7 @@ async function main() {
   });
 
   app.post('/api/exams', upload.single('attachment'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body;
       const attachment = req.file;
@@ -1396,6 +1675,7 @@ async function main() {
   });
 
   app.put('/api/exams/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const existing = await db.get('SELECT * FROM exams WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'Exam not found' });
@@ -1440,6 +1720,7 @@ async function main() {
   });
 
   app.post('/api/exam-marks/submit', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       const examId = String(body.examId);
@@ -1488,6 +1769,7 @@ async function main() {
   });
 
   app.post('/api/timetable', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       if (!body.className || !body.dayOfWeek || !body.period) {
@@ -1516,6 +1798,7 @@ async function main() {
   });
 
   app.delete('/api/timetable/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       await db.run('DELETE FROM timetable_entries WHERE id = ?', req.params.id);
       res.json({ success: true });
@@ -1547,6 +1830,7 @@ async function main() {
   });
 
   app.get('/api/allocations/all', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = `SELECT a.*, u.name as resolvedTeacherName FROM allocations a LEFT JOIN users u ON u.id = a.teacherId WHERE 1=1`;
@@ -1573,6 +1857,7 @@ async function main() {
   });
 
   app.post('/api/allocations', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       if (!body.teacherId || !body.class || !body.subject) {
@@ -1600,6 +1885,7 @@ async function main() {
   });
 
   app.put('/api/allocations/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const existing = await db.get('SELECT * FROM allocations WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'Allocation not found' });
@@ -1628,6 +1914,7 @@ async function main() {
   });
 
   app.delete('/api/allocations/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       await db.run(`UPDATE allocations SET status='Removed', updatedAt=? WHERE id=?`, new Date().toISOString(), req.params.id);
       res.json({ success: true });
@@ -1685,6 +1972,7 @@ async function main() {
   });
 
   app.patch('/api/admissions/:id/action', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const action = String(req.body?.action || '');
       const nextStatus = ADMISSION_WORKFLOW_NEXT[action];
@@ -1719,6 +2007,7 @@ async function main() {
   });
 
   app.post('/api/teacher-tasks', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       if (!body.title) return res.status(400).json({ error: 'Title is required' });
@@ -1741,6 +2030,7 @@ async function main() {
   });
 
   app.put('/api/teacher-tasks/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const existing = await db.get('SELECT * FROM teacher_tasks WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'Task not found' });
@@ -1764,6 +2054,7 @@ async function main() {
   });
 
   app.delete('/api/teacher-tasks/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       await db.run('DELETE FROM teacher_tasks WHERE id = ?', req.params.id);
       res.json({ success: true });
@@ -1777,9 +2068,10 @@ async function main() {
     try {
       const conditions = [];
       const params = [];
-      if (req.query.branchId) {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      if (branchId) {
         conditions.push('branchId = ?');
-        params.push(req.query.branchId);
+        params.push(branchId);
       }
       if (req.query.className) {
         conditions.push('schoolClass = ?');
@@ -1819,6 +2111,7 @@ async function main() {
   });
 
   app.post('/api/school-exam-schedules', upload.single('attachment'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       const attachment = req.file;
@@ -1837,6 +2130,7 @@ async function main() {
   });
 
   app.put('/api/school-exam-schedules/:id', upload.single('attachment'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       const attachment = req.file;
@@ -1859,6 +2153,7 @@ async function main() {
   });
 
   app.delete('/api/school-exam-schedules/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const existing = await db.get('SELECT * FROM school_exam_schedules WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'not found' });
@@ -1875,16 +2170,32 @@ async function main() {
     }
   });
 
+  // Identity (id/role/branchId) is always derived from the verified JWT, never from
+  // client query/body params — a client could previously pass role=super_admin or an
+  // arbitrary userId/branchId to read or mutate notifications outside their own scope.
+  // classNames/studentIds stay client-supplied (parent's linked-children convenience,
+  // matching the same established trust boundary used for homework/materials).
+  function deriveNotificationUser(req) {
+    const requestedRole = String(req.query.role || req.body?.role || '');
+    const role = req.user.roles.includes(requestedRole) ? requestedRole : (req.user.roles[0] || '');
+    return {
+      id: req.user.sub,
+      role,
+      branchId: resolveBranchId(req, req.query.branchId || req.body?.branchId) || req.user.branchId || '',
+      assignedClassIds: parseArrayParam(req.query.classNames || req.body?.classNames),
+      linkedStudentIds: parseArrayParam(req.query.studentIds || req.body?.studentIds),
+    };
+  }
+
+  function canMutateNotification(req, notif) {
+    if (req.user.roles.includes('super_admin')) return true;
+    return matchesUserScope(notif, deriveNotificationUser(req));
+  }
+
   app.get('/api/notifications', async (req, res) => {
     try {
       const rows = await db.all('SELECT * FROM notifications ORDER BY createdAt DESC');
-      const user = {
-        id: String(req.query.userId || ''),
-        role: String(req.query.role || ''),
-        branchId: String(req.query.branchId || ''),
-        assignedClassIds: parseArrayParam(req.query.classNames),
-        linkedStudentIds: parseArrayParam(req.query.studentIds),
-      };
+      const user = deriveNotificationUser(req);
       const mapped = rows.map(mapRowToNotification);
       const scoped = mapped.filter((notif) => matchesUserScope(notif, user));
       res.json(scoped);
@@ -1941,6 +2252,10 @@ async function main() {
 
   app.put('/api/notifications/:id', async (req, res) => {
     try {
+      const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
+      if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
+      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+
       const payload = req.body || {};
       const now = new Date().toISOString();
       const stmt = await db.prepare(`UPDATE notifications SET title=?, message=?, description=?, type=?, priority=?, roles=?, teacherIds=?, classNames=?, userIds=?, studentIds=?, sender=?, notificationType=?, recipient=?, recipientRole=?, branchId=?, status=?, read=?, createdAt=?, readAt=?, readBy=?, readByRole=?, readByBranch=?, deletedAt=?, deletedBy=?, deletedByBranch=?, scheduledFor=?, expiresAt=? WHERE id=?`);
@@ -1985,6 +2300,10 @@ async function main() {
 
   app.patch('/api/notifications/:id/read', async (req, res) => {
     try {
+      const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
+      if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
+      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+
       const now = new Date().toISOString();
       const body = req.body || {};
       const stmt = await db.prepare(`UPDATE notifications SET status='read', read=1, readAt=?, readBy=?, readByRole=?, readByBranch=? WHERE id=?`);
@@ -2000,6 +2319,10 @@ async function main() {
 
   app.patch('/api/notifications/:id/delete', async (req, res) => {
     try {
+      const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
+      if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
+      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+
       const now = new Date().toISOString();
       const body = req.body || {};
       const stmt = await db.prepare(`UPDATE notifications SET status='deleted', read=0, deletedAt=?, deletedBy=?, deletedByBranch=? WHERE id=?`);
@@ -2015,6 +2338,10 @@ async function main() {
 
   app.patch('/api/notifications/:id/restore', async (req, res) => {
     try {
+      const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
+      if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
+      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+
       const stmt = await db.prepare(`UPDATE notifications SET status='unread', read=0, deletedAt=NULL, deletedBy=NULL, deletedByBranch=NULL WHERE id=?`);
       await stmt.run(req.params.id);
       await stmt.finalize();
@@ -2028,7 +2355,11 @@ async function main() {
 
   app.patch('/api/notifications/bulk/read', async (req, res) => {
     try {
-      const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      const requestedIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      if (!requestedIds.length) return res.json([]);
+      const candidatePlaceholders = requestedIds.map(() => '?').join(',');
+      const candidateRows = await db.all(`SELECT * FROM notifications WHERE id IN (${candidatePlaceholders})`, ...requestedIds);
+      const ids = candidateRows.filter((r) => canMutateNotification(req, mapRowToNotification(r))).map((r) => r.id);
       if (!ids.length) return res.json([]);
       const now = new Date().toISOString();
       const placeholders = ids.map(() => '?').join(',');
@@ -2045,7 +2376,11 @@ async function main() {
 
   app.patch('/api/notifications/bulk/delete', async (req, res) => {
     try {
-      const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      const requestedIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      if (!requestedIds.length) return res.json([]);
+      const candidatePlaceholders = requestedIds.map(() => '?').join(',');
+      const candidateRows = await db.all(`SELECT * FROM notifications WHERE id IN (${candidatePlaceholders})`, ...requestedIds);
+      const ids = candidateRows.filter((r) => canMutateNotification(req, mapRowToNotification(r))).map((r) => r.id);
       if (!ids.length) return res.json([]);
       const now = new Date().toISOString();
       const placeholders = ids.map(() => '?').join(',');
@@ -2060,33 +2395,106 @@ async function main() {
     }
   });
 
+  // Fires automatically whenever a teacher updates a homework item — notifies every
+  // parent in that class/batch via WhatsApp, naming the subject and teacher. Runs
+  // fire-and-forget (never awaited by the route handler) so editing homework isn't
+  // slowed down by N outbound API calls; all failures are caught and logged, never thrown.
+  async function sendHomeworkWhatsAppAlerts(homeworkId) {
+    try {
+      const hw = await db.get('SELECT * FROM homework WHERE id = ?', homeworkId);
+      if (!hw) return;
+
+      const settingsRows = await db.all('SELECT * FROM whatsapp_settings');
+      const settings = {};
+      settingsRows.forEach((row) => { settings[row.key] = row.value; });
+      if (settings['enable_whatsapp'] !== 'true') return;
+
+      const teacherRow = await db.get('SELECT name FROM users WHERE id = ?', hw.teacherId);
+      const teacherName = teacherRow?.name || 'the subject teacher';
+
+      const students = await db.all(
+        'SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?',
+        hw.className, hw.branchId, 'Active'
+      );
+
+      const provider = settings['whatsapp_provider'] || 'WhatsApp Business Cloud API';
+      const apiToken = settings['api_token'] || '';
+      const phoneNumberId = settings['phone_number_id'] || '';
+      const businessAccountId = settings['business_account_id'] || '';
+      const officialContact = settings['official_contact'] || '6363099546';
+      const templateName = settings['homework_template_name'] || 'homework_update_alert';
+      const apiVersion = settings['api_version'] || 'v17.0';
+      const businessName = settings['business_name'] || 'Guru Shishyaru Tutorials';
+
+      for (const student of students) {
+        const toMobile = student.primaryParentMobile;
+        if (!toMobile) continue;
+
+        const now = new Date().toISOString();
+        const logResult = await db.run(`
+          INSERT INTO whatsapp_logs (studentId, studentName, parentName, mobile, branchId, className, attendanceDate, sentTime, status, failureReason, teacher, type, homeworkId)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Queued', '', ?, 'homework', ?)
+        `, student.id, student.fullName, student.primaryParentName || 'Parent', toMobile, hw.branchId, hw.className, now.slice(0, 10), now, teacherName, homeworkId);
+        const logId = logResult.lastID;
+
+        try {
+          const config = { apiToken, phoneNumberId, businessAccountId, templateName, apiVersion };
+          const messageData = {
+            to: toMobile,
+            studentName: student.fullName,
+            className: hw.className,
+            subject: hw.subject,
+            teacherName,
+            homeworkTitle: hw.title,
+            dueDate: hw.dueDate,
+            officialContact,
+            businessName,
+          };
+          const sendRes = await WhatsAppService.sendMessage(provider, config, messageData);
+          await db.run('UPDATE whatsapp_logs SET status = ?, failureReason = ? WHERE id = ?',
+            sendRes.status, sendRes.success ? '' : (sendRes.error || 'Failed'), logId);
+        } catch (sendErr) {
+          await db.run('UPDATE whatsapp_logs SET status = ?, failureReason = ? WHERE id = ?', 'Failed', sendErr.message, logId);
+        }
+      }
+    } catch (err) {
+      console.error('Homework WhatsApp alert dispatch failed:', err);
+    }
+  }
+
   // --- Homework Module Endpoints ---
 
   app.get('/api/homework', async (req, res) => {
     try {
-      const role = String(req.query.role || '');
-      const userId = String(req.query.userId || '');
-      const branchId = String(req.query.branchId || '');
+      // Role/userId/branchId are derived from the verified JWT, never trusted from
+      // client query params — previously a parent could pass role=admin (or omit
+      // role entirely) to fall through every branch below and receive the ENTIRE
+      // homework table, unscoped, across every class and branch.
+      const roles = req.user.roles || [];
+      const userId = req.user.sub;
+      const branchId = resolveBranchId(req, req.query.branchId) || req.user.branchId || '';
       const classNames = parseArrayParam(req.query.classNames);
-      
+
       let query = 'SELECT * FROM homework';
       const params = [];
       const conditions = [];
-      
-      if (role === 'teacher') {
+
+      if (roles.includes('super_admin')) {
         if (branchId) {
           conditions.push('branchId = ?');
           params.push(branchId);
         }
-        if (userId) {
-          conditions.push('teacherId = ?');
-          params.push(userId);
-        }
-      } else if (role === 'parent') {
-        if (branchId) {
-          conditions.push('branchId = ?');
-          params.push(branchId);
-        }
+      } else if (roles.includes('admin') || roles.includes('accountant')) {
+        conditions.push('branchId = ?');
+        params.push(branchId);
+      } else if (roles.includes('teacher')) {
+        conditions.push('branchId = ?');
+        params.push(branchId);
+        conditions.push('teacherId = ?');
+        params.push(userId);
+      } else if (roles.includes('parent')) {
+        conditions.push('branchId = ?');
+        params.push(branchId);
         if (classNames.length > 0) {
           const placeholders = classNames.map(() => '?').join(',');
           conditions.push(`className IN (${placeholders})`);
@@ -2094,13 +2502,10 @@ async function main() {
         } else {
           conditions.push('1 = 0');
         }
-      } else if (role === 'admin' || role === 'accountant') {
-        if (branchId) {
-          conditions.push('branchId = ?');
-          params.push(branchId);
-        }
+      } else {
+        conditions.push('1 = 0');
       }
-      
+
       if (conditions.length > 0) {
         query += ' WHERE ' + conditions.join(' AND ');
       }
@@ -2121,23 +2526,30 @@ async function main() {
   });
 
   app.post('/api/homework', upload.array('attachments'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body;
       const files = req.files || [];
       const now = new Date().toISOString();
-      
+
+      // A teacher caller is always attributed to themselves — only admin/super_admin
+      // may assign homework on behalf of a different teacherId.
+      const isTeacherOnly = req.user.roles.includes('teacher') && !req.user.roles.includes('admin') && !req.user.roles.includes('super_admin');
+      const teacherId = isTeacherOnly ? req.user.sub : (body.teacherId || req.user.sub);
+      const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || body.branchId;
+
       const fileList = files.map(file => ({
         filename: file.filename,
         originalname: file.originalname,
         path: `/uploads/${file.filename}`,
         size: file.size
       }));
-      
+
       const stmt = await db.prepare(`
         INSERT INTO homework (className, batch, subject, title, description, dueDate, dueTime, teacherId, assignedBy, branchId, createdAt, attachments)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       `);
-      
+
       const result = await stmt.run(
         body.className,
         body.batch || '',
@@ -2146,9 +2558,9 @@ async function main() {
         body.description || '',
         body.dueDate,
         body.dueTime || '23:59',
-        body.teacherId,
+        teacherId,
         body.assignedBy,
-        body.branchId,
+        branchId,
         now,
         JSON.stringify(fileList)
       );
@@ -2166,16 +2578,22 @@ async function main() {
   });
 
   app.put('/api/homework/:id', upload.array('attachments'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const id = req.params.id;
       const body = req.body;
       const newFiles = req.files || [];
-      
+
       const current = await db.get('SELECT * FROM homework WHERE id = ?', id);
       if (!current) {
         return res.status(404).json({ error: 'Homework not found' });
       }
-      
+      const isTeacherOnly = req.user.roles.includes('teacher') && !req.user.roles.includes('admin') && !req.user.roles.includes('super_admin');
+      if (isTeacherOnly && current.teacherId !== req.user.sub) {
+        return res.status(403).json({ error: 'You can only edit your own homework assignments' });
+      }
+      const teacherId = isTeacherOnly ? req.user.sub : (body.teacherId || current.teacherId);
+
       let keepList = [];
       if (body.existingAttachments) {
         try {
@@ -2210,19 +2628,20 @@ async function main() {
         body.description || '',
         body.dueDate,
         body.dueTime || '23:59',
-        body.teacherId,
+        teacherId,
         body.assignedBy,
         body.branchId,
         JSON.stringify(finalFileList),
         id
       );
       await stmt.finalize();
-      
+
       const updated = await db.get('SELECT * FROM homework WHERE id = ?', id);
       if (updated) {
         updated.attachments = JSON.parse(updated.attachments || '[]');
       }
       res.json(updated);
+      sendHomeworkWhatsAppAlerts(id);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -2230,9 +2649,14 @@ async function main() {
   });
 
   app.delete('/api/homework/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const id = req.params.id;
       const hw = await db.get('SELECT * FROM homework WHERE id = ?', id);
+      const isTeacherOnly = req.user.roles.includes('teacher') && !req.user.roles.includes('admin') && !req.user.roles.includes('super_admin');
+      if (hw && isTeacherOnly && hw.teacherId !== req.user.sub) {
+        return res.status(403).json({ error: 'You can only delete your own homework assignments' });
+      }
       if (hw) {
         try {
           const files = JSON.parse(hw.attachments || '[]');
@@ -2277,11 +2701,18 @@ async function main() {
       const homeworkId = req.params.id;
       const body = req.body;
       const file = req.file;
-      
+
       if (!file) {
         return res.status(400).json({ error: 'Submission file is required' });
       }
-      
+
+      // A parent can only submit on behalf of a student actually linked to them —
+      // otherwise one parent could mark homework "submitted" for someone else's child.
+      if (req.user.roles.includes('parent')) {
+        const linked = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, body.studentId);
+        if (!linked) return res.status(403).json({ error: 'Forbidden' });
+      }
+
       const studentId = body.studentId;
       const studentName = body.studentName;
       const rollNumber = body.rollNumber;
@@ -2414,24 +2845,92 @@ async function main() {
   });
 
   // --- Parent Authentication Endpoint ---
-  app.post('/api/auth/parent-login', async (req, res) => {
+  // Parent login is now two-step: request a WhatsApp OTP, then verify it. A
+  // mobile number alone is no longer sufficient to obtain a session token —
+  // previously any client that knew a registered parent's mobile number could
+  // log in as them with zero further verification.
+  app.post('/api/auth/parent-login/request-otp', authLimiter, otpRequestLimiter, async (req, res) => {
     try {
-      const { mobile } = req.body;
-      if (!mobile) {
-        return res.status(400).json({ error: 'Mobile number is required' });
-      }
+      const mobile = String(req.body?.mobile || '').trim();
+      if (!mobile) return res.status(400).json({ error: 'Mobile number is required' });
+
+      // Always return the same generic response whether or not the number is
+      // registered, and only actually send a code when it is — otherwise the
+      // response itself would leak which numbers are registered parent accounts.
       const parent = await db.get('SELECT * FROM parents WHERE mobile = ?', mobile);
-      if (!parent) {
-        return res.status(400).json({ error: 'This mobile number is not registered with Guru Shishyaru Tutorials.' });
+      const genericResponse = { success: true, message: 'If this number is registered, a verification code has been sent via WhatsApp.' };
+
+      if (!parent) return res.json(genericResponse);
+
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO otp_codes (mobile, code, purpose, expiresAt, attempts, createdAt) VALUES (?, ?, 'parent_login', ?, 0, ?)
+         ON CONFLICT(mobile) DO UPDATE SET code=excluded.code, expiresAt=excluded.expiresAt, attempts=0, createdAt=excluded.createdAt`,
+        mobile, code, expiresAt, now
+      );
+
+      const settingsRows = await db.all('SELECT * FROM whatsapp_settings');
+      const settings = {};
+      settingsRows.forEach((row) => { settings[row.key] = row.value; });
+      if (settings['enable_whatsapp'] === 'true') {
+        const provider = settings['whatsapp_provider'] || 'WhatsApp Business Cloud API';
+        const config = {
+          apiToken: settings['api_token'] || '',
+          phoneNumberId: settings['phone_number_id'] || '',
+          businessAccountId: settings['business_account_id'] || '',
+          templateName: 'parent_login_otp',
+          apiVersion: settings['api_version'] || 'v17.0',
+        };
+        WhatsAppService.sendMessage(provider, config, {
+          to: mobile,
+          otpCode: code,
+          otpExpiryMinutes: '5',
+          businessName: settings['business_name'] || 'Guru Shishyaru Tutorials',
+          officialContact: settings['official_contact'] || '',
+        }).catch((e) => console.error('Failed to send parent login OTP:', e));
+      } else {
+        console.warn('WhatsApp is disabled in settings — parent login OTP was not sent. Enable it in System Settings.');
       }
-      
+
+      res.json(genericResponse);
+    } catch (err) {
+      console.error('Request parent OTP error:', err);
+      res.status(500).json({ error: 'Failed to send verification code' });
+    }
+  });
+
+  app.post('/api/auth/parent-login/verify-otp', authLimiter, async (req, res) => {
+    try {
+      const mobile = String(req.body?.mobile || '').trim();
+      const code = String(req.body?.code || '').trim();
+      if (!mobile || !code) return res.status(400).json({ error: 'Mobile number and code are required' });
+
+      const otpRow = await db.get('SELECT * FROM otp_codes WHERE mobile = ?', mobile);
+      const genericError = { error: 'Invalid or expired code. Please request a new one.' };
+      if (!otpRow) return res.status(400).json(genericError);
+      if (new Date(otpRow.expiresAt) < new Date()) {
+        await db.run('DELETE FROM otp_codes WHERE mobile = ?', mobile);
+        return res.status(400).json(genericError);
+      }
+      if (otpRow.attempts >= 5) {
+        await db.run('DELETE FROM otp_codes WHERE mobile = ?', mobile);
+        return res.status(429).json({ error: 'Too many incorrect attempts. Please request a new code.' });
+      }
+      if (otpRow.code !== code) {
+        await db.run('UPDATE otp_codes SET attempts = attempts + 1 WHERE mobile = ?', mobile);
+        return res.status(400).json(genericError);
+      }
+
+      const parent = await db.get('SELECT * FROM parents WHERE mobile = ?', mobile);
+      if (!parent) return res.status(400).json(genericError);
+
+      await db.run('DELETE FROM otp_codes WHERE mobile = ?', mobile);
+
       const studentRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', parent.id);
       const linkedStudentIds = studentRows.map(r => r.studentId);
 
-      // Parent login itself is unchanged (mobile lookup, no password check —
-      // out of scope for this pass), but every other route now requires a
-      // real signed token, so a real one is issued here too, scoped to the
-      // 'parent' role, or the parent portal would 401 on its next API call.
       const token = signToken({ id: parent.id, name: `${parent.firstName} ${parent.lastName}`, email: parent.email, mobile: parent.mobile, roles: JSON.stringify(['parent']), branchId: parent.branchId }, false);
 
       res.json({
@@ -2450,14 +2949,34 @@ async function main() {
         }
       });
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: 'failed' });
+      console.error('Verify parent OTP error:', err);
+      res.status(500).json({ error: 'Failed to verify code' });
     }
   });
 
   // --- Students API ---
   app.get('/api/students', async (req, res) => {
     try {
+      const roles = req.user.roles || [];
+
+      // Parents only ever get their own linked children — resolved server-side via
+      // parent_student, never from a client-supplied filter — regardless of any
+      // className/branchId query params passed in. Every other role's students
+      // list was previously returned to ANY authenticated user (including parents)
+      // with zero scoping, leaking every family's contact info/address branch-wide.
+      if (roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) {
+        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const studentIds = linkedRows.map((r) => r.studentId);
+        if (studentIds.length === 0) return res.json([]);
+        const placeholders = studentIds.map(() => '?').join(',');
+        const rows = await db.all(`SELECT * FROM students WHERE id IN (${placeholders})`, ...studentIds);
+        return res.json(rows);
+      }
+
+      if (!roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
       const { className } = req.query;
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM students';
@@ -2485,7 +3004,75 @@ async function main() {
     }
   });
 
+  // Accepts the same free-text "STU001, STU002" format the UI already collects,
+  // resolving each ID against real students so a typo doesn't silently create a
+  // dangling link.
+  async function syncParentStudentLinks(parentId, linkedStudentsText) {
+    await db.run('DELETE FROM parent_student WHERE parentId = ?', parentId);
+    const ids = String(linkedStudentsText || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const studentId of ids) {
+      const student = await db.get('SELECT id FROM students WHERE id = ?', studentId);
+      if (student) {
+        await db.run('INSERT OR IGNORE INTO parent_student (parentId, studentId) VALUES (?, ?)', parentId, studentId);
+      }
+    }
+  }
+
+  app.post('/api/parents', async (req, res) => {
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const body = req.body || {};
+      if (!body.firstName || !body.lastName || !body.mobile) {
+        return res.status(400).json({ error: 'First name, last name and mobile are required' });
+      }
+      const id = `PAR${Date.now()}`;
+      const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || null;
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO parents (id, firstName, lastName, mobile, email, occupation, address, branchId, status, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, body.firstName, body.lastName, body.mobile, body.email || null, body.occupation || '', body.address || '', branchId, body.status || 'Active', now
+      );
+      await syncParentStudentLinks(id, body.linkedStudents);
+      const created = await db.get('SELECT * FROM parents WHERE id = ?', id);
+      res.status(201).json(created);
+    } catch (err) {
+      console.error('Create parent error:', err);
+      if (String(err.message || '').includes('UNIQUE')) {
+        return res.status(409).json({ error: 'A parent with this mobile number already exists' });
+      }
+      res.status(500).json({ error: 'Failed to create parent' });
+    }
+  });
+
+  app.put('/api/parents/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM parents WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Parent not found' });
+      const body = req.body || {};
+      await db.run(
+        `UPDATE parents SET firstName=?, lastName=?, mobile=?, email=?, occupation=?, address=?, status=? WHERE id=?`,
+        body.firstName ?? existing.firstName, body.lastName ?? existing.lastName, body.mobile ?? existing.mobile,
+        body.email ?? existing.email, body.occupation ?? existing.occupation, body.address ?? existing.address,
+        body.status ?? existing.status, req.params.id
+      );
+      if (body.linkedStudents !== undefined) {
+        await syncParentStudentLinks(req.params.id, body.linkedStudents);
+      }
+      const updated = await db.get('SELECT * FROM parents WHERE id = ?', req.params.id);
+      res.json(updated);
+    } catch (err) {
+      console.error('Update parent error:', err);
+      res.status(500).json({ error: 'Failed to update parent' });
+    }
+  });
+
   app.post('/api/students', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const s = req.body;
       if (!s.firstName || !s.lastName || !s.primaryParentMobile) {
@@ -2547,6 +3134,7 @@ async function main() {
   });
 
   app.put('/api/students/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const studentId = req.params.id;
       const s = req.body;
@@ -2601,8 +3189,12 @@ async function main() {
 
   // --- Parents API ---
   app.get('/api/parents', async (req, res) => {
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const rows = await db.all('SELECT * FROM parents');
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const rows = branchId
+        ? await db.all('SELECT * FROM parents WHERE branchId = ?', branchId)
+        : await db.all('SELECT * FROM parents');
       for (const row of rows) {
         const studentRows = await db.all(`
           SELECT s.id, s.firstName, s.lastName, s.className 
@@ -2622,6 +3214,7 @@ async function main() {
 
   // --- Attendance API with Automatic SMS ---
   app.get('/api/attendance', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { className, date } = req.query;
       let query = 'SELECT * FROM attendance';
@@ -2650,6 +3243,7 @@ async function main() {
   });
 
   app.post('/api/attendance', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { className, date, attendanceRecords, markedBy } = req.body;
       if (!className || !date || !attendanceRecords) {
@@ -2689,6 +3283,411 @@ async function main() {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Study Materials Module Endpoints ---
+  // Access is derived from the verified JWT (req.user.roles/sub), never from a
+  // client-supplied role/teacherId param — a teacher can only ever see or fetch
+  // their own uploads, with no exceptions, per the isolation requirement.
+  function materialAccessAllowed(req, material) {
+    const roles = req.user.roles || [];
+    if (roles.includes('super_admin')) return true;
+    if (roles.includes('teacher') && material.teacherId === req.user.sub) return true;
+    if ((roles.includes('admin') || roles.includes('accountant')) && material.branchId === (req.user.branchId || null)) return true;
+    if (roles.includes('parent')) {
+      const classNames = parseArrayParam(req.query.classNames || req.body?.classNames);
+      if (material.branchId === (req.user.branchId || null) && classNames.includes(material.className)) return true;
+    }
+    return false;
+  }
+
+  app.get('/api/materials', async (req, res) => {
+    try {
+      const roles = req.user.roles || [];
+      let query = 'SELECT id, title, description, subject, className, batch, branchId, teacherId, teacherName, originalFileName, fileSize, mimeType, createdAt, updatedAt FROM materials';
+      const params = [];
+      const conditions = [];
+
+      if (roles.includes('super_admin')) {
+        const branchId = resolveBranchId(req, req.query.branchId);
+        if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      } else if (roles.includes('admin') || roles.includes('accountant')) {
+        conditions.push('branchId = ?'); params.push(req.user.branchId || null);
+      } else if (roles.includes('teacher')) {
+        conditions.push('teacherId = ?'); params.push(req.user.sub);
+      } else if (roles.includes('parent')) {
+        const classNames = parseArrayParam(req.query.classNames);
+        if (classNames.length > 0) {
+          const placeholders = classNames.map(() => '?').join(',');
+          conditions.push(`className IN (${placeholders})`);
+          params.push(...classNames);
+        } else {
+          conditions.push('1 = 0');
+        }
+        conditions.push('branchId = ?'); params.push(req.user.branchId || null);
+      } else {
+        conditions.push('1 = 0');
+      }
+
+      if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
+      query += ' ORDER BY createdAt DESC';
+
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/materials', materialsUpload.single('file'), async (req, res) => {
+    try {
+      if (!req.user.roles.includes('teacher')) {
+        if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
+        return res.status(403).json({ error: 'Only teachers can upload materials' });
+      }
+      const body = req.body;
+      const file = req.file;
+      if (!file) return res.status(400).json({ error: 'A file is required' });
+      if (!body.title) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
+        return res.status(400).json({ error: 'Title is required' });
+      }
+
+      const teacherRow = await db.get('SELECT name FROM users WHERE id = ?', req.user.sub);
+      const teacherName = teacherRow?.name || req.user.name || 'Teacher';
+      const branchId = req.user.branchId || null;
+      const now = new Date().toISOString();
+
+      const result = await db.run(`
+        INSERT INTO materials (title, description, subject, className, batch, branchId, teacherId, teacherName, storedFileName, originalFileName, fileSize, mimeType, createdAt, updatedAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `, body.title, body.description || '', body.subject || '', body.className || '', body.batch || '', branchId, req.user.sub, teacherName, file.filename, file.originalname, file.size, file.mimetype, now, now);
+
+      const created = await db.get('SELECT id, title, description, subject, className, batch, branchId, teacherId, teacherName, originalFileName, fileSize, mimeType, createdAt, updatedAt FROM materials WHERE id = ?', result.lastID);
+      res.status(201).json(created);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.get('/api/materials/:id/file', async (req, res) => {
+    try {
+      const material = await db.get('SELECT * FROM materials WHERE id = ?', req.params.id);
+      if (!material) return res.status(404).json({ error: 'Material not found' });
+      if (!materialAccessAllowed(req, material)) return res.status(403).json({ error: 'Forbidden' });
+
+      const filePath = path.join(PRIVATE_UPLOAD_DIR, material.storedFileName);
+      if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+      res.download(filePath, material.originalFileName);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.put('/api/materials/:id', async (req, res) => {
+    try {
+      const material = await db.get('SELECT * FROM materials WHERE id = ?', req.params.id);
+      if (!material) return res.status(404).json({ error: 'Material not found' });
+      const roles = req.user.roles || [];
+      const isOwner = roles.includes('teacher') && material.teacherId === req.user.sub;
+      if (!isOwner && !roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+
+      const body = req.body;
+      const now = new Date().toISOString();
+      await db.run(`
+        UPDATE materials SET title=?, description=?, subject=?, className=?, batch=?, updatedAt=?
+        WHERE id=?
+      `, body.title ?? material.title, body.description ?? material.description, body.subject ?? material.subject, body.className ?? material.className, body.batch ?? material.batch, now, req.params.id);
+
+      const updated = await db.get('SELECT id, title, description, subject, className, batch, branchId, teacherId, teacherName, originalFileName, fileSize, mimeType, createdAt, updatedAt FROM materials WHERE id = ?', req.params.id);
+      res.json(updated);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.delete('/api/materials/:id', async (req, res) => {
+    try {
+      const material = await db.get('SELECT * FROM materials WHERE id = ?', req.params.id);
+      if (!material) return res.status(404).json({ error: 'Material not found' });
+      const roles = req.user.roles || [];
+      const isOwner = roles.includes('teacher') && material.teacherId === req.user.sub;
+      if (!isOwner && !roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+
+      const filePath = path.join(PRIVATE_UPLOAD_DIR, material.storedFileName);
+      if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (e) {} }
+      await db.run('DELETE FROM materials WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Lesson Plan Module Endpoints ---
+  app.get('/api/lesson-plans', async (req, res) => {
+    try {
+      const roles = req.user.roles || [];
+      let query = 'SELECT * FROM lesson_plans';
+      const params = [];
+      const conditions = [];
+
+      if (roles.includes('teacher') && !roles.includes('admin') && !roles.includes('super_admin')) {
+        conditions.push('teacherId = ?'); params.push(req.user.sub);
+      } else {
+        const branchId = resolveBranchId(req, req.query.branchId) || req.user.branchId;
+        if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      }
+      if (req.query.className) { conditions.push('className = ?'); params.push(req.query.className); }
+
+      if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
+      query += ' ORDER BY plannedDate DESC, createdAt DESC';
+
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/lesson-plans', async (req, res) => {
+    try {
+      if (!req.user.roles.includes('teacher')) return res.status(403).json({ error: 'Only teachers can create lesson plans' });
+      const body = req.body;
+      const teacherRow = await db.get('SELECT name FROM users WHERE id = ?', req.user.sub);
+      const teacherName = teacherRow?.name || req.user.name || 'Teacher';
+      const branchId = req.user.branchId || null;
+      const now = new Date().toISOString();
+      const result = await db.run(`
+        INSERT INTO lesson_plans (teacherId, teacherName, branchId, className, batch, subject, chapterTitle, topic, textbookReference, plannedDate, objectives, notes, status, createdAt, updatedAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `, req.user.sub, teacherName, branchId, body.className || '', body.batch || '', body.subject || '', body.chapterTitle || '', body.topic || '', body.textbookReference || '', body.plannedDate || '', body.objectives || '', body.notes || '', body.status || 'Planned', now, now);
+      const created = await db.get('SELECT * FROM lesson_plans WHERE id = ?', result.lastID);
+      res.status(201).json(created);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.put('/api/lesson-plans/:id', async (req, res) => {
+    try {
+      const plan = await db.get('SELECT * FROM lesson_plans WHERE id = ?', req.params.id);
+      if (!plan) return res.status(404).json({ error: 'Lesson plan not found' });
+      const roles = req.user.roles || [];
+      const isOwner = roles.includes('teacher') && plan.teacherId === req.user.sub;
+      if (!isOwner && !roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+
+      const body = req.body;
+      const now = new Date().toISOString();
+      await db.run(`
+        UPDATE lesson_plans SET className=?, batch=?, subject=?, chapterTitle=?, topic=?, textbookReference=?, plannedDate=?, objectives=?, notes=?, status=?, updatedAt=?
+        WHERE id=?
+      `, body.className ?? plan.className, body.batch ?? plan.batch, body.subject ?? plan.subject, body.chapterTitle ?? plan.chapterTitle, body.topic ?? plan.topic, body.textbookReference ?? plan.textbookReference, body.plannedDate ?? plan.plannedDate, body.objectives ?? plan.objectives, body.notes ?? plan.notes, body.status ?? plan.status, now, req.params.id);
+
+      const updated = await db.get('SELECT * FROM lesson_plans WHERE id = ?', req.params.id);
+      res.json(updated);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.delete('/api/lesson-plans/:id', async (req, res) => {
+    try {
+      const plan = await db.get('SELECT * FROM lesson_plans WHERE id = ?', req.params.id);
+      if (!plan) return res.status(404).json({ error: 'Lesson plan not found' });
+      const roles = req.user.roles || [];
+      const isOwner = roles.includes('teacher') && plan.teacherId === req.user.sub;
+      if (!isOwner && !roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+      await db.run('DELETE FROM lesson_plans WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Backup & Restore Module Endpoints (super_admin only — most destructive
+  // surface in the app; restore always snapshots current state first) ---
+  // Builds the zip file only — does not touch backup_history. Split out from
+  // recordBackupHistory() because the pre-restore safety snapshot is built against
+  // the *old* database (about to be replaced) but must be recorded in the *new*
+  // one after the swap, or its history row would vanish along with the old DB.
+  async function buildBackupZipFile(type) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const zipFilename = `${type === 'manual' ? 'backup' : 'pre_restore'}_${timestamp}.zip`;
+    const zipPath = path.join(BACKUP_DIR, zipFilename);
+    const tmpDbPath = path.join(BACKUP_DIR, `._tmp_${timestamp}.db`);
+
+    await db.exec(`VACUUM INTO '${tmpDbPath.replace(/'/g, "''")}'`);
+
+    await new Promise((resolve, reject) => {
+      const output = fs.createWriteStream(zipPath);
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      output.on('close', resolve);
+      archive.on('error', reject);
+      archive.pipe(output);
+      archive.file(tmpDbPath, { name: 'data.db' });
+      archive.directory(UPLOAD_DIR, 'uploads');
+      if (fs.existsSync(PRIVATE_UPLOAD_DIR)) archive.directory(PRIVATE_UPLOAD_DIR, 'private_uploads/materials');
+      archive.finalize();
+    });
+
+    fs.unlinkSync(tmpDbPath);
+
+    const stats = fs.statSync(zipPath);
+    return { filename: zipFilename, sizeBytes: stats.size };
+  }
+
+  async function recordBackupHistory(filename, sizeBytes, type, createdBy) {
+    const now = new Date().toISOString();
+    const result = await db.run(`
+      INSERT INTO backup_history (filename, sizeBytes, createdAt, createdBy, type, status)
+      VALUES (?, ?, ?, ?, ?, 'success')
+    `, filename, sizeBytes, now, createdBy, type);
+    return db.get('SELECT * FROM backup_history WHERE id = ?', result.lastID);
+  }
+
+  async function createBackupZip(type, createdBy) {
+    const { filename, sizeBytes } = await buildBackupZipFile(type);
+    return recordBackupHistory(filename, sizeBytes, type, createdBy);
+  }
+
+  app.post('/api/backup/create', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const created = await createBackupZip('manual', req.user.name || req.user.sub);
+      res.status(201).json(created);
+    } catch (err) {
+      console.error('Backup creation failed:', err);
+      res.status(500).json({ error: 'Failed to create backup' });
+    }
+  });
+
+  app.get('/api/backup/history', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const rows = await db.all('SELECT * FROM backup_history ORDER BY createdAt DESC');
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.get('/api/backup/:id/download', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM backup_history WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Backup not found' });
+      const filePath = path.join(BACKUP_DIR, record.filename);
+      if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Backup file missing on disk' });
+      res.download(filePath, record.filename);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.delete('/api/backup/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM backup_history WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Backup not found' });
+      const filePath = path.join(BACKUP_DIR, record.filename);
+      if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (e) {} }
+      await db.run('DELETE FROM backup_history WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/backup/restore', restoreUpload.single('file'), async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) {
+      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    if (req.body.confirm !== 'true') {
+      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
+      return res.status(400).json({ error: 'Restore requires explicit confirm=true' });
+    }
+    if (restoreInProgress) {
+      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
+      return res.status(409).json({ error: 'A restore is already in progress' });
+    }
+    if (!req.file) return res.status(400).json({ error: 'A backup file is required' });
+
+    restoreInProgress = true;
+    const uploadedZipPath = req.file.path;
+    const extractDir = path.join(BACKUP_DIR, `._restore_extract_${Date.now()}`);
+    let dbClosed = false;
+
+    try {
+      await extract(uploadedZipPath, { dir: extractDir });
+
+      const extractedDbPath = path.join(extractDir, 'data.db');
+      if (!fs.existsSync(extractedDbPath)) {
+        throw new Error('Uploaded backup is missing data.db — not a valid backup file');
+      }
+
+      // Validate the extracted DB is a real, uncorrupted SQLite file before touching production data
+      const testDb = await open({ filename: extractedDbPath, driver: sqlite3.Database });
+      const integrity = await testDb.get('PRAGMA integrity_check');
+      await testDb.close();
+      if (!integrity || integrity.integrity_check !== 'ok') {
+        throw new Error('Uploaded database failed integrity check — aborting restore');
+      }
+
+      // Safety net: snapshot current state before overwriting anything. Only the
+      // zip is built here — its backup_history row is recorded after the restore
+      // completes and reconnects (below), since that row would otherwise be
+      // written to the database we're about to discard and vanish with it.
+      const preRestoreBackup = await buildBackupZipFile('pre_restore_auto');
+
+      await db.close();
+      dbClosed = true;
+      fs.copyFileSync(extractedDbPath, DB_PATH);
+
+      const extractedUploads = path.join(extractDir, 'uploads');
+      if (fs.existsSync(extractedUploads)) {
+        fs.rmSync(UPLOAD_DIR, { recursive: true, force: true });
+        fs.cpSync(extractedUploads, UPLOAD_DIR, { recursive: true });
+      }
+      const extractedMaterials = path.join(extractDir, 'private_uploads', 'materials');
+      if (fs.existsSync(extractedMaterials)) {
+        fs.rmSync(PRIVATE_UPLOAD_DIR, { recursive: true, force: true });
+        fs.cpSync(extractedMaterials, PRIVATE_UPLOAD_DIR, { recursive: true });
+      }
+
+      db = await open({ filename: DB_PATH, driver: sqlite3.Database });
+      dbClosed = false;
+
+      // Record the pre-restore snapshot in the newly-restored database so it's
+      // visible in Backup History (its file was already safely written to disk above).
+      await recordBackupHistory(preRestoreBackup.filename, preRestoreBackup.sizeBytes, 'pre_restore_auto', req.user.name || req.user.sub);
+
+      res.json({ success: true, message: 'Restore complete. A pre-restore snapshot was saved automatically.' });
+    } catch (err) {
+      console.error('Restore failed:', err);
+      if (dbClosed) {
+        // The live connection was closed before the failure occurred — reconnect
+        // to whatever data.db currently is on disk so the server stays usable.
+        try { db = await open({ filename: DB_PATH, driver: sqlite3.Database }); } catch (reopenErr) { console.error('Failed to reopen DB after failed restore:', reopenErr); }
+      }
+      res.status(500).json({ error: err.message || 'Restore failed' });
+    } finally {
+      restoreInProgress = false;
+      try { fs.unlinkSync(uploadedZipPath); } catch (e) {}
+      try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch (e) {}
     }
   });
 
@@ -2826,11 +3825,20 @@ async function main() {
   });
 
 
+  // Non-super-admins (e.g. teachers on the Attendance page) only need official_contact/
+  // business_name display fields — API credentials are stripped out for them so any
+  // authenticated user can't read live WhatsApp/SMS secrets via this endpoint.
+  const SETTINGS_SENSITIVE_KEYS = ['api_token', 'phone_number_id', 'business_account_id', 'webhook_url'];
+
   app.get('/api/settings', async (req, res) => {
     try {
       const rows = await db.all('SELECT * FROM whatsapp_settings');
       const settings = {};
-      rows.forEach(r => { settings[r.key] = r.value; });
+      const isSuperAdmin = req.user.roles.includes('super_admin');
+      rows.forEach(r => {
+        if (!isSuperAdmin && SETTINGS_SENSITIVE_KEYS.includes(r.key)) return;
+        settings[r.key] = r.value;
+      });
       res.json(settings);
     } catch (err) {
       console.error(err);
@@ -2839,6 +3847,7 @@ async function main() {
   });
 
   app.post('/api/settings', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
       const settings = req.body;
       const stmt = await db.prepare('INSERT OR REPLACE INTO whatsapp_settings (key, value) VALUES (?, ?)');
@@ -2855,8 +3864,9 @@ async function main() {
 
 
   app.post('/api/whatsapp/send-manual', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { studentId, date, markedBy, userRole, assignedClassIds } = req.body;
+      const { studentId, date, markedBy } = req.body;
       if (!studentId || !date) {
         return res.status(400).json({ error: 'Missing studentId or date' });
       }
@@ -2866,10 +3876,15 @@ async function main() {
         return res.status(404).json({ error: 'Student not found' });
       }
 
-      // Security check: teacher can only notify parents of students in their assigned classes
-      if (userRole === 'teacher' && assignedClassIds) {
-        const assignedList = Array.isArray(assignedClassIds) ? assignedClassIds : String(assignedClassIds).split(',');
-        if (!assignedList.includes(student.className)) {
+      // Security check: teacher can only notify parents of students in their assigned
+      // classes — role and class assignment are derived from the verified JWT/DB, never
+      // trusted from the client (a client could previously omit userRole/assignedClassIds
+      // entirely to bypass this check).
+      const isTeacherOnly = req.user.roles.includes('teacher') && !req.user.roles.includes('admin') && !req.user.roles.includes('super_admin');
+      if (isTeacherOnly) {
+        const assignedRows = await db.all('SELECT DISTINCT className FROM allocations WHERE teacherId = ?', req.user.sub);
+        const assignedClassNames = assignedRows.map((r) => r.className);
+        if (!assignedClassNames.includes(student.className)) {
           return res.status(403).json({ error: 'Unauthorized to send alerts for this class.' });
         }
       }
@@ -2877,7 +3892,7 @@ async function main() {
       const parentName = student.primaryParentName || 'Parent';
       const toMobile = student.primaryParentMobile;
       const branchId = student.branchId || '';
-      const teacher = markedBy || 'Teacher';
+      const teacher = req.user.name || markedBy || 'Teacher';
 
       if (!toMobile) {
         return res.status(400).json({ error: 'Parent mobile number not configured for this student' });
@@ -3003,7 +4018,8 @@ async function main() {
   // --- Special Class & Bonus Attendance Endpoints ---
   app.get('/api/special-classes', async (req, res) => {
     try {
-      const { branchId, className, teacherId } = req.query;
+      const { className, teacherId } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM special_classes WHERE 1=1';
       const params = [];
 
@@ -3030,6 +4046,7 @@ async function main() {
   });
 
   app.post('/api/special-classes', upload.single('attachment'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { title, subject, branchId, className, batch, date, startTime, endTime, venue, purpose, description, teacherId, teacherName } = req.body;
       const attachmentPath = req.file ? `/uploads/${req.file.filename}` : '';
@@ -3080,6 +4097,7 @@ async function main() {
   });
 
   app.put('/api/special-classes/:id', upload.single('attachment'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { id } = req.params;
       const { title, subject, branchId, className, batch, date, startTime, endTime, venue, purpose, description, teacherName, status } = req.body;
@@ -3120,6 +4138,7 @@ async function main() {
   });
 
   app.delete('/api/special-classes/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { id } = req.params;
       const cls = await db.get('SELECT * FROM special_classes WHERE id = ?', id);
@@ -3268,6 +4287,7 @@ async function main() {
   });
 
   app.post('/api/ledger', upload.single('attachment'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { date, type, category, description, amount, paymentMode, referenceNumber, enteredBy } = req.body;
       const branchId = resolveBranchId(req, req.body.branchId) || 'branch_main';
@@ -3286,7 +4306,7 @@ async function main() {
       // Insert record
       const stmt = await db.prepare(`
         INSERT INTO ledger_transactions (voucherNumber, date, type, category, description, amount, paymentMode, referenceNumber, enteredBy, branchId, attachmentPath, attachmentName, attachmentSize)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const result = await stmt.run(
         voucherNumber, date, type, category, description, Number(amount), paymentMode, referenceNumber || '', enteredBy || '', branchId,
@@ -3303,6 +4323,7 @@ async function main() {
   });
 
   app.delete('/api/ledger/:id/attachment', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const id = req.params.id;
       const transaction = await db.get('SELECT * FROM ledger_transactions WHERE id = ?', id);
@@ -3330,30 +4351,33 @@ async function main() {
     try {
       const rows = await db.all('SELECT * FROM inventory_categories');
       res.json(rows);
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { console.error('List inventory categories error:', error); res.status(500).json({ error: 'Failed to load inventory categories' }); }
   });
   app.post('/api/inventory-categories', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { name, status } = req.body;
       const stmt = await db.prepare('INSERT INTO inventory_categories (name, status) VALUES (?, ?)');
       const result = await stmt.run(name, status || 'Active');
       res.json({ id: result.lastID, name, status: status || 'Active' });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { console.error('Create inventory category error:', error); res.status(500).json({ error: 'Failed to create inventory category' }); }
   });
   app.put('/api/inventory-categories/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { name, status } = req.body;
       const stmt = await db.prepare('UPDATE inventory_categories SET name = ?, status = ? WHERE id = ?');
       await stmt.run(name, status, req.params.id);
       res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { console.error('Update inventory category error:', error); res.status(500).json({ error: 'Failed to update inventory category' }); }
   });
   app.delete('/api/inventory-categories/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const stmt = await db.prepare('DELETE FROM inventory_categories WHERE id = ?');
       await stmt.run(req.params.id);
       res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { console.error('Delete inventory category error:', error); res.status(500).json({ error: 'Failed to delete inventory category' }); }
   });
 
   app.get('/api/inventory', async (req, res) => {
@@ -3374,6 +4398,7 @@ async function main() {
   });
 
   app.post('/api/inventory', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { itemName, category, description, quantity, minStock, unit, purchaseDate, supplier, purchaseCost, status } = req.body;
       const branchId = resolveBranchId(req, req.body.branchId) || 'branch_main';
@@ -3404,6 +4429,7 @@ async function main() {
   });
 
   app.put('/api/inventory/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const id = req.params.id;
       const { itemName, category, description, quantity, minStock, unit, purchaseDate, supplier, purchaseCost, branchId, status, damagedQuantity } = req.body;
@@ -3439,6 +4465,7 @@ async function main() {
   });
 
   app.delete('/api/inventory/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const id = req.params.id;
       await db.run("UPDATE inventory_items SET status = 'Inactive' WHERE id = ?", id);
@@ -3451,8 +4478,9 @@ async function main() {
 
   // --- Inventory Allocations Endpoints ---
   app.get('/api/inventory/allocations', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { branchId } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM inventory_allocations';
       const params = [];
       if (branchId) {
@@ -3468,8 +4496,10 @@ async function main() {
   });
 
   app.post('/api/inventory/allocate', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { studentId, studentName, admissionNumber, branchId, itemId, quantity, allocatedBy, remarks, uniformSize } = req.body;
+      const { studentId, studentName, admissionNumber, itemId, quantity, allocatedBy, remarks, uniformSize } = req.body;
+      const branchId = resolveBranchId(req, req.body.branchId);
       if (!studentId || !studentName || !itemId || !quantity) {
         return res.status(400).json({ error: 'Student details, itemId, and quantity are required.' });
       }
@@ -3521,6 +4551,7 @@ async function main() {
   });
 
   app.post('/api/inventory/return', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { allocationId } = req.body;
       if (!allocationId) return res.status(400).json({ error: 'Allocation ID is required' });
@@ -3550,8 +4581,9 @@ async function main() {
 
   // --- Monthly Reports Endpoints ---
   app.get('/api/financial-reports', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { branchId } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM monthly_reports';
       const params = [];
       if (branchId) {
@@ -3568,8 +4600,10 @@ async function main() {
   });
 
   app.post('/api/financial-reports', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { month, branchId, submittedBy, remarks, comments, totalIncome, totalExpense, netProfit, ledgerSummary, inventoryPurchased, inventoryAllocated, inventoryRemaining, lowStockItems, studentAdmissions, outstandingFees } = req.body;
+      const { month, submittedBy, remarks, comments, totalIncome, totalExpense, netProfit, ledgerSummary, inventoryPurchased, inventoryAllocated, inventoryRemaining, lowStockItems, studentAdmissions, outstandingFees } = req.body;
+      const branchId = resolveBranchId(req, req.body.branchId);
       if (!month || !branchId) return res.status(400).json({ error: 'Month and branchId are required' });
 
       // Check if report already exists for this branch & month
@@ -3612,6 +4646,7 @@ async function main() {
   });
 
   app.post('/api/financial-reports/:id/action', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
       const id = req.params.id;
       const { status, remarks } = req.body; // status: 'Approved' or 'Returned' (Returned for Correction)
@@ -3640,8 +4675,280 @@ async function main() {
   });
 
 
-  // serve uploaded files
-  app.use('/uploads', express.static(UPLOAD_DIR));
+  // --- Fee Management Module Endpoints ---
+  function feeRecordStatus(totalAmount, paidAmount, dueDate) {
+    if (paidAmount >= totalAmount && totalAmount > 0) return 'Paid';
+    if (paidAmount > 0) return 'Partially Paid';
+    if (dueDate && dueDate < new Date().toISOString().slice(0, 10)) return 'Overdue';
+    return 'Pending';
+  }
+
+  app.get('/api/fees/structures', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM fee_structures';
+      const params = [];
+      if (branchId) { query += ' WHERE branchId = ?'; params.push(branchId); }
+      query += ' ORDER BY className ASC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.post('/api/fees/structures', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const body = req.body || {};
+      if (!body.className || !body.feeType || body.amount === undefined) {
+        return res.status(400).json({ error: 'className, feeType and amount are required' });
+      }
+      const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || null;
+      const now = new Date().toISOString();
+      const result = await db.run(`
+        INSERT INTO fee_structures (className, branchId, academicYear, feeType, amount, dueDate, createdAt, updatedAt)
+        VALUES (?,?,?,?,?,?,?,?)
+      `, body.className, branchId, body.academicYear || '', body.feeType, Number(body.amount), body.dueDate || '', now, now);
+      const created = await db.get('SELECT * FROM fee_structures WHERE id = ?', result.lastID);
+      res.status(201).json(created);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.put('/api/fees/structures/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM fee_structures WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Fee structure not found' });
+      const body = req.body || {};
+      const now = new Date().toISOString();
+      await db.run(`
+        UPDATE fee_structures SET className=?, academicYear=?, feeType=?, amount=?, dueDate=?, updatedAt=?
+        WHERE id=?
+      `, body.className ?? existing.className, body.academicYear ?? existing.academicYear, body.feeType ?? existing.feeType,
+         body.amount !== undefined ? Number(body.amount) : existing.amount, body.dueDate ?? existing.dueDate, now, req.params.id);
+      const updated = await db.get('SELECT * FROM fee_structures WHERE id = ?', req.params.id);
+      res.json(updated);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.delete('/api/fees/structures/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      await db.run('DELETE FROM fee_structures WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Fee records: parents only ever see records for students linked to them via the
+  // parent_student table — resolved server-side, never trusted from a client-supplied
+  // studentId list.
+  app.get('/api/fees/records', async (req, res) => {
+    try {
+      const roles = req.user.roles || [];
+      let query = 'SELECT * FROM fee_records';
+      const params = [];
+      const conditions = [];
+
+      if (roles.includes('parent')) {
+        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const studentIds = linkedRows.map((r) => r.studentId);
+        if (studentIds.length === 0) return res.json([]);
+        conditions.push(`studentId IN (${studentIds.map(() => '?').join(',')})`);
+        params.push(...studentIds);
+      } else if (roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) {
+        const branchId = resolveBranchId(req, req.query.branchId);
+        if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+        if (req.query.studentId) { conditions.push('studentId = ?'); params.push(req.query.studentId); }
+        if (req.query.className) { conditions.push('className = ?'); params.push(req.query.className); }
+      } else {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
+      query += ' ORDER BY dueDate ASC';
+      const rows = await db.all(query, ...params);
+      // Status is recomputed on every read (not just on write) so a record that has
+      // simply aged past its due date shows as Overdue without needing a background job.
+      const withStatus = rows.map((r) => ({ ...r, status: feeRecordStatus(r.totalAmount, r.paidAmount, r.dueDate) }));
+      res.json(req.query.status ? withStatus.filter((r) => r.status === req.query.status) : withStatus);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.post('/api/fees/records', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const body = req.body || {};
+      if (!body.studentId || !body.feeType || body.totalAmount === undefined) {
+        return res.status(400).json({ error: 'studentId, feeType and totalAmount are required' });
+      }
+      const student = await db.get('SELECT * FROM students WHERE id = ?', body.studentId);
+      if (!student) return res.status(404).json({ error: 'Student not found' });
+      const branchId = resolveBranchId(req, student.branchId) || student.branchId;
+      const now = new Date().toISOString();
+      const status = feeRecordStatus(Number(body.totalAmount), 0, body.dueDate);
+      const result = await db.run(`
+        INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt)
+        VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
+      `, student.id, student.fullName, student.className, branchId, body.feeType, body.academicYear || '', Number(body.totalAmount), body.dueDate || '', status, now, now);
+      const created = await db.get('SELECT * FROM fee_records WHERE id = ?', result.lastID);
+      res.status(201).json(created);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Bulk-generate fee records for every active student in a class from a fee structure,
+  // skipping students who already have a record for that feeType+academicYear.
+  app.post('/api/fees/records/generate', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { structureId } = req.body || {};
+      const structure = await db.get('SELECT * FROM fee_structures WHERE id = ?', structureId);
+      if (!structure) return res.status(404).json({ error: 'Fee structure not found' });
+
+      const students = await db.all('SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?', structure.className, structure.branchId, 'Active');
+      const now = new Date().toISOString();
+      const createdIds = [];
+      for (const student of students) {
+        const existing = await db.get(
+          'SELECT id FROM fee_records WHERE studentId = ? AND feeType = ? AND academicYear = ?',
+          student.id, structure.feeType, structure.academicYear
+        );
+        if (existing) continue;
+        const status = feeRecordStatus(structure.amount, 0, structure.dueDate);
+        const result = await db.run(`
+          INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt)
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
+        `, student.id, student.fullName, student.className, structure.branchId, structure.feeType, structure.academicYear, structure.amount, structure.dueDate, status, now, now);
+        createdIds.push(result.lastID);
+      }
+      const rows = createdIds.length ? await db.all(`SELECT * FROM fee_records WHERE id IN (${createdIds.map(() => '?').join(',')})`, ...createdIds) : [];
+      res.status(201).json({ createdCount: rows.length, skippedCount: students.length - rows.length, records: rows });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.get('/api/fees/stats', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT totalAmount, paidAmount, dueDate FROM fee_records';
+      const params = [];
+      if (branchId) { query += ' WHERE branchId = ?'; params.push(branchId); }
+      const rows = await db.all(query, ...params);
+      const statuses = rows.map((r) => feeRecordStatus(r.totalAmount, r.paidAmount, r.dueDate));
+      const totalCollected = rows.reduce((sum, r) => sum + (r.paidAmount || 0), 0);
+      const totalPending = rows.reduce((sum, r) => sum + Math.max(0, (r.totalAmount || 0) - (r.paidAmount || 0)), 0);
+      res.json({
+        totalCollected,
+        totalPending,
+        overdueCount: statuses.filter((s) => s === 'Overdue').length,
+        paidCount: statuses.filter((s) => s === 'Paid').length,
+        totalRecords: rows.length,
+      });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.post('/api/fees/records/:id/payments', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Fee record not found' });
+      const body = req.body || {};
+      const amount = Number(body.amount);
+      if (!amount || amount <= 0) return res.status(400).json({ error: 'A positive payment amount is required' });
+
+      const now = new Date().toISOString();
+      const receiptNumber = `RCPT-${Date.now()}`;
+      await db.run(`
+        INSERT INTO fee_payments (feeRecordId, studentId, amount, paymentMode, referenceNumber, receivedBy, paymentDate, receiptNumber, branchId, createdAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+      `, record.id, record.studentId, amount, body.paymentMode || 'Cash', body.referenceNumber || '', req.user.name || 'Accountant', now.slice(0, 10), receiptNumber, record.branchId, now);
+
+      const newPaidAmount = (record.paidAmount || 0) + amount;
+      const newStatus = feeRecordStatus(record.totalAmount, newPaidAmount, record.dueDate);
+      await db.run('UPDATE fee_records SET paidAmount = ?, status = ?, updatedAt = ? WHERE id = ?', newPaidAmount, newStatus, now, record.id);
+
+      const updated = await db.get('SELECT * FROM fee_records WHERE id = ?', record.id);
+      res.status(201).json({ record: updated, receiptNumber });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.get('/api/fees/records/:id/payments', async (req, res) => {
+    try {
+      const record = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Fee record not found' });
+      const roles = req.user.roles || [];
+      if (roles.includes('parent')) {
+        const linked = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, record.studentId);
+        if (!linked) return res.status(403).json({ error: 'Forbidden' });
+      } else if (!roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const rows = await db.all('SELECT * FROM fee_payments WHERE feeRecordId = ? ORDER BY createdAt DESC', req.params.id);
+      res.json(rows);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // --- Event Management Module Endpoints ---
+  app.get('/api/events', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM events';
+      const params = [];
+      if (branchId) { query += ' WHERE branchId = ?'; params.push(branchId); }
+      query += ' ORDER BY date ASC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.post('/api/events', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const body = req.body || {};
+      if (!body.title || !body.date) return res.status(400).json({ error: 'title and date are required' });
+      const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || null;
+      const now = new Date().toISOString();
+      const result = await db.run(`
+        INSERT INTO events (title, description, eventType, date, time, venue, expectedAttendees, branchId, createdBy, createdByName, status, createdAt, updatedAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'Scheduled',?,?)
+      `, body.title, body.description || '', body.eventType || 'Other', body.date, body.time || '', body.venue || '', Number(body.expectedAttendees || 0), branchId, req.user.sub, req.user.name || '', now, now);
+      const created = await db.get('SELECT * FROM events WHERE id = ?', result.lastID);
+
+      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      await db.run(`
+        INSERT INTO notifications (id, title, message, type, priority, roles, branchId, status, createdAt)
+        VALUES (?, ?, ?, 'info', 'medium', '["parent","teacher"]', ?, 'unread', ?)
+      `, notifId, 'New Event', `${created.title} scheduled for ${created.date}`, branchId, now);
+
+      res.status(201).json(created);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.put('/api/events/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM events WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Event not found' });
+      const body = req.body || {};
+      const now = new Date().toISOString();
+      await db.run(`
+        UPDATE events SET title=?, description=?, eventType=?, date=?, time=?, venue=?, expectedAttendees=?, status=?, updatedAt=?
+        WHERE id=?
+      `, body.title ?? existing.title, body.description ?? existing.description, body.eventType ?? existing.eventType,
+         body.date ?? existing.date, body.time ?? existing.time, body.venue ?? existing.venue,
+         body.expectedAttendees !== undefined ? Number(body.expectedAttendees) : existing.expectedAttendees,
+         body.status ?? existing.status, now, req.params.id);
+      const updated = await db.get('SELECT * FROM events WHERE id = ?', req.params.id);
+      res.json(updated);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  app.delete('/api/events/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      await db.run('DELETE FROM events WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
 
   app.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
 }

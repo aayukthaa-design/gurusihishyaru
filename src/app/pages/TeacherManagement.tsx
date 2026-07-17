@@ -270,6 +270,7 @@ export function TeacherManagement() {
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [panel, setPanel] = useState<'none' | 'add' | { type: 'edit' | 'view'; id: string }>('none');
   const [formError, setFormError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     void refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
@@ -397,7 +398,7 @@ export function TeacherManagement() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {filtered.slice(0, 5).map((t) => (
+                {filtered.slice(0, showAll ? filtered.length : 5).map((t) => (
                   <tr key={t.id} className="transition-colors hover:bg-secondary/30">
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-3">
@@ -438,8 +439,8 @@ export function TeacherManagement() {
           </div>
           {filtered.length > 5 && (
             <div className="border-t border-border px-6 py-4">
-              <button className="flex items-center gap-1 text-sm font-medium text-primary hover:underline">
-                View all {filtered.length} teachers <ChevronRight className="h-4 w-4" />
+              <button onClick={() => setShowAll((v) => !v)} className="flex items-center gap-1 text-sm font-medium text-primary hover:underline">
+                {showAll ? 'Show less' : `View all ${filtered.length} teachers`} <ChevronRight className={`h-4 w-4 transition-transform ${showAll ? 'rotate-90' : ''}`} />
               </button>
             </div>
           )}

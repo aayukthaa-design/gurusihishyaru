@@ -15,7 +15,7 @@ import {
   Plus, X, CheckCircle2, MessageSquare, Boxes, FileSpreadsheet, TrendingDown, AlertTriangle
 } from 'lucide-react';
 import { useSubmissions } from '../lib/dailySubmissionService';
-import { getNotificationStats, useNotifications } from '../lib/notificationService';
+import { getNotificationStats, useNotifications, getVisibleNotificationsForUser } from '../lib/notificationService';
 import { useExams } from '../lib/examService';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -25,61 +25,36 @@ import type { Role } from '../auth/types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
-import { addTeacher, getTeachersForBranch } from '../lib/teacherService';
+import { addTeacher, getTeachersForBranch, useTeachers, refreshTeachers } from '../lib/teacherService';
 import { addClass, getClassesForBranch } from '../lib/classService';
 import { addNotification } from '../lib/notificationService';
 import { useSchoolExamSchedules } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
-
-// ─── Chart data ───────────────────────────────────────────────────────────────
-
-const attendanceTrend = [
-  { week: 'Wk 1', value: 92 },
-  { week: 'Wk 2', value: 88 },
-  { week: 'Wk 3', value: 95 },
-  { week: 'Wk 4', value: 91 },
-  { week: 'Wk 5', value: 94 },
-  { week: 'Wk 6', value: 96 },
-];
-
-const systemUsageTrend = [
-  { day: 'Mon', logins: 42 },
-  { day: 'Tue', logins: 38 },
-  { day: 'Wed', logins: 51 },
-  { day: 'Thu', logins: 45 },
-  { day: 'Fri', logins: 49 },
-  { day: 'Sat', logins: 12 },
-  { day: 'Sun', logins: 8 },
-];
-
-// ─── Recent alerts ────────────────────────────────────────────────────────────
-
-const ADMIN_ALERTS = [
-  { id: 1, icon: '💰', text: 'Fee due: 12 students overdue this month',   time: '2h ago' },
-  { id: 2, icon: '📝', text: 'New admission: Arjun Sharma — Grade 10',    time: '3h ago' },
-  { id: 3, icon: '📅', text: 'Exam scheduled: Math — Grade 10, Jun 25',  time: 'Yesterday' },
-  { id: 4, icon: '✅', text: 'Attendance marked for all classes today',   time: 'Yesterday' },
-  { id: 5, icon: '🔔', text: 'Parent meeting: Grade 8A — Jun 24, 4 PM',  time: '2 days ago' },
-];
-
-const SUPERADMIN_ALERTS = [
-  { id: 1, icon: '👤', text: 'New Admin account created: admin6@tutorials.com',  time: '1h ago' },
-  { id: 2, icon: '🔐', text: 'Role updated: Teacher User 3 → Admin',             time: '3h ago' },
-  { id: 3, icon: '💾', text: 'Backup completed successfully — 46 MB',            time: 'Yesterday' },
-  { id: 4, icon: '⚙️', text: 'System settings updated: Academic year 2026–27',  time: 'Yesterday' },
-  { id: 5, icon: '📊', text: 'Monthly report generated and exported',           time: '2 days ago' },
-];
+import { useStudents, refreshStudents } from '../lib/studentService';
+import { fetchAttendance } from '../lib/attendanceService';
 
 // ─── Per-role configuration ───────────────────────────────────────────────────
 
-interface StatCard {
-  label: string;
-  value: string;
-  icon: React.ElementType;
-  color: string;
-  iconColor: string;
-  border: string;
+const ALERT_ICONS: Record<string, string> = {
+  success: '✅',
+  info: '🔔',
+  warning: '⚠️',
+  error: '🚨',
+};
+
+function timeAgo(iso: string): string {
+  if (!iso) return '';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return `${days} days ago`;
+  return new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 }
 
 interface QuickAction {
@@ -89,14 +64,11 @@ interface QuickAction {
   color: string;
 }
 
-function getSuperAdminConfig(): { stats: StatCard[]; actions: QuickAction[] } {
+// Only .actions is used anywhere on this page (the per-role stat cards actually
+// rendered come from branchAwareStats below, wired to real data) — this used to
+// also return a `stats` array of hardcoded numbers that was never read.
+function getSuperAdminConfig(): { actions: QuickAction[] } {
   return {
-    stats: [
-      { label: 'Total Users',      value: '25',   icon: UserCog,    color: 'bg-violet-50 dark:bg-violet-950/40',  iconColor: 'text-violet-600 dark:text-violet-400',  border: 'border-violet-100 dark:border-violet-900' },
-      { label: 'Total Admins',     value: '5',    icon: Shield,     color: 'bg-sky-50 dark:bg-sky-950/40',         iconColor: 'text-sky-600 dark:text-sky-400',         border: 'border-sky-100 dark:border-sky-900' },
-      { label: 'System Logins',    value: '49',   icon: TrendingUp, color: 'bg-green-50 dark:bg-green-950/40',    iconColor: 'text-green-600 dark:text-green-400',    border: 'border-green-100 dark:border-green-900' },
-      { label: 'Pending Reports',  value: '3',    icon: BarChart3,  color: 'bg-amber-50 dark:bg-amber-950/40',    iconColor: 'text-amber-600 dark:text-amber-400',    border: 'border-amber-100 dark:border-amber-900' },
-    ],
     actions: [
       { label: 'Add Admin',       icon: UserPlus, path: '/users?tab=admins',      color: 'bg-violet-600 hover:bg-violet-700' },
       { label: 'Add Accountant',  icon: Wallet,   path: '/users?tab=accountants', color: 'bg-teal-600 hover:bg-teal-700' },
@@ -108,14 +80,8 @@ function getSuperAdminConfig(): { stats: StatCard[]; actions: QuickAction[] } {
   };
 }
 
-function getAdminConfig(): { stats: StatCard[]; actions: QuickAction[] } {
+function getAdminConfig(): { actions: QuickAction[] } {
   return {
-    stats: [
-      { label: 'Total Students',     value: '1,000',  icon: Users,         color: 'bg-green-50 dark:bg-green-950/40',  iconColor: 'text-green-600 dark:text-green-400',  border: 'border-green-100 dark:border-green-900' },
-      { label: 'Pending Fees',       value: formatIndianCurrency(42500),icon: CreditCard,    color: 'bg-amber-50 dark:bg-amber-950/40',  iconColor: 'text-amber-600 dark:text-amber-400',  border: 'border-amber-100 dark:border-amber-900' },
-      { label: "Today's Attendance", value: '94.5%',  icon: ClipboardCheck,color: 'bg-sky-50 dark:bg-sky-950/40',      iconColor: 'text-sky-600 dark:text-sky-400',      border: 'border-sky-100 dark:border-sky-900' },
-      { label: 'Upcoming Events',    value: '3',      icon: CalendarDays,  color: 'bg-violet-50 dark:bg-violet-950/40',iconColor: 'text-violet-600 dark:text-violet-400',border: 'border-violet-100 dark:border-violet-900' },
-    ],
     actions: [
       { label: 'Add Teacher',       icon: UserPlus,     path: '/teachers',   color: 'bg-green-600 hover:bg-green-700' },
       { label: 'Create Class',      icon: GraduationCap,path: '/allocations',color: 'bg-amber-600 hover:bg-amber-700' },
@@ -143,6 +109,44 @@ export function Dashboard() {
 
   const [whatsappStats, setWhatsappStats] = React.useState<any>(null);
   const [specialClasses, setSpecialClasses] = React.useState<any[]>([]);
+  const allStudents = useStudents();
+  const allTeachers = useTeachers();
+  const [weeklyAttendanceTrend, setWeeklyAttendanceTrend] = React.useState<{ week: string; value: number }[]>([]);
+
+  React.useEffect(() => {
+    // /api/teachers is admin/super_admin-only (it includes salary/DOB/address) —
+    // only fetch for the roles whose dashboard actually shows these counts.
+    if (isAdmin || isSuperAdmin) {
+      void refreshStudents();
+      void refreshTeachers();
+    }
+  }, [isAdmin, isSuperAdmin]);
+
+  React.useEffect(() => {
+    // Build a real 6-week attendance trend from raw attendance rows — grouped by
+    // ISO week, % present across all classes in scope.
+    const loadAttendanceTrend = async () => {
+      const records = await fetchAttendance();
+      const byWeek = new Map<string, { present: number; total: number }>();
+      for (const r of records) {
+        if (!r.date) continue;
+        const d = new Date(r.date);
+        const weekStart = new Date(d);
+        weekStart.setDate(d.getDate() - d.getDay());
+        const key = weekStart.toISOString().slice(0, 10);
+        const bucket = byWeek.get(key) || { present: 0, total: 0 };
+        bucket.total += 1;
+        if (r.status === 'present') bucket.present += 1;
+        byWeek.set(key, bucket);
+      }
+      const sortedWeeks = Array.from(byWeek.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-6);
+      setWeeklyAttendanceTrend(sortedWeeks.map(([key, v], i) => ({
+        week: `Wk ${i + 1}`,
+        value: v.total > 0 ? Math.round((v.present / v.total) * 100) : 0,
+      })));
+    };
+    void loadAttendanceTrend();
+  }, [branchFilter]);
 
   React.useEffect(() => {
     const loadSpecialClasses = async () => {
@@ -185,7 +189,7 @@ export function Dashboard() {
   const myClasses: string[] = user?.assignedClassIds ?? [];
   const todayISO = new Date().toISOString().slice(0, 10);
 
-  const { stats, actions } = isSuperAdmin
+  const { actions } = isSuperAdmin
     ? getSuperAdminConfig()
     : getAdminConfig();
   const [teacherModalOpen, setTeacherModalOpen] = React.useState(false);
@@ -463,7 +467,6 @@ export function Dashboard() {
   const teacherOptions = React.useMemo(() => getTeachersForBranch(user?.branchId), [user?.branchId, teacherModalOpen]);
   const classOptions = React.useMemo(() => getClassesForBranch(user?.branchId), [user?.branchId, classModalOpen]);
 
-  const alerts = isSuperAdmin ? SUPERADMIN_ALERTS : ADMIN_ALERTS;
   const submissions = useSubmissions();
 
   React.useEffect(() => {
@@ -486,6 +489,14 @@ export function Dashboard() {
   }, [teacherModalOpen, classModalOpen]);
   const notifications = useNotifications();
   const notificationStats = React.useMemo(() => getNotificationStats(notifications, user), [notifications, user]);
+  const alerts = React.useMemo(() => {
+    return getVisibleNotificationsForUser(notifications, user)
+      .filter((n) => n.status !== 'deleted')
+      .slice()
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+      .slice(0, 5)
+      .map((n) => ({ id: n.id, icon: ALERT_ICONS[n.type] || '🔔', text: n.title || n.message, time: timeAgo(n.createdAt) }));
+  }, [notifications, user]);
   const exams = useExams();
   const schoolExamSchedules = useSchoolExamSchedules();
   const scopedSubmissions = filterByBranch(submissions as Array<{ branchId?: string | null }>, user, branchFilter);
@@ -532,12 +543,20 @@ export function Dashboard() {
     return false;
   }).filter((n) => !n.read).length;
 
+  const scopedStudentCount = React.useMemo(
+    () => allStudents.filter((s) => !branchFilter || s.branchId === branchFilter).length,
+    [allStudents, branchFilter]
+  );
+  const scopedTeacherCount = React.useMemo(
+    () => allTeachers.filter((t) => !branchFilter || t.branchId === branchFilter).length,
+    [allTeachers, branchFilter]
+  );
+
   const branchAwareStats = React.useMemo(() => {
-    const scopeLabel = branchFilter ? getBranchName(branchFilter) : 'All Branches';
     if (isSuperAdmin) {
       return [
-        { label: 'Students', value: '1,240', icon: Users, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
-        { label: 'Teachers', value: '48', icon: BookOpen, color: 'bg-sky-50 dark:bg-sky-950/40', iconColor: 'text-sky-600 dark:text-sky-400', border: 'border-sky-100 dark:border-sky-900' },
+        { label: 'Students', value: scopedStudentCount.toLocaleString('en-IN'), icon: Users, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
+        { label: 'Teachers', value: scopedTeacherCount.toLocaleString('en-IN'), icon: BookOpen, color: 'bg-sky-50 dark:bg-sky-950/40', iconColor: 'text-sky-600 dark:text-sky-400', border: 'border-sky-100 dark:border-sky-900' },
         { label: "Today's WhatsApp Sent", value: whatsappStats ? String(whatsappStats.todaySent) : '0', icon: MessageSquare, color: 'bg-emerald-50 dark:bg-emerald-950/40', iconColor: 'text-emerald-600 dark:text-emerald-400', border: 'border-emerald-100 dark:border-emerald-900' },
         { label: 'Failed WhatsApp Today', value: whatsappStats ? String(whatsappStats.todayFailed) : '0', icon: X, color: 'bg-rose-50 dark:bg-rose-950/40', iconColor: 'text-rose-600 dark:text-rose-400', border: 'border-rose-100 dark:border-rose-900' },
         { label: 'WhatsApp Delivery Rate', value: whatsappStats ? `${whatsappStats.deliveryRate}%` : '100%', icon: CheckCircle2, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
@@ -545,33 +564,25 @@ export function Dashboard() {
     }
 
     return [
-      { label: 'Students', value: '320', icon: Users, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
-      { label: 'Teachers', value: '12', icon: BookOpen, color: 'bg-sky-50 dark:bg-sky-950/40', iconColor: 'text-sky-600 dark:text-sky-400', border: 'border-sky-100 dark:border-sky-900' },
+      { label: 'Students', value: scopedStudentCount.toLocaleString('en-IN'), icon: Users, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
+      { label: 'Teachers', value: scopedTeacherCount.toLocaleString('en-IN'), icon: BookOpen, color: 'bg-sky-50 dark:bg-sky-950/40', iconColor: 'text-sky-600 dark:text-sky-400', border: 'border-sky-100 dark:border-sky-900' },
       { label: "Today's WhatsApp Sent", value: whatsappStats ? String(whatsappStats.todaySent) : '0', icon: MessageSquare, color: 'bg-emerald-50 dark:bg-emerald-950/40', iconColor: 'text-emerald-600 dark:text-emerald-400', border: 'border-emerald-100 dark:border-emerald-900' },
       { label: 'Failed WhatsApp Today', value: whatsappStats ? String(whatsappStats.todayFailed) : '0', icon: X, color: 'bg-rose-50 dark:bg-rose-950/40', iconColor: 'text-rose-600 dark:text-rose-400', border: 'border-rose-100 dark:border-rose-900' },
       { label: 'WhatsApp Success Rate', value: whatsappStats ? `${whatsappStats.deliveryRate}%` : '100%', icon: CheckCircle2, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
     ];
-  }, [branchFilter, isSuperAdmin, whatsappStats]);
+  }, [isSuperAdmin, whatsappStats, scopedStudentCount, scopedTeacherCount]);
 
 
   const chartData = React.useMemo(() => {
     if (isSuperAdmin) {
-      return [
-        { branch: 'Rajajinagar', students: 320, revenue: 180000 },
-        { branch: 'Jayanagar', students: 280, revenue: 152000 },
-        { branch: 'Vijayanagar', students: 240, revenue: 128000 },
-      ].filter((item) => (!branchFilter ? true : item.branch === getBranchName(branchFilter)));
+      return branches
+        .filter((b) => b.status === 'Active')
+        .filter((b) => !branchFilter || b.id === branchFilter)
+        .map((b) => ({ branch: b.name, students: allStudents.filter((s) => s.branchId === b.id).length }));
     }
 
-    return [
-      { week: 'Wk 1', value: 92 },
-      { week: 'Wk 2', value: 88 },
-      { week: 'Wk 3', value: 95 },
-      { week: 'Wk 4', value: 91 },
-      { week: 'Wk 5', value: 94 },
-      { week: 'Wk 6', value: 96 },
-    ];
-  }, [branchFilter, isSuperAdmin]);
+    return weeklyAttendanceTrend;
+  }, [branchFilter, isSuperAdmin, branches, allStudents, weeklyAttendanceTrend]);
 
   const handleTeacherSave = async () => {
     if (!user?.branchId) {
@@ -1532,7 +1543,6 @@ export function Dashboard() {
                     <YAxis stroke="var(--muted-foreground)" fontSize={11} axisLine={false} tickLine={false} />
                     <Tooltip contentStyle={{ backgroundColor: 'var(--card)', border: '1px solid var(--border)', borderRadius: '12px', color: 'var(--card-foreground)', fontSize: '13px' }} />
                     <Bar dataKey="students" fill="#7C3AED" radius={[8, 8, 0, 0]} />
-                    <Bar dataKey="revenue" fill="#0EA5E9" radius={[8, 8, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </>
@@ -1564,9 +1574,9 @@ export function Dashboard() {
               <h2 className="text-base font-semibold text-card-foreground">
                 {isSuperAdmin ? 'System Activity' : 'Recent Alerts'}
               </h2>
-              <button className="flex items-center gap-1 text-xs font-medium text-primary hover:underline">
+              <Link to="/notifications" className="flex items-center gap-1 text-xs font-medium text-primary hover:underline">
                 View all <ChevronRight className="h-3 w-3" />
-              </button>
+              </Link>
             </div>
             <div className="space-y-3">
               {alerts.map((a) => (

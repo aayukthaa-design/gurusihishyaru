@@ -2,6 +2,7 @@ import { Navigate, useLocation } from 'react-router';
 import { useEffect } from 'react';
 import { useAuth } from './AuthContext';
 import { getDefaultRoute } from './rbac';
+import { ChangePasswordGate } from './ChangePasswordGate';
 import type { Module } from './types';
 
 // ─── Protected Route ──────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ export function ProtectedRoute({ children, requiredModule }: ProtectedRouteProps
     return <Navigate to="/unauthorized" replace />;
   }
 
-  return <>{children}</>;
+  return <ChangePasswordGate>{children}</ChangePasswordGate>;
 }
 
 // ─── Guest-only Route (redirect to dashboard if already logged in) ─────────

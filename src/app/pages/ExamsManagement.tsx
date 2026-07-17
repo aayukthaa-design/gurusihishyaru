@@ -2,14 +2,15 @@ import { Header } from '../components/Header';
 import { StatsCard } from '../components/StatsCard';
 import { DataTable } from '../components/DataTable';
 import { GraduationCap, Award, TrendingUp, BookOpen } from 'lucide-react';
-import { subscribeExams } from '../lib/examService';
+import { subscribeExams, Exam } from '../lib/examService';
+import { subscribeMarks, refreshMarks, MarkRecord } from '../lib/examMarksService';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import React from 'react';
 import { Link } from 'react-router';
 
 interface ExamResult {
-  id: number;
+  id: string;
   studentName: string;
   studentId: string;
   subject: string;
@@ -19,21 +20,26 @@ interface ExamResult {
   percentage: number;
 }
 
-const results: ExamResult[] = [
-  { id: 1, studentName: 'Alice Johnson', studentId: 'STU001', subject: 'Mathematics', maxMarks: 100, obtained: 92, grade: 'A+', percentage: 92 },
-  { id: 2, studentName: 'Bob Smith', studentId: 'STU002', subject: 'Mathematics', maxMarks: 100, obtained: 78, grade: 'B', percentage: 78 },
-  { id: 3, studentName: 'Carol Davis', studentId: 'STU003', subject: 'Mathematics', maxMarks: 100, obtained: 85, grade: 'A', percentage: 85 },
-  { id: 4, studentName: 'David Wilson', studentId: 'STU004', subject: 'Mathematics', maxMarks: 100, obtained: 88, grade: 'A', percentage: 88 },
-  { id: 5, studentName: 'Emma Brown', studentId: 'STU005', subject: 'Mathematics', maxMarks: 100, obtained: 95, grade: 'A+', percentage: 95 },
-];
+const GRADE_BUCKETS = ['A+', 'A', 'B', 'C', 'D', 'F'];
 
 function ExamsList() {
   const [exams, setExams] = React.useState<any[]>([]);
+  const [marks, setMarks] = React.useState<MarkRecord[]>([]);
 
   React.useEffect(() => {
     const unsub = subscribeExams((items) => setExams(items));
-    return unsub;
+    const unsubMarks = subscribeMarks((items) => setMarks(items));
+    return () => { unsub(); unsubMarks(); };
   }, []);
+
+  const gradeDistribution = React.useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const m of marks) counts[m.grade] = (counts[m.grade] || 0) + 1;
+    const total = marks.length || 1;
+    return GRADE_BUCKETS
+      .filter((g) => counts[g] > 0)
+      .map((grade) => ({ grade, count: counts[grade], percent: Math.round((counts[grade] / total) * 100) }));
+  }, [marks]);
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -61,12 +67,8 @@ function ExamsList() {
       <div className="rounded-xl border border-border bg-card p-6 transition-colors duration-200">
         <h3 className="mb-4 text-lg font-semibold text-card-foreground">Grade Distribution</h3>
         <div className="space-y-3">
-          {[
-            { grade: 'A+', count: 142, percent: 28 },
-            { grade: 'A', count: 198, percent: 39 },
-            { grade: 'B', count: 124, percent: 25 },
-            { grade: 'C', count: 40, percent: 8 },
-          ].map((item) => (
+          {gradeDistribution.length === 0 && <p className="text-sm text-muted-foreground">No marks entered yet</p>}
+          {gradeDistribution.map((item) => (
             <div key={item.grade}>
               <div className="flex items-center justify-between mb-1">
                 <span className="text-sm text-card-foreground">Grade {item.grade}</span>
@@ -87,6 +89,49 @@ function ExamsList() {
 }
 
 export function ExamsManagement() {
+  const [exams, setExams] = React.useState<Exam[]>([]);
+  const [marks, setMarks] = React.useState<MarkRecord[]>([]);
+  const [selectedExamId, setSelectedExamId] = React.useState<string>('');
+
+  React.useEffect(() => {
+    const unsub = subscribeExams((items) => setExams(items));
+    const unsubMarks = subscribeMarks((items) => setMarks(items));
+    refreshMarks();
+    return () => { unsub(); unsubMarks(); };
+  }, []);
+
+  React.useEffect(() => {
+    if (!selectedExamId && exams.length > 0) {
+      const sorted = [...exams].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+      setSelectedExamId(String(sorted[0].id));
+    }
+  }, [exams, selectedExamId]);
+
+  const selectedExam = exams.find((e) => String(e.id) === selectedExamId);
+
+  const results: ExamResult[] = React.useMemo(() => {
+    return marks
+      .filter((m) => m.examId === selectedExamId)
+      .map((m) => ({
+        id: `${m.examId}-${m.studentId}`,
+        studentId: m.studentId,
+        studentName: m.studentName,
+        subject: selectedExam?.subject || '',
+        maxMarks: selectedExam?.maxMarks || 100,
+        obtained: m.marksObtained,
+        grade: m.grade,
+        percentage: Math.round(m.percentage),
+      }));
+  }, [marks, selectedExamId, selectedExam]);
+
+  const stats = React.useMemo(() => {
+    const totalExams = exams.length;
+    const avgScore = marks.length > 0 ? Math.round((marks.reduce((sum, m) => sum + m.percentage, 0) / marks.length) * 10) / 10 : 0;
+    const topPerformers = marks.filter((m) => m.percentage >= 90).length;
+    const passRate = marks.length > 0 ? Math.round((marks.filter((m) => m.pass).length / marks.length) * 1000) / 10 : 0;
+    return { totalExams, avgScore, topPerformers, passRate };
+  }, [exams, marks]);
+
   const columns = [
     { header: 'Student ID', accessor: 'studentId' as const },
     { header: 'Student Name', accessor: 'studentName' as const },
@@ -161,22 +206,19 @@ export function ExamsManagement() {
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
           <StatsCard
             title="Total Exams"
-            value="24"
-            change="3 upcoming"
+            value={String(stats.totalExams)}
             icon={BookOpen}
             iconColor="bg-primary"
           />
           <StatsCard
             title="Avg Score"
-            value="87.6%"
-            change="+3.2% from last term"
-            changeType="positive"
+            value={`${stats.avgScore}%`}
             icon={TrendingUp}
             iconColor="bg-chart-3"
           />
           <StatsCard
             title="Top Performers"
-            value="142"
+            value={String(stats.topPerformers)}
             change="Above 90%"
             changeType="positive"
             icon={Award}
@@ -184,9 +226,7 @@ export function ExamsManagement() {
           />
           <StatsCard
             title="Pass Rate"
-            value="96.8%"
-            change="+2.1% improvement"
-            changeType="positive"
+            value={`${stats.passRate}%`}
             icon={GraduationCap}
             iconColor="bg-chart-2"
           />
@@ -195,24 +235,44 @@ export function ExamsManagement() {
         <ExamsList />
 
         <div>
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-foreground">Mathematics - Mid-Term Results</h3>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <h3 className="text-lg font-semibold text-foreground">Results</h3>
+              <select
+                value={selectedExamId}
+                onChange={(e) => setSelectedExamId(e.target.value)}
+                className="rounded-lg border border-input bg-input-background px-3 py-1.5 text-sm focus:outline-none focus:border-primary"
+              >
+                {exams.length === 0 && <option value="">No exams yet</option>}
+                {[...exams].sort((a, b) => String(b.date).localeCompare(String(a.date))).map((exam) => (
+                  <option key={exam.id} value={String(exam.id)}>{exam.name} — {exam.subject} ({exam.className})</option>
+                ))}
+              </select>
+            </div>
             <div className="flex gap-2">
               <button
                 onClick={() => exportResultsToPdf(results)}
-                className="rounded-lg border border-border bg-card px-4 py-2 text-sm text-primary transition-all hover:bg-secondary"
+                disabled={results.length === 0}
+                className="rounded-lg border border-border bg-card px-4 py-2 text-sm text-primary transition-all hover:bg-secondary disabled:opacity-40"
               >
                 Export PDF
               </button>
               <button
                 onClick={() => exportResultsToExcel(results)}
-                className="rounded-lg border border-border bg-card px-4 py-2 text-sm text-primary transition-all hover:bg-secondary"
+                disabled={results.length === 0}
+                className="rounded-lg border border-border bg-card px-4 py-2 text-sm text-primary transition-all hover:bg-secondary disabled:opacity-40"
               >
                 Export Excel
               </button>
             </div>
           </div>
-          <DataTable columns={columns} data={results} />
+          {results.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-6 text-center rounded-xl border border-border bg-card">
+              {selectedExamId ? 'No marks entered for this exam yet.' : 'No exams available.'}
+            </p>
+          ) : (
+            <DataTable columns={columns} data={results} />
+          )}
         </div>
       </div>
     </div>

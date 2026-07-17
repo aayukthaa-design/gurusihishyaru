@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router';
 import {
   Mail, Lock, Eye, EyeOff, CheckCircle2,
   AlertCircle, ChevronRight, Users, ClipboardCheck,
-  CreditCard, TrendingUp, MessageCircle, Phone,
+  CreditCard, TrendingUp, MessageCircle, Phone, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { ThemeToggle } from '../components/ThemeToggle';
@@ -23,7 +23,7 @@ const FEATURES = [
 export function Login() {
   const navigate  = useNavigate();
   const location  = useLocation();
-  const { login } = useAuth();
+  const { login, requestParentOtp, verifyParentOtp } = useAuth();
 
   const [mode,        setMode]       = useState<'staff' | 'parent'>('staff');
   const [email,       setEmail]      = useState('');
@@ -37,32 +37,62 @@ export function Login() {
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotSent,  setForgotSent]  = useState(false);
 
+  // Parent login is two-step: request an OTP, then verify it.
+  const [otpStep, setOtpStep] = useState<'mobile' | 'code'>('mobile');
+  const [otpCode, setOtpCode] = useState('');
+  const [otpInfo, setOtpInfo] = useState('');
+
   const from = (location.state as { from?: { pathname: string } })?.from?.pathname;
+
+  const handleRequestOtp = async () => {
+    setError('');
+    const trimmedMobile = mobile.trim();
+    if (!/^\d{10}$/.test(trimmedMobile)) {
+      setError('Please enter a valid 10-digit registered mobile number.');
+      return;
+    }
+    setIsLoading(true);
+    const result = await requestParentOtp(trimmedMobile);
+    setIsLoading(false);
+    if (result.success) {
+      setOtpStep('code');
+      setOtpInfo('If this number is registered, a 6-digit code has been sent via WhatsApp. It expires in 5 minutes.');
+    } else {
+      setError(result.error || 'Failed to send verification code.');
+    }
+  };
+
+  const handleVerifyOtp = async () => {
+    setError('');
+    if (!/^\d{6}$/.test(otpCode.trim())) {
+      setError('Enter the 6-digit code sent to your WhatsApp.');
+      return;
+    }
+    setIsLoading(true);
+    const result = await verifyParentOtp(mobile.trim(), otpCode.trim(), rememberMe);
+    setIsLoading(false);
+    if (result.success) {
+      navigate(from || '/parent', { replace: true });
+    } else {
+      setError(result.error || 'Invalid or expired code.');
+    }
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setIsLoading(true);
 
     if (mode === 'parent') {
-      const trimmedMobile = mobile.trim();
-      if (!/^\d{10}$/.test(trimmedMobile)) {
-        setError('Please enter a valid 10-digit registered mobile number.');
-        setIsLoading(false);
-        return;
-      }
-
-      const result = await login({ email: trimmedMobile, isParent: true, rememberMe });
-      setIsLoading(false);
-      if (result.success && result.roles) {
-        navigate(from || getDefaultRoute(result.roles), { replace: true });
+      if (otpStep === 'mobile') {
+        await handleRequestOtp();
       } else {
-        setError(result.error || 'This mobile number is not registered with Guru Shishyaru Tutorials.');
+        await handleVerifyOtp();
       }
       return;
     }
 
     // Standard Staff Login
+    setIsLoading(true);
     const result = await login({ email, password, rememberMe });
     setIsLoading(false);
     if (result.success && result.roles) {
@@ -183,7 +213,7 @@ export function Login() {
                   </h1>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {mode === 'parent'
-                      ? 'Enter your registered mobile number'
+                      ? (otpStep === 'mobile' ? 'Enter your registered mobile number' : 'Enter the code sent to your WhatsApp')
                       : 'Enter your credentials to access your dashboard'}
                   </p>
                 </div>
@@ -194,7 +224,7 @@ export function Login() {
                     <button
                       key={m}
                       type="button"
-                      onClick={() => { setMode(m); setError(''); }}
+                      onClick={() => { setMode(m); setError(''); setOtpStep('mobile'); setOtpCode(''); setOtpInfo(''); }}
                       className={`flex-1 py-2.5 text-sm font-semibold transition-colors ${
                         mode === m ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-secondary'
                       }`}
@@ -217,24 +247,79 @@ export function Login() {
                   <form onSubmit={handleLogin} className="space-y-5">
 
                     {mode === 'parent' ? (
-                      /* 📱 Parent Login Input */
-                      <div>
-                        <label htmlFor="mobile" className="mb-1.5 block text-sm font-semibold text-foreground">
-                          Mobile Number
-                        </label>
-                        <div className="relative">
-                          <Phone className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                          <input
-                            id="mobile"
-                            type="tel"
-                            required
-                            value={mobile}
-                            onChange={(e) => { setMobile(e.target.value); setError(''); }}
-                            placeholder="Enter Registered Mobile Number"
-                            className="w-full rounded-xl border border-input bg-input-background py-3.5 pl-10 pr-4 text-base transition-all placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
-                          />
+                      /* 📱 Parent Login — two-step OTP */
+                      otpStep === 'mobile' ? (
+                        <div>
+                          <label htmlFor="mobile" className="mb-1.5 block text-sm font-semibold text-foreground">
+                            Mobile Number
+                          </label>
+                          <div className="relative">
+                            <Phone className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                            <input
+                              id="mobile"
+                              type="tel"
+                              required
+                              value={mobile}
+                              onChange={(e) => { setMobile(e.target.value); setError(''); }}
+                              placeholder="Enter Registered Mobile Number"
+                              className="w-full rounded-xl border border-input bg-input-background py-3.5 pl-10 pr-4 text-base transition-all placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                            />
+                          </div>
                         </div>
-                      </div>
+                      ) : (
+                        <div>
+                          {otpInfo && (
+                            <div className="mb-4 flex items-start gap-2 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3">
+                              <MessageCircle className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                              <p className="text-xs text-foreground">{otpInfo}</p>
+                            </div>
+                          )}
+                          <label htmlFor="otpCode" className="mb-1.5 block text-sm font-semibold text-foreground">
+                            6-Digit Code
+                          </label>
+                          <div className="relative">
+                            <ShieldCheck className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                            <input
+                              id="otpCode"
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={6}
+                              required
+                              autoFocus
+                              value={otpCode}
+                              onChange={(e) => { setOtpCode(e.target.value.replace(/\D/g, '')); setError(''); }}
+                              placeholder="000000"
+                              className="w-full rounded-xl border border-input bg-input-background py-3.5 pl-10 pr-4 text-base tracking-[0.3em] transition-all placeholder:text-muted-foreground placeholder:tracking-normal focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                            />
+                          </div>
+                          <div className="mt-2 flex items-center justify-between text-xs">
+                            <button
+                              type="button"
+                              onClick={() => { setOtpStep('mobile'); setOtpCode(''); setError(''); setOtpInfo(''); }}
+                              className="font-medium text-muted-foreground transition-colors hover:text-foreground"
+                            >
+                              ← Change number
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleRequestOtp}
+                              disabled={isLoading}
+                              className="font-semibold text-primary transition-colors hover:underline disabled:opacity-50"
+                            >
+                              Resend code
+                            </button>
+                          </div>
+                          <label className="mt-4 flex cursor-pointer items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={rememberMe}
+                              onChange={(e) => setRememberMe(e.target.checked)}
+                              className="h-4 w-4 rounded border-input accent-primary"
+                            />
+                            <span className="text-sm text-muted-foreground">Remember me</span>
+                          </label>
+                        </div>
+                      )
                     ) : (
                       /* 👤 Staff & Teachers Login Input */
                       <>
@@ -315,10 +400,13 @@ export function Login() {
                       {isLoading ? (
                         <>
                           <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                          Logging in…
+                          {mode === 'parent' && otpStep === 'mobile' ? 'Sending code…' : 'Verifying…'}
                         </>
                       ) : (
-                        <>{mode === 'parent' ? 'Login' : 'Sign In'} <ChevronRight className="h-4 w-4" /></>
+                        <>
+                          {mode === 'parent' ? (otpStep === 'mobile' ? 'Send Code' : 'Verify & Sign In') : 'Sign In'}
+                          <ChevronRight className="h-4 w-4" />
+                        </>
                       )}
                     </button>
                   </form>
