@@ -56,12 +56,10 @@ function getDelta(current: number, previous: number) {
   return roundPercent(((current - previous) / previous) * 100);
 }
 
-function createSummaryCards(data: ChartPoint[], teachers: number, parents: number, accountants: number, currentAttendance: number, exams: number) {
+function createSummaryCards(data: ChartPoint[], teachers: number, parents: number, accountants: number, currentAttendance: number, exams: number, activeBatches: number, pendingFees: number) {
   const lastPoint = data[data.length - 1];
   const revenueTotal = data.reduce((sum, item) => sum + Number(item.revenue ?? 0), 0);
   const studentCount = Number(lastPoint?.students ?? 0);
-  const activeBatches = Math.max(3, Math.round(studentCount / 35));
-  const pendingFees = Math.max(5000, Math.round(revenueTotal * 0.16));
 
   return [
     { label: 'Total Students', value: formatNumber(studentCount), note: 'Current enrolled learners' },
@@ -71,9 +69,7 @@ function createSummaryCards(data: ChartPoint[], teachers: number, parents: numbe
     { label: 'Active Batches', value: formatNumber(activeBatches), note: 'Live program batches' },
     { label: 'Total Revenue', value: formatCurrency(revenueTotal), note: 'Revenue across tracked months' },
     { label: 'Pending Fees', value: formatCurrency(pendingFees), note: 'Projected outstanding dues' },
-    { label: 'Regular Attendance', value: `${currentAttendance}%`, note: 'Average student attendance rate' },
-    { label: 'Bonus Attendance', value: `98%`, note: 'Special/Extra classes attendance rate' },
-    { label: 'Overall Attendance', value: `${Math.round((currentAttendance + 98) / 2)}%`, note: 'Weighted regular & bonus attendance' },
+    { label: 'Attendance', value: `${currentAttendance}%`, note: 'Average student attendance rate' },
     { label: 'Total Exams Conducted', value: formatNumber(exams), note: 'Exams scheduled and completed' },
   ];
 }
@@ -89,6 +85,8 @@ export function buildReportExportData(params: {
   accountants: number;
   attendancePercentage: number;
   examsConducted: number;
+  activeBatches: number;
+  pendingFees: number;
   branchName?: string;
   smsLogs?: any[];
 }): ReportExportData {
@@ -199,7 +197,7 @@ export function buildReportExportData(params: {
     academicYear: '2026-2027',
     generatedAt: new Date().toLocaleString('en-IN'),
     branchName: params.branchName ?? 'All Branches',
-    summaryCards: createSummaryCards(revenueSeries, params.teachers, params.parents, params.accountants, params.attendancePercentage, params.examsConducted),
+    summaryCards: createSummaryCards(revenueSeries, params.teachers, params.parents, params.accountants, params.attendancePercentage, params.examsConducted, params.activeBatches, params.pendingFees),
     charts,
     executiveSummary,
     recommendations,

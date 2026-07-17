@@ -9,42 +9,27 @@ import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { formatIndianCurrency } from '../lib/currency';
 import { utils, writeFile } from 'xlsx';
 import { apiFetch } from '../lib/apiClient';
+import { fetchAttendance } from '../lib/attendanceService';
+import { fetchFeeStats, type FeeStats } from '../lib/feeService';
+import { useExams } from '../lib/examService';
+import { refreshMarks, type MarkRecord } from '../lib/examMarksService';
 
-const monthlyData = [
-  { month: 'Jan', revenue: 45000, students: 180 },
-  { month: 'Feb', revenue: 52000, students: 195 },
-  { month: 'Mar', revenue: 48000, students: 210 },
-  { month: 'Apr', revenue: 61000, students: 225 },
-  { month: 'May', revenue: 55000, students: 240 },
-  { month: 'Jun', revenue: 67000, students: 260 },
-];
+const FEE_INCOME_CATEGORIES = ['Tuition Fee', 'Admission Fee', 'Special Class Fee', 'Material Purchase Fee'];
+const CONDUCTED_EXAM_STATUSES = ['attendance_completed', 'marks_entry_open', 'results_published', 'completed'];
+const EMPTY_FEE_STATS: FeeStats = { totalCollected: 0, totalPending: 0, overdueCount: 0, paidCount: 0, totalRecords: 0 };
 
-const attendanceData = [
-  { month: 'Jan', attendance: 91 },
-  { month: 'Feb', attendance: 92 },
-  { month: 'Mar', attendance: 90 },
-  { month: 'Apr', attendance: 94 },
-  { month: 'May', attendance: 93 },
-  { month: 'Jun', attendance: 95 },
-];
-
-const feeCollectionData = [
-  { month: 'Jan', collected: 38000 },
-  { month: 'Feb', collected: 42000 },
-  { month: 'Mar', collected: 39500 },
-  { month: 'Apr', collected: 47000 },
-  { month: 'May', collected: 45000 },
-  { month: 'Jun', collected: 51000 },
-];
-
-const examPerformanceData = [
-  { month: 'Jan', average: 72 },
-  { month: 'Feb', average: 74 },
-  { month: 'Mar', average: 71 },
-  { month: 'Apr', average: 76 },
-  { month: 'May', average: 75 },
-  { month: 'Jun', average: 78 },
-];
+function getLastMonths(count: number) {
+  const months: { key: string; label: string }[] = [];
+  const now = new Date();
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({
+      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+      label: d.toLocaleString('default', { month: 'short' }),
+    });
+  }
+  return months;
+}
 
 export function ReportsAnalytics() {
   const { user } = useAuth();
@@ -55,6 +40,13 @@ export function ReportsAnalytics() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [whatsappLogs, setWhatsappLogs] = useState<any[]>([]);
   const [submittedReports, setSubmittedReports] = useState<any[]>([]);
+  const [analyticsTeachers, setAnalyticsTeachers] = useState<any[]>([]);
+  const [analyticsParents, setAnalyticsParents] = useState<any[]>([]);
+  const [accountantsCount, setAccountantsCount] = useState(0);
+  const [attendanceRecords, setAttendanceRecords] = useState<any[]>([]);
+  const [examMarks, setExamMarks] = useState<MarkRecord[]>([]);
+  const [feeStats, setFeeStats] = useState<FeeStats>(EMPTY_FEE_STATS);
+  const exams = useExams();
 
   const fetchReports = async () => {
     try {
@@ -71,6 +63,39 @@ export function ReportsAnalytics() {
   useEffect(() => {
     fetchReports();
   }, [branchFilter]);
+
+  useEffect(() => {
+    if (user?.role !== 'super_admin') return;
+    const loadAnalyticsData = async () => {
+      try {
+        const branchParam = branchFilter ? `?branchId=${branchFilter}` : '';
+        const [resTeachers, resParents, resUsers, records, marks, stats] = await Promise.all([
+          apiFetch(`/api/teachers${branchParam}`),
+          apiFetch(`/api/parents${branchParam}`),
+          apiFetch(`/api/users`),
+          fetchAttendance(),
+          refreshMarks(),
+          fetchFeeStats(branchFilter ? { branchId: branchFilter } : {}),
+        ]);
+        if (resTeachers.ok) setAnalyticsTeachers(await resTeachers.json());
+        if (resParents.ok) setAnalyticsParents(await resParents.json());
+        if (resUsers.ok) {
+          const usersList = await resUsers.json();
+          setAccountantsCount(
+            Array.isArray(usersList)
+              ? usersList.filter((u: any) => u.roles?.includes('accountant') && (!branchFilter || u.branchId === branchFilter)).length
+              : 0
+          );
+        }
+        setAttendanceRecords(Array.isArray(records) ? records : []);
+        setExamMarks(Array.isArray(marks) ? marks : []);
+        setFeeStats(stats);
+      } catch (err) {
+        console.error('Failed to load analytics data in reports', err);
+      }
+    };
+    void loadAnalyticsData();
+  }, [branchFilter, user?.role]);
 
   const handleApproveReport = async (reportId: number) => {
     try {
@@ -256,20 +281,104 @@ export function ReportsAnalytics() {
     void loadLogs();
   }, [branchFilter, user]);
 
+  const trendMonths = useMemo(() => getLastMonths(6), []);
+
+  const scopedAnalyticsStudents = useMemo(
+    () => students.filter((s: any) => !branchFilter || s.branchId === branchFilter),
+    [students, branchFilter]
+  );
+
+  const monthlyData = useMemo(() => {
+    const revenueByMonth = new Map<string, number>();
+    ledger.forEach((t: any) => {
+      if (t.type === 'Income' && t.date) {
+        const key = t.date.slice(0, 7);
+        revenueByMonth.set(key, (revenueByMonth.get(key) || 0) + (t.amount || 0));
+      }
+    });
+    return trendMonths.map(({ key, label }) => ({
+      month: label,
+      revenue: revenueByMonth.get(key) || 0,
+      students: scopedAnalyticsStudents.filter((s: any) => s.admissionDate && s.admissionDate.slice(0, 7) <= key).length,
+    }));
+  }, [ledger, scopedAnalyticsStudents, trendMonths]);
+
+  const attendanceData = useMemo(() => {
+    const byMonth = new Map<string, { present: number; total: number }>();
+    attendanceRecords.forEach((r: any) => {
+      if (!r.date) return;
+      const key = r.date.slice(0, 7);
+      const bucket = byMonth.get(key) || { present: 0, total: 0 };
+      bucket.total += 1;
+      if (r.status === 'present') bucket.present += 1;
+      byMonth.set(key, bucket);
+    });
+    return trendMonths.map(({ key, label }) => {
+      const bucket = byMonth.get(key);
+      return { month: label, attendance: bucket && bucket.total > 0 ? Math.round((bucket.present / bucket.total) * 100) : 0 };
+    });
+  }, [attendanceRecords, trendMonths]);
+
+  const feeCollectionData = useMemo(() => {
+    const byMonth = new Map<string, number>();
+    ledger.forEach((t: any) => {
+      if (t.type === 'Income' && t.date && FEE_INCOME_CATEGORIES.includes(t.category)) {
+        const key = t.date.slice(0, 7);
+        byMonth.set(key, (byMonth.get(key) || 0) + (t.amount || 0));
+      }
+    });
+    return trendMonths.map(({ key, label }) => ({ month: label, collected: byMonth.get(key) || 0 }));
+  }, [ledger, trendMonths]);
+
+  const examPerformanceData = useMemo(() => {
+    const examDateById = new Map(exams.map((e) => [e.id, e.date]));
+    const byMonth = new Map<string, { sum: number; count: number }>();
+    examMarks.forEach((m) => {
+      const date = examDateById.get(m.examId);
+      if (!date) return;
+      const key = date.slice(0, 7);
+      const bucket = byMonth.get(key) || { sum: 0, count: 0 };
+      bucket.sum += m.percentage || 0;
+      bucket.count += 1;
+      byMonth.set(key, bucket);
+    });
+    return trendMonths.map(({ key, label }) => {
+      const bucket = byMonth.get(key);
+      return { month: label, average: bucket && bucket.count > 0 ? Math.round(bucket.sum / bucket.count) : 0 };
+    });
+  }, [examMarks, exams, trendMonths]);
+
+  const activeBatchesCount = useMemo(() => {
+    const names = new Set(
+      scopedAnalyticsStudents
+        .filter((s: any) => !s.status || s.status === 'Active' || s.status === 'Enrolled')
+        .map((s: any) => s.className)
+        .filter(Boolean)
+    );
+    return names.size;
+  }, [scopedAnalyticsStudents]);
+
+  const examsConductedCount = useMemo(
+    () => exams.filter((e) => CONDUCTED_EXAM_STATUSES.includes(e.status)).length,
+    [exams]
+  );
+
   const reportData = useMemo(() => buildReportExportData({
     monthlyData,
     attendanceData,
     feeCollectionData,
     examPerformanceData,
     generatedBy: user?.name ?? 'Super Admin',
-    teachers: 42,
-    parents: 850,
-    accountants: 5,
-    attendancePercentage: 95,
-    examsConducted: 18,
+    teachers: analyticsTeachers.length,
+    parents: analyticsParents.length,
+    accountants: accountantsCount,
+    attendancePercentage: attendanceData.at(-1)?.attendance ?? 0,
+    examsConducted: examsConductedCount,
+    activeBatches: activeBatchesCount,
+    pendingFees: feeStats.totalPending,
     branchName: activeBranchLabel,
     smsLogs: whatsappLogs
-  }), [activeBranchLabel, user?.name, whatsappLogs]);
+  }), [monthlyData, attendanceData, feeCollectionData, examPerformanceData, activeBranchLabel, user?.name, whatsappLogs, analyticsTeachers, analyticsParents, accountantsCount, examsConductedCount, activeBatchesCount, feeStats]);
 
   const exportPdf = async () => {
     if (!reportData.summaryCards.length) {
