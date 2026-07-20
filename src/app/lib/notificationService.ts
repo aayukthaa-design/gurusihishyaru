@@ -33,6 +33,10 @@ export interface AppNotification {
   branchId?: string;
   status: NotificationStatus;
   read: boolean;
+  /** Whether the CURRENT user has read this — per-recipient, unlike the shared status/read columns which reflect only the most recent reader across everyone the notification was sent to. */
+  isReadByMe?: boolean;
+  /** How many distinct recipients have read this so far. */
+  readCount?: number;
   createdAt: string;
   readAt?: string | null;
   readBy?: string | null;
@@ -458,6 +462,15 @@ export function getVisibleNotificationsForUser(
   });
 }
 
+// Prefers the per-recipient isReadByMe flag (from the backend's notification_reads
+// table) over the shared status/read columns, which only ever reflect whichever
+// recipient read the notification most recently — not this user specifically.
+export function isUnreadForMe(notification: AppNotification): boolean {
+  if (notification.status === 'deleted' || notification.status === 'expired') return false;
+  if (notification.isReadByMe !== undefined) return !notification.isReadByMe;
+  return notification.status === 'unread';
+}
+
 export function getNotificationStats(
   notifications: AppNotification[],
   user?: NotificationUserLike | null
@@ -466,8 +479,8 @@ export function getNotificationStats(
 
   return {
     total: scoped.length,
-    unread: scoped.filter((notification) => notification.status === 'unread').length,
-    read: scoped.filter((notification) => notification.status === 'read').length,
+    unread: scoped.filter((notification) => isUnreadForMe(notification)).length,
+    read: scoped.filter((notification) => !isUnreadForMe(notification) && notification.status !== 'deleted' && notification.status !== 'scheduled').length,
     deleted: scoped.filter((notification) => notification.status === 'deleted').length,
     scheduled: scoped.filter((notification) => notification.status === 'scheduled').length,
   };
@@ -559,4 +572,23 @@ export async function exportNotificationsReport(
 
 export function markRead(id: string): void {
   markNotificationAsRead(id);
+}
+
+export interface NotificationReadEntry {
+  userId: string;
+  userName: string;
+  userRole: string;
+  readAt: string;
+}
+
+// Staff-only (admin/super_admin/accountant) — who has actually read a given
+// broadcast notification, and how many recipients it was sent to in total.
+export async function fetchNotificationReads(id: string): Promise<{ readCount: number; totalRecipients: number; reads: NotificationReadEntry[] } | null> {
+  try {
+    const response = await apiFetch(`${API_BASE}/api/notifications/${id}/reads`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
 }

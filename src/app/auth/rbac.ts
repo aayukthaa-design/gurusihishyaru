@@ -186,9 +186,11 @@ export function hasPermission(role: Role, module: Module, permission: Permission
 }
 
 export function canAccessRoute(role: Role, path: string): boolean {
-  // Teacher Attendance must be restricted to Admin and Super Admin only.
+  // Marking Teacher Attendance is restricted to Admin/Super Admin — accountants
+  // and teachers still get in via the 'attendance' module below, but the page
+  // itself (TeacherAttendance.tsx) renders everything read-only for them.
   if (path === '/teacher-attendance' || path.startsWith('/teacher-attendance')) {
-    return role === 'admin' || role === 'super_admin';
+    return role === 'admin' || role === 'super_admin' || role === 'teacher' || role === 'accountant';
   }
 
   for (const [module, routes] of Object.entries(MODULE_ROUTES)) {

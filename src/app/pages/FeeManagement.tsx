@@ -3,6 +3,7 @@ import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { getBranches } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
+import { useStudents, refreshStudents } from '../lib/studentService';
 import {
   useFeeRecords,
   refreshFeeRecords,
@@ -15,7 +16,7 @@ import {
   FeeStats,
   FeeRecord,
 } from '../lib/feeService';
-import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus } from 'lucide-react';
+import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus } from 'lucide-react';
 
 const STATUS_CONFIG = {
   Paid:            { icon: CheckCircle2, color: 'text-green-600 dark:text-green-400',  bg: 'bg-green-100 dark:bg-green-900/40' },
@@ -35,6 +36,7 @@ export function FeeManagement() {
 
   const records = useFeeRecords();
   const structures = useFeeStructures();
+  const students = useStudents();
   const [stats, setStats] = useState<FeeStats>({ totalCollected: 0, totalPending: 0, overdueCount: 0, paidCount: 0, totalRecords: 0 });
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +64,7 @@ export function FeeManagement() {
       refreshFeeRecords(user),
       isAccountantOrAdmin ? refreshFeeStructures(user) : Promise.resolve([]),
       isAccountantOrAdmin ? fetchFeeStats(user) : Promise.resolve(null),
+      isAccountantOrAdmin ? refreshStudents() : Promise.resolve([]),
     ]).then(([, , statsResult]) => {
       if (statsResult) setStats(statsResult);
     }).finally(() => setIsLoading(false));
@@ -80,6 +83,19 @@ export function FeeManagement() {
   }), [records, search, filter, branchFilter, user?.role]);
 
   const visible = filtered.slice(0, showAll ? filtered.length : 5);
+
+  // Admitted students who don't have a single fee record yet — either no fee
+  // structure exists for their class, or one was added after they were
+  // admitted and "Generate for class" hasn't been re-run.
+  const studentsWithoutFees = useMemo(() => {
+    const recordedStudentIds = new Set(records.map((r) => r.studentId));
+    return students.filter((s) => {
+      if (s.status !== 'Active') return false;
+      if (recordedStudentIds.has(s.id)) return false;
+      if (user?.role === 'super_admin' && branchFilter) return s.branchId === branchFilter;
+      return true;
+    });
+  }, [students, records, branchFilter, user?.role]);
 
   async function handleCreateStructure(e: React.FormEvent) {
     e.preventDefault();
@@ -241,6 +257,36 @@ export function FeeManagement() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {isAccountantOrAdmin && studentsWithoutFees.length > 0 && (
+          <div className="rounded-2xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 p-5">
+            <div className="flex items-start gap-3">
+              <UserPlus className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                  {studentsWithoutFees.length} admitted student{studentsWithoutFees.length > 1 ? 's have' : ' has'} no fee record yet
+                </p>
+                <p className="mt-0.5 text-xs text-amber-700/80 dark:text-amber-400/80">
+                  No fee structure exists yet for their class — set one up below and it'll generate their fee status automatically.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {studentsWithoutFees.slice(0, 8).map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => { setStructureForm((f) => ({ ...f, className: s.className })); setShowSetup(true); }}
+                      className="rounded-full border border-amber-300 dark:border-amber-800 bg-card px-3 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                    >
+                      {s.fullName} · {s.className}
+                    </button>
+                  ))}
+                  {studentsWithoutFees.length > 8 && (
+                    <span className="px-3 py-1 text-xs text-amber-700/70 dark:text-amber-400/70">+{studentsWithoutFees.length - 8} more</span>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         )}
 

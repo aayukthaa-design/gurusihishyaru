@@ -4,17 +4,15 @@ import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName } from '../lib/branchService';
 import { useTeacherProfiles, type Teacher } from './TeacherManagement';
 import {
-  getSalaryPerClassRecord,
-  getSalaryRecordForMonth,
-  getTeacherAttendanceRecords,
-  getTeacherAttendanceHistory,
-  saveTeacherAttendanceRecords,
-  setSalaryPerClass,
+  fetchTeacherAttendance,
+  fetchSalaryRecords,
+  saveTeacherAttendanceBulk,
+  saveSalaryRecord,
+  summarizeTeacherAttendance,
   type SalaryRecord,
   type TeacherAttendanceEntry,
   type TeacherAttendanceStatus,
   validateAttendanceDuplicate,
-  isSalaryLocked,
   calculateSalaryFromClasses,
 } from '../lib/teacherSalaryService';
 import { CalendarDays, Save, ClipboardCheck, AlertCircle } from 'lucide-react';
@@ -44,12 +42,15 @@ export function TeacherAttendance() {
   const [departmentFilter, setDepartmentFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | TeacherAttendanceStatus>('all');
   const [attendance, setAttendance] = useState<Record<string, TeacherAttendanceStatus>>({});
+  const [monthAttendance, setMonthAttendance] = useState<TeacherAttendanceEntry[]>([]);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [salaryTeacherId, setSalaryTeacherId] = useState('');
   const [classesConducted, setClassesConducted] = useState(0);
   const [salaryPerClass, setSalaryPerClass] = useState(0);
   const [salarySaved, setSalarySaved] = useState(false);
   const [salaryRecord, setSalaryRecord] = useState<SalaryRecord | null>(null);
+  const [salaryMonthAttendance, setSalaryMonthAttendance] = useState<TeacherAttendanceEntry[]>([]);
 
   const allowedTeachers = useMemo(() => {
     return teachers.filter((teacher) => {
@@ -65,19 +66,29 @@ export function TeacherAttendance() {
     }
   }, [allowedTeachers, salaryTeacherId]);
 
+  const attendanceMonth = attendanceDate.slice(0, 7);
+  const branchIdForQuery = user?.role === 'super_admin' ? (branchFilter || undefined) : user?.branchId;
+
+  const loadMonthAttendance = async () => {
+    const entries = await fetchTeacherAttendance({ month: attendanceMonth, branchId: branchIdForQuery });
+    setMonthAttendance(entries);
+  };
+
+  useEffect(() => {
+    loadMonthAttendance();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attendanceMonth, branchIdForQuery]);
+
   useEffect(() => {
     if (!isAdminOrSuper) return;
-    const records = getTeacherAttendanceRecords().filter((record) => record.date === attendanceDate);
     const nextState: Record<string, TeacherAttendanceStatus> = {};
-
     allowedTeachers.forEach((teacher) => {
-      const current = records.find((record) => record.teacherId === teacher.id);
+      const current = monthAttendance.find((record) => record.teacherId === teacher.id && record.date === attendanceDate);
       nextState[teacher.id] = current?.status ?? 'present';
     });
-
     setAttendance(nextState);
     setSaved(false);
-  }, [allowedTeachers, attendanceDate, isAdminOrSuper]);
+  }, [allowedTeachers, attendanceDate, isAdminOrSuper, monthAttendance]);
 
   useEffect(() => {
     const teacher = allowedTeachers.find((item) => item.id === salaryTeacherId);
@@ -89,12 +100,21 @@ export function TeacherAttendance() {
       return;
     }
 
-    const existing = getSalaryRecordForMonth(teacher.id, salaryMonth);
-    const salaryClassRecord = getSalaryPerClassRecord(teacher.id, salaryMonth);
-    setSalaryRecord(existing);
-    setClassesConducted(salaryClassRecord?.classesConducted ?? 0);
-    setSalaryPerClass(salaryClassRecord?.salaryPerClass ?? 0);
-    setSalarySaved(false);
+    let cancelled = false;
+    (async () => {
+      const [records, entries] = await Promise.all([
+        fetchSalaryRecords({ teacherId: teacher.id, month: salaryMonth }),
+        fetchTeacherAttendance({ teacherId: teacher.id, month: salaryMonth }),
+      ]);
+      if (cancelled) return;
+      const existing = records[0] ?? null;
+      setSalaryRecord(existing);
+      setClassesConducted(existing?.classesConducted ?? 0);
+      setSalaryPerClass(existing?.salaryPerClass ?? 0);
+      setSalaryMonthAttendance(entries);
+      setSalarySaved(false);
+    })();
+    return () => { cancelled = true; };
   }, [allowedTeachers, salaryTeacherId, salaryMonth]);
 
   const filteredTeachers = useMemo(() => {
@@ -117,12 +137,11 @@ export function TeacherAttendance() {
   }, [attendance, filteredTeachers]);
 
   const history = useMemo(() => {
-    const month = attendanceDate.slice(0, 7);
     return filteredTeachers.map((teacher) => ({
       teacher,
-      history: getTeacherAttendanceHistory(teacher.id, month),
+      history: summarizeTeacherAttendance(monthAttendance, teacher.id, attendanceMonth),
     }));
-  }, [attendanceDate, filteredTeachers]);
+  }, [attendanceMonth, filteredTeachers, monthAttendance]);
 
   const toggleStatus = (teacherId: string, status: TeacherAttendanceStatus) => {
     setAttendance((prev) => ({ ...prev, [teacherId]: status }));
@@ -138,22 +157,18 @@ export function TeacherAttendance() {
     setSaved(false);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!isAdminOrSuper) {
       alert('Only Admin and Super Admin can mark teacher attendance.');
       return;
     }
 
-    const entries: TeacherAttendanceEntry[] = filteredTeachers.map((teacher) => ({
-      id: `${teacher.id}-${attendanceDate}`,
+    const entries = filteredTeachers.map((teacher) => ({
       teacherId: teacher.id,
       date: attendanceDate,
       status: attendance[teacher.id] || 'present',
       branchId: teacher.branchId,
       department: teacher.department,
-      markedBy: user?.name || 'Admin',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
     }));
 
     const duplicateError = validateAttendanceDuplicate(entries);
@@ -162,15 +177,23 @@ export function TeacherAttendance() {
       return;
     }
 
-    saveTeacherAttendanceRecords(entries);
-    setSaved(true);
+    setSaving(true);
+    try {
+      await saveTeacherAttendanceBulk(entries);
+      await loadMonthAttendance();
+      setSaved(true);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save attendance.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const selectedSalaryTeacher = allowedTeachers.find((teacher) => teacher.id === salaryTeacherId);
-  const salaryAttendance = selectedSalaryTeacher ? getTeacherAttendanceHistory(selectedSalaryTeacher.id, salaryMonth) : null;
+  const salaryAttendance = selectedSalaryTeacher ? summarizeTeacherAttendance(salaryMonthAttendance, selectedSalaryTeacher.id, salaryMonth) : null;
   const salaryLocked = salaryRecord?.isLocked ?? false;
 
-  const handleSaveSalaryPerClass = () => {
+  const handleSaveSalaryPerClass = async () => {
     if (!isAdminOrSuper || !selectedSalaryTeacher) {
       alert('Only Admin and Super Admin can save salary settings.');
       return;
@@ -186,9 +209,20 @@ export function TeacherAttendance() {
       return;
     }
 
-    setSalaryPerClass(selectedSalaryTeacher.id, salaryMonth, classesConducted, salaryPerClass, selectedSalaryTeacher.branchId);
-    setSalarySaved(true);
-    alert('Salary per class saved successfully. Accountant can now review and process the payslip.');
+    try {
+      const saved = await saveSalaryRecord({
+        teacher: selectedSalaryTeacher,
+        month: salaryMonth,
+        classesConducted,
+        salaryPerClass,
+        attendance: salaryAttendance ?? { teacherId: selectedSalaryTeacher.id, present: 0, absent: 0, halfDay: 0, leave: 0, workingDays: 0 },
+      });
+      setSalaryRecord(saved);
+      setSalarySaved(true);
+      alert('Salary per class saved successfully. Accountant can now review and process the payslip.');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save salary settings.');
+    }
   };
 
   return (
@@ -282,9 +316,9 @@ export function TeacherAttendance() {
               <h2 className="text-lg font-semibold text-foreground">Teacher Attendance Register</h2>
               <p className="text-sm text-muted-foreground">Teachers shown are limited to the active branch scope.</p>
             </div>
-            <button type="button" onClick={handleSave} disabled={!isAdminOrSuper || isReadOnly} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button" onClick={handleSave} disabled={!isAdminOrSuper || isReadOnly || saving} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
               <Save className="h-4 w-4" />
-              {saved ? 'Saved' : 'Save Attendance'}
+              {saving ? 'Saving…' : saved ? 'Saved' : 'Save Attendance'}
             </button>
           </div>
 
@@ -462,7 +496,7 @@ export function TeacherAttendance() {
             {history.map(({ teacher, history: summary }) => (
               <div key={teacher.id} className="rounded-xl border border-border bg-secondary/30 p-4">
                 <p className="font-semibold text-foreground">{teacher.firstName} {teacher.lastName}</p>
-                <p className="text-sm text-muted-foreground">{teacher.department || 'Department not set'} • {attendanceDate.slice(0, 7)}</p>
+                <p className="text-sm text-muted-foreground">{teacher.department || 'Department not set'} • {attendanceMonth}</p>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
                   <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Present</span><span className="font-semibold text-foreground">{summary.present}</span></div>
                   <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Absent</span><span className="font-semibold text-foreground">{summary.absent}</span></div>

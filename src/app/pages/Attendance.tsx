@@ -1,13 +1,11 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName } from '../lib/branchService';
 import { getStudentsForClass } from '../lib/studentService';
 import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceService';
 import { saveAttendanceAPI } from '../lib/attendanceService';
-import { saveTeacherAttendanceRecords, getAttendanceEntriesForDate, getTeacherAttendanceHistory, type TeacherAttendanceStatus, validateAttendanceDuplicate } from '../lib/teacherSalaryService';
-import { useTeacherProfiles, type Teacher } from './TeacherManagement';
-import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, Users, CalendarDays } from 'lucide-react';
+import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 
 
@@ -19,7 +17,6 @@ const TODAY_ISO = new Date().toISOString().split('T')[0];
 export function Attendance() {
   const { user } = useAuth();
   const branches = getBranches();
-  const teachers = useTeacherProfiles();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const [selectedClass, setSelectedClass] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
@@ -29,35 +26,16 @@ export function Attendance() {
   const [loading, setLoading] = useState(false);
   const [recentRecords, setRecentRecords] = useState<any[]>([]);
   const [showAllRecent, setShowAllRecent] = useState(false);
-  const [teacherAttendanceDate, setTeacherAttendanceDate] = useState(TODAY_ISO);
-  const [teacherBranchFilter, setTeacherBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
-  const [teacherDepartmentFilter, setTeacherDepartmentFilter] = useState('');
-  const [teacherSearch, setTeacherSearch] = useState('');
-  const [teacherSelectedTeacher, setTeacherSelectedTeacher] = useState('');
-  const [teacherStatusFilter, setTeacherStatusFilter] = useState<'all' | TeacherAttendanceStatus>('all');
-  const [teacherAttendance, setTeacherAttendance] = useState<Record<string, TeacherAttendanceStatus>>({});
-  const [teacherAttendanceSaved, setTeacherAttendanceSaved] = useState(false);
 
   // WhatsApp Specific States
   const [whatsappStatus, setWhatsappStatus] = useState<Record<string, 'idle' | 'sending' | 'success' | 'failed'>>({});
   const [officialContact, setOfficialContact] = useState('6363099546');
-  
+
   // Modals States
   const [showSingleModal, setShowSingleModal] = useState(false);
   const [activeStudent, setActiveStudent] = useState<any>(null);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [bulkSending, setBulkSending] = useState(false);
-
-  useEffect(() => {
-    if (!isAdminOrSuper) return;
-    const entries = getAttendanceEntriesForDate(teacherAttendanceDate);
-    const initialState: Record<string, TeacherAttendanceStatus> = {};
-    teachers.filter((teacher) => !teacherBranchFilter || teacher.branchId === teacherBranchFilter).forEach((teacher) => {
-      const current = entries.find((entry) => entry.teacherId === teacher.id);
-      initialState[teacher.id] = current?.status ?? 'present';
-    });
-    setTeacherAttendance(initialState);
-  }, [teacherAttendanceDate, teacherBranchFilter, teachers, isAdminOrSuper]);
 
   // Fetch settings to load official tutorial contact number
   useEffect(() => {
@@ -322,28 +300,6 @@ export function Attendance() {
     setShowBulkModal(true);
   };
 
-  const filteredTeachers = useMemo(() => teachers.filter((teacher) => {
-    const matchesBranch = !teacherBranchFilter || teacher.branchId === teacherBranchFilter;
-    const matchesTeacher = !teacherSelectedTeacher || teacher.id === teacherSelectedTeacher;
-    const matchesDepartment = !teacherDepartmentFilter || (teacher.department || '').toLowerCase().includes(teacherDepartmentFilter.toLowerCase());
-    const matchesSearch = !teacherSearch || `${teacher.firstName} ${teacher.lastName} ${teacher.department || ''}`.toLowerCase().includes(teacherSearch.toLowerCase());
-    return matchesBranch && matchesTeacher && matchesDepartment && matchesSearch;
-  }), [teacherBranchFilter, teacherDepartmentFilter, teacherSearch, teacherSelectedTeacher, teachers]);
-
-  const teacherAttendanceSummary = useMemo(() => {
-    const total = filteredTeachers.length;
-    const present = filteredTeachers.filter((teacher) => teacherAttendance[teacher.id] === 'present').length;
-    const absent = filteredTeachers.filter((teacher) => teacherAttendance[teacher.id] === 'absent').length;
-    const halfDay = filteredTeachers.filter((teacher) => teacherAttendance[teacher.id] === 'half_day').length;
-    const leave = filteredTeachers.filter((teacher) => teacherAttendance[teacher.id] === 'leave').length;
-    return { total, present, absent, halfDay, leave };
-  }, [filteredTeachers, teacherAttendance]);
-
-  const teacherHistory = useMemo(() => {
-    const month = teacherAttendanceDate.slice(0, 7);
-    return filteredTeachers.map((teacher) => ({ teacher, history: getTeacherAttendanceHistory(teacher.id, month) }));
-  }, [filteredTeachers, teacherAttendanceDate]);
-
   const presentCount = Object.values(attendance).filter((v) => v === 'present').length;
   const absentCount  = Object.values(attendance).filter((v) => v === 'absent').length;
   const unmarked     = students.filter((s) => !attendance[s.id]).length;
@@ -352,47 +308,6 @@ export function Attendance() {
   const pendingWhatsappCount = students.filter(
     (s) => attendance[s.id] === 'absent' && whatsappStatus[s.id] !== 'success'
   ).length;
-
-  const toggleTeacherAttendance = (teacherId: string, status: TeacherAttendanceStatus) => {
-    setTeacherAttendance((prev) => ({ ...prev, [teacherId]: status }));
-    setTeacherAttendanceSaved(false);
-  };
-
-  const markAllTeacherAttendance = (status: TeacherAttendanceStatus) => {
-    const next = filteredTeachers.reduce<Record<string, TeacherAttendanceStatus>>((acc, teacher) => {
-      acc[teacher.id] = status;
-      return acc;
-    }, {});
-    setTeacherAttendance((prev) => ({ ...prev, ...next }));
-    setTeacherAttendanceSaved(false);
-  };
-
-  const handleSaveTeacherAttendance = () => {
-    if (!isAdminOrSuper) {
-      alert('Only Admin and Super Admin can manage teacher attendance.');
-      return;
-    }
-
-    const entries = filteredTeachers.map((teacher) => ({
-      id: `${teacher.id}-${teacherAttendanceDate}`,
-      teacherId: teacher.id,
-      date: teacherAttendanceDate,
-      status: teacherAttendance[teacher.id] || 'present',
-      branchId: teacher.branchId,
-      department: teacher.department,
-      createdAt: new Date().toISOString(),
-    }));
-
-    const duplicateError = validateAttendanceDuplicate(entries);
-    if (duplicateError) {
-      alert(duplicateError);
-      return;
-    }
-
-    saveTeacherAttendanceRecords(entries);
-    setTeacherAttendanceSaved(true);
-  };
-
 
   return (
     <div className="flex-1 bg-background">

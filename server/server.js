@@ -12,6 +12,7 @@ import extract from 'extract-zip';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { WhatsAppService } from './whatsappService.js';
+import { sendPasswordResetOtpEmail } from './emailService.js';
 
 // Safety net: every route handler already catches its own errors, but this
 // guards against anything that slips through (a missed try/catch, a
@@ -228,7 +229,11 @@ function matchesUserScope(notification, user) {
   if (!user) return true;
   if (user.role === 'super_admin') return true;
 
-  const roles = parseJsonList(notification.roles);
+  // notification.roles is already a parsed array by the time this is called
+  // (mapRowToNotification parses it) — re-running parseJsonList (which expects
+  // a raw JSON string) on an array silently returned [] every time, which
+  // meant parent/teacher role-broadcast notifications never matched anyone.
+  const roles = Array.isArray(notification.roles) ? notification.roles : parseJsonList(notification.roles);
   if (roles.length > 0 && !roles.includes(user.role) && !roles.includes('all') && !roles.includes('everyone')) {
     return false;
   }
@@ -943,6 +948,62 @@ async function initDb() {
     }
   }
 
+  // Seed default General / Security / Data Retention settings — reuses the same
+  // generic key-value whatsapp_settings table (already a general settings store,
+  // not WhatsApp-specific despite the name) rather than adding new tables.
+  const generalSettingsDefaults = [
+    { key: 'institute_name', value: 'Guru Shishyaru Tutorials' },
+    { key: 'institute_timezone', value: 'Asia/Kolkata' },
+    { key: 'institute_language', value: 'English' },
+    { key: 'institute_date_format', value: 'DD/MM/YYYY' },
+    { key: 'session_timeout_minutes', value: '1440' },
+    { key: 'remember_me_days', value: '7' },
+    { key: 'min_password_length', value: '8' },
+    { key: 'require_uppercase', value: 'false' },
+    { key: 'require_number', value: 'false' },
+    { key: 'require_symbol', value: 'false' },
+    { key: 'data_retention_days', value: '365' },
+  ];
+  for (const k of generalSettingsDefaults) {
+    await db.run('INSERT OR IGNORE INTO whatsapp_settings (key, value) VALUES (?, ?)', k.key, k.value);
+  }
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      userId TEXT PRIMARY KEY,
+      muteAll INTEGER DEFAULT 0,
+      highPriorityOnly INTEGER DEFAULT 0,
+      updatedAt TEXT
+    );
+  `);
+
+  // Per-recipient read tracking for broadcast notifications. The notifications
+  // table itself only has ONE shared read/readBy column, so previously the
+  // first person to read a broadcast notification (e.g. sent to all parents)
+  // silently marked it "read" for everyone else too, and there was no way for
+  // an admin to see how many recipients had actually seen it.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS notification_reads (
+      notificationId TEXT NOT NULL,
+      userId TEXT NOT NULL,
+      userName TEXT,
+      userRole TEXT,
+      readAt TEXT,
+      PRIMARY KEY (notificationId, userId)
+    );
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS password_reset_otps (
+      email TEXT PRIMARY KEY,
+      code TEXT,
+      userId TEXT,
+      expiresAt TEXT,
+      attempts INTEGER DEFAULT 0,
+      createdAt TEXT
+    );
+  `);
+
 
   // Seed students & parent relationships
   const studentsCount = await db.get('SELECT COUNT(1) as c FROM students');
@@ -1225,6 +1286,67 @@ async function initDb() {
     );
   `);
 
+  // --- Teacher Attendance & Salary/Payroll tables ---
+  // Previously these lived entirely in browser localStorage (per-device, not
+  // shared, and lost on cache clear) — moved to the real database so
+  // attendance and payroll are consistent across users/devices.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS teacher_attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacherId TEXT NOT NULL,
+      date TEXT NOT NULL,
+      status TEXT NOT NULL,
+      branchId TEXT,
+      department TEXT,
+      markedBy TEXT,
+      createdAt TEXT,
+      updatedAt TEXT,
+      UNIQUE(teacherId, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS salary_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacherId TEXT NOT NULL,
+      teacherName TEXT,
+      employeeId TEXT,
+      branchId TEXT,
+      department TEXT,
+      designation TEXT,
+      month TEXT NOT NULL,
+      salaryType TEXT,
+      salaryAmount REAL,
+      salaryPerClass REAL DEFAULT 0,
+      classesConducted INTEGER DEFAULT 0,
+      presentDays INTEGER DEFAULT 0,
+      halfDays INTEGER DEFAULT 0,
+      calculatedSalary REAL DEFAULT 0,
+      status TEXT DEFAULT 'Draft',
+      paidDate TEXT,
+      paidBy TEXT,
+      remarks TEXT,
+      isLocked INTEGER DEFAULT 0,
+      lockedDate TEXT,
+      lockedBy TEXT,
+      createdAt TEXT,
+      updatedAt TEXT,
+      UNIQUE(teacherId, month)
+    );
+
+    CREATE TABLE IF NOT EXISTS salary_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacherId TEXT,
+      teacherName TEXT,
+      month TEXT,
+      action TEXT,
+      previousValue REAL,
+      newValue REAL,
+      changedBy TEXT,
+      userRole TEXT,
+      branchId TEXT,
+      timestamp TEXT
+    );
+  `);
+
   return db;
 }
 
@@ -1289,8 +1411,28 @@ async function main() {
     };
   }
 
-  function signToken(userRow, rememberMe) {
+  async function getSetting(key, fallback) {
+    const row = await db.get('SELECT value FROM whatsapp_settings WHERE key = ?', key);
+    return row?.value ?? fallback;
+  }
+
+  // Reads the Security settings (System Settings > Security) so session length
+  // is configurable instead of hardcoded — falls back to the original 24h/7d
+  // defaults if the settings row is missing or invalid.
+  async function signToken(userRow, rememberMe) {
     const roles = parseJsonList(userRow.roles);
+    let expiresIn = rememberMe ? REMEMBER_ME_EXPIRY : TOKEN_EXPIRY;
+    try {
+      if (rememberMe) {
+        const days = Number(await getSetting('remember_me_days', '7'));
+        if (days > 0) expiresIn = `${days}d`;
+      } else {
+        const minutes = Number(await getSetting('session_timeout_minutes', '1440'));
+        if (minutes > 0) expiresIn = `${minutes}m`;
+      }
+    } catch {
+      // fall through to the hardcoded defaults above
+    }
     return jwt.sign(
       {
         sub: userRow.id,
@@ -1301,8 +1443,26 @@ async function main() {
         branchId: userRow.branchId || null,
       },
       JWT_SECRET,
-      { expiresIn: rememberMe ? REMEMBER_ME_EXPIRY : TOKEN_EXPIRY }
+      { expiresIn }
     );
+  }
+
+  // Enforces the Security > Password Policy settings. Only applied where a
+  // human explicitly chooses a password (login change-password, admin-set
+  // custom password) — not to system-generated temporary passwords (e.g. a
+  // new account's initial password defaulting to their mobile number), which
+  // are forced through change-password on first login anyway.
+  async function validatePasswordPolicy(password) {
+    const minLength = Number(await getSetting('min_password_length', '8')) || 8;
+    const requireUppercase = (await getSetting('require_uppercase', 'false')) === 'true';
+    const requireNumber = (await getSetting('require_number', 'false')) === 'true';
+    const requireSymbol = (await getSetting('require_symbol', 'false')) === 'true';
+
+    if (String(password).length < minLength) return `Password must be at least ${minLength} characters`;
+    if (requireUppercase && !/[A-Z]/.test(password)) return 'Password must contain at least one uppercase letter';
+    if (requireNumber && !/[0-9]/.test(password)) return 'Password must contain at least one number';
+    if (requireSymbol && !/[^A-Za-z0-9]/.test(password)) return 'Password must contain at least one symbol';
+    return null;
   }
 
   function authMiddleware(req, res, next) {
@@ -1376,11 +1536,95 @@ async function main() {
       }
 
       const rememberMe = Boolean(req.body?.rememberMe);
-      const token = signToken(row, rememberMe);
+      const token = await signToken(row, rememberMe);
       res.json({ token, user: mapUserRow(row) });
     } catch (err) {
       console.error('Login error:', err);
       res.status(500).json({ error: 'Login failed' });
+    }
+  });
+
+  // --- Forgot Password (staff/teacher/admin — email OTP via Brevo) ---
+  // Two-step, matching the parent-login OTP pattern: request a code, then use
+  // it to set a new password directly (no email "reset link", since a real
+  // outbound email channel now exists via Brevo but a working reset LINK would
+  // still need a hosted frontend page to land on — the code-based flow avoids
+  // that entirely and proves email ownership just as well).
+  app.post('/api/auth/forgot-password/request-otp', authLimiter, async (req, res) => {
+    try {
+      const identifier = String(req.body?.identifier || '').trim();
+      if (!identifier) return res.status(400).json({ error: 'Email or mobile number is required' });
+
+      const genericResponse = { success: true, message: 'If an account with that email/mobile exists and has an email on file, a reset code has been sent.' };
+
+      const user = await db.get(
+        'SELECT * FROM users WHERE (LOWER(email) = LOWER(?) OR mobile = ?) AND status = ?',
+        identifier, identifier, 'Active'
+      );
+      if (!user || !user.email) return res.json(genericResponse);
+
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO password_reset_otps (email, code, userId, expiresAt, attempts, createdAt) VALUES (?, ?, ?, ?, 0, ?)
+         ON CONFLICT(email) DO UPDATE SET code=excluded.code, userId=excluded.userId, expiresAt=excluded.expiresAt, attempts=0, createdAt=excluded.createdAt`,
+        user.email, code, user.id, expiresAt, now
+      );
+
+      sendPasswordResetOtpEmail(user.email, user.name, code).catch((e) => console.error('Failed to send password reset email:', e));
+
+      res.json(genericResponse);
+    } catch (err) {
+      console.error('Request password reset OTP error:', err);
+      res.status(500).json({ error: 'Failed to send reset code' });
+    }
+  });
+
+  app.post('/api/auth/forgot-password/verify-otp', authLimiter, async (req, res) => {
+    try {
+      const identifier = String(req.body?.identifier || '').trim();
+      const code = String(req.body?.code || '').trim();
+      const newPassword = String(req.body?.newPassword || '');
+      if (!identifier || !code || !newPassword) return res.status(400).json({ error: 'Email/mobile, code, and new password are required' });
+
+      const genericError = { error: 'Invalid or expired code. Please request a new one.' };
+
+      const user = await db.get(
+        'SELECT * FROM users WHERE (LOWER(email) = LOWER(?) OR mobile = ?) AND status = ?',
+        identifier, identifier, 'Active'
+      );
+      if (!user || !user.email) return res.status(400).json(genericError);
+
+      const otpRow = await db.get('SELECT * FROM password_reset_otps WHERE email = ?', user.email);
+      if (!otpRow) return res.status(400).json(genericError);
+      if (new Date(otpRow.expiresAt) < new Date()) {
+        await db.run('DELETE FROM password_reset_otps WHERE email = ?', user.email);
+        return res.status(400).json(genericError);
+      }
+      if (otpRow.attempts >= 5) {
+        await db.run('DELETE FROM password_reset_otps WHERE email = ?', user.email);
+        return res.status(429).json({ error: 'Too many incorrect attempts. Please request a new code.' });
+      }
+      if (otpRow.code !== code) {
+        await db.run('UPDATE password_reset_otps SET attempts = attempts + 1 WHERE email = ?', user.email);
+        return res.status(400).json(genericError);
+      }
+
+      const policyError = await validatePasswordPolicy(newPassword);
+      if (policyError) return res.status(400).json({ error: policyError });
+
+      const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+      await db.run(
+        'UPDATE users SET passwordHash=?, mustChangePassword=0, failedLoginAttempts=0, lockedUntil=NULL, updatedAt=? WHERE id=?',
+        newHash, new Date().toISOString(), user.id
+      );
+      await db.run('DELETE FROM password_reset_otps WHERE email = ?', user.email);
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Verify password reset OTP error:', err);
+      res.status(500).json({ error: 'Failed to reset password' });
     }
   });
 
@@ -1390,8 +1634,9 @@ async function main() {
       if (!currentPassword || !newPassword) {
         return res.status(400).json({ error: 'Current and new password are required' });
       }
-      if (String(newPassword).length < 8) {
-        return res.status(400).json({ error: 'New password must be at least 8 characters' });
+      const policyError = await validatePasswordPolicy(newPassword);
+      if (policyError) {
+        return res.status(400).json({ error: policyError });
       }
       const row = await db.get('SELECT * FROM users WHERE id = ?', req.user.sub);
       if (!row) return res.status(404).json({ error: 'User not found' });
@@ -1428,6 +1673,10 @@ async function main() {
       }
       const id = `USR${Date.now()}`;
       const initialPassword = body.password || body.mobile;
+      if (body.password) {
+        const policyError = await validatePasswordPolicy(body.password);
+        if (policyError) return res.status(400).json({ error: policyError });
+      }
       const passwordHash = await bcrypt.hash(initialPassword, BCRYPT_ROUNDS);
       const now = new Date().toISOString();
       const branchId = body.roles.includes('super_admin') ? null : (body.branchId || null);
@@ -1464,6 +1713,8 @@ async function main() {
         name, email, mobile, JSON.stringify(roles), branchId, status, new Date().toISOString(), req.params.id
       );
       if (body.password) {
+        const policyError = await validatePasswordPolicy(body.password);
+        if (policyError) return res.status(400).json({ error: policyError });
         const passwordHash = await bcrypt.hash(body.password, BCRYPT_ROUNDS);
         await db.run('UPDATE users SET passwordHash=?, mustChangePassword=0 WHERE id=?', passwordHash, req.params.id);
       }
@@ -1542,6 +1793,10 @@ async function main() {
       const name = body.fullName || `${body.firstName} ${body.lastName || ''}`.trim();
       const id = `USR${Date.now()}`;
       const initialPassword = body.password || mobile;
+      if (body.password) {
+        const policyError = await validatePasswordPolicy(body.password);
+        if (policyError) return res.status(400).json({ error: policyError });
+      }
       const passwordHash = await bcrypt.hash(initialPassword, BCRYPT_ROUNDS);
       const now = new Date().toISOString();
       const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
@@ -1618,6 +1873,8 @@ async function main() {
         );
       }
       if (body.password) {
+        const policyError = await validatePasswordPolicy(body.password);
+        if (policyError) return res.status(400).json({ error: policyError });
         const passwordHash = await bcrypt.hash(body.password, BCRYPT_ROUNDS);
         await db.run('UPDATE users SET passwordHash=?, mustChangePassword=0 WHERE id=?', passwordHash, req.params.id);
       }
@@ -2158,6 +2415,45 @@ async function main() {
     }
   });
 
+  // Approximates how many accounts a broadcast notification was actually sent
+  // to, so admins can see "5 of 12 parents have read this" — not a byte-for-byte
+  // mirror of matchesUserScope's every edge case (e.g. a teacher's specific
+  // assigned classes), but covers the common targeting shapes: specific
+  // userIds/studentIds, or a broadcast to one or more roles.
+  async function resolveRecipientCount(notification) {
+    if (notification.userIds?.length) return notification.userIds.length;
+
+    if (notification.studentIds?.length) {
+      const placeholders = notification.studentIds.map(() => '?').join(',');
+      const rows = await db.all(
+        `SELECT DISTINCT parentId FROM parent_student WHERE studentId IN (${placeholders})`,
+        ...notification.studentIds
+      );
+      return rows.length;
+    }
+
+    const roles = notification.roles || [];
+    if (!roles.length) return 0;
+
+    let count = 0;
+    if (roles.includes('parent')) {
+      const parents = await db.all(
+        notification.branchId ? 'SELECT id FROM parents WHERE status = ? AND branchId = ?' : 'SELECT id FROM parents WHERE status = ?',
+        ...(notification.branchId ? ['Active', notification.branchId] : ['Active'])
+      );
+      count += parents.length;
+    }
+    const staffRoles = roles.filter((r) => r !== 'parent');
+    if (staffRoles.length) {
+      const users = await db.all(
+        notification.branchId ? 'SELECT roles FROM users WHERE status = ? AND (branchId = ? OR branchId IS NULL)' : 'SELECT roles FROM users WHERE status = ?',
+        ...(notification.branchId ? ['Active', notification.branchId] : ['Active'])
+      );
+      count += users.filter((u) => parseJsonList(u.roles).some((r) => staffRoles.includes(r))).length;
+    }
+    return count;
+  }
+
   // Identity (id/role/branchId) is always derived from the verified JWT, never from
   // client query/body params — a client could previously pass role=super_admin or an
   // arbitrary userId/branchId to read or mutate notifications outside their own scope.
@@ -2185,8 +2481,106 @@ async function main() {
       const rows = await db.all('SELECT * FROM notifications ORDER BY createdAt DESC');
       const user = deriveNotificationUser(req);
       const mapped = rows.map(mapRowToNotification);
-      const scoped = mapped.filter((notif) => matchesUserScope(notif, user));
+      let scoped = mapped.filter((notif) => matchesUserScope(notif, user));
+
+      const prefs = await db.get('SELECT * FROM notification_preferences WHERE userId = ?', req.user.sub);
+      if (prefs?.muteAll) {
+        scoped = [];
+      } else if (prefs?.highPriorityOnly) {
+        scoped = scoped.filter((notif) => notif.priority === 'high');
+      }
+
+      // Per-recipient read state/count, so one parent reading a broadcast
+      // notification no longer marks it read for every other parent too.
+      const readCountRows = await db.all('SELECT notificationId, COUNT(*) as cnt FROM notification_reads GROUP BY notificationId');
+      const readCountMap = new Map(readCountRows.map((r) => [r.notificationId, r.cnt]));
+      const myReadRows = await db.all('SELECT notificationId FROM notification_reads WHERE userId = ?', req.user.sub);
+      const myReadSet = new Set(myReadRows.map((r) => r.notificationId));
+      scoped = scoped.map((notif) => ({
+        ...notif,
+        isReadByMe: myReadSet.has(notif.id),
+        readCount: readCountMap.get(notif.id) || 0,
+      }));
+
       res.json(scoped);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Full read-by list for one notification — who has actually seen it and when.
+  // Staff-only: this is for the sender (admin/accountant/etc.) to audit delivery,
+  // not something a parent/teacher recipient needs to see about other recipients.
+  app.get('/api/notifications/:id/reads', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const row = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
+      if (!row) return res.status(404).json({ error: 'Notification not found' });
+      const notif = mapRowToNotification(row);
+
+      const [reads, totalRecipients] = await Promise.all([
+        db.all('SELECT userId, userName, userRole, readAt FROM notification_reads WHERE notificationId = ? ORDER BY readAt ASC', req.params.id),
+        resolveRecipientCount(notif),
+      ]);
+
+      res.json({ readCount: reads.length, totalRecipients, reads });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Notification Preferences (per-user) ---
+  app.get('/api/notification-preferences', async (req, res) => {
+    try {
+      const row = await db.get('SELECT * FROM notification_preferences WHERE userId = ?', req.user.sub);
+      res.json({ muteAll: Boolean(row?.muteAll), highPriorityOnly: Boolean(row?.highPriorityOnly) });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/notification-preferences', async (req, res) => {
+    try {
+      const muteAll = req.body?.muteAll ? 1 : 0;
+      const highPriorityOnly = req.body?.highPriorityOnly ? 1 : 0;
+      await db.run(
+        `INSERT INTO notification_preferences (userId, muteAll, highPriorityOnly, updatedAt) VALUES (?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET muteAll=excluded.muteAll, highPriorityOnly=excluded.highPriorityOnly, updatedAt=excluded.updatedAt`,
+        req.user.sub, muteAll, highPriorityOnly, new Date().toISOString()
+      );
+      res.json({ muteAll: Boolean(muteAll), highPriorityOnly: Boolean(highPriorityOnly) });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Data Retention (System Settings > Data Retention) ---
+  // There's no background job runner in this app, so retention is enforced
+  // on-demand rather than on a schedule — Super Admin triggers a cleanup pass
+  // that purges rows older than the configured retention window.
+  app.post('/api/data-retention/cleanup', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const retentionDays = Number(await getSetting('data_retention_days', '365')) || 365;
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+
+      const notifResult = await db.run("DELETE FROM notifications WHERE createdAt < ? AND status != 'unread'", cutoff);
+      const auditResult = await db.run('DELETE FROM salary_audit_log WHERE timestamp < ?', cutoff);
+      const whatsappLogResult = await db.run('DELETE FROM whatsapp_logs WHERE sentTime < ?', cutoff);
+
+      res.json({
+        success: true,
+        retentionDays,
+        deleted: {
+          notifications: notifResult.changes || 0,
+          salaryAuditLog: auditResult.changes || 0,
+          whatsappLogs: whatsappLogResult.changes || 0,
+        },
+      });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -2294,9 +2688,17 @@ async function main() {
 
       const now = new Date().toISOString();
       const body = req.body || {};
+      // The shared status/read columns still reflect the most recent reader
+      // (kept for anything still relying on the old single-reader model), but
+      // the real per-user source of truth is notification_reads below.
       const stmt = await db.prepare(`UPDATE notifications SET status='read', read=1, readAt=?, readBy=?, readByRole=?, readByBranch=? WHERE id=?`);
-      await stmt.run(body.readAt || now, body.readBy || null, body.readByRole || null, body.readByBranch || null, req.params.id);
+      await stmt.run(body.readAt || now, body.readBy || req.user.name, body.readByRole || req.user.roles[0], body.readByBranch || req.user.branchId || null, req.params.id);
       await stmt.finalize();
+      await db.run(
+        `INSERT INTO notification_reads (notificationId, userId, userName, userRole, readAt) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(notificationId, userId) DO UPDATE SET readAt=excluded.readAt`,
+        req.params.id, req.user.sub, req.user.name, req.user.roles[0], body.readAt || now
+      );
       const saved = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
       res.json(mapRowToNotification(saved));
     } catch (err) {
@@ -2352,8 +2754,18 @@ async function main() {
       const now = new Date().toISOString();
       const placeholders = ids.map(() => '?').join(',');
       const stmt = await db.prepare(`UPDATE notifications SET status='read', read=1, readAt=?, readBy=?, readByRole=?, readByBranch=? WHERE id IN (${placeholders})`);
-      await stmt.run(req.body?.readAt || now, req.body?.readBy || null, req.body?.readByRole || null, req.body?.readByBranch || null, ...ids);
+      await stmt.run(req.body?.readAt || now, req.body?.readBy || req.user.name, req.body?.readByRole || req.user.roles[0], req.body?.readByBranch || req.user.branchId || null, ...ids);
       await stmt.finalize();
+
+      const readStmt = await db.prepare(
+        `INSERT INTO notification_reads (notificationId, userId, userName, userRole, readAt) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(notificationId, userId) DO UPDATE SET readAt=excluded.readAt`
+      );
+      for (const id of ids) {
+        await readStmt.run(id, req.user.sub, req.user.name, req.user.roles[0], req.body?.readAt || now);
+      }
+      await readStmt.finalize();
+
       const rows = await db.all(`SELECT * FROM notifications WHERE id IN (${placeholders})`, ...ids);
       res.json(rows.map(mapRowToNotification));
     } catch (err) {
@@ -2847,7 +3259,7 @@ async function main() {
       const studentRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', parent.id);
       const linkedStudentIds = studentRows.map(r => r.studentId);
 
-      const token = signToken({ id: parent.id, name: `${parent.firstName} ${parent.lastName}`, email: parent.email, mobile: parent.mobile, roles: JSON.stringify(['parent']), branchId: parent.branchId }, false);
+      const token = await signToken({ id: parent.id, name: `${parent.firstName} ${parent.lastName}`, email: parent.email, mobile: parent.mobile, roles: JSON.stringify(['parent']), branchId: parent.branchId }, false);
 
       res.json({
         success: true,
@@ -3042,6 +3454,35 @@ async function main() {
       `, parentId, studentId);
 
       const saved = await db.get('SELECT * FROM students WHERE id = ?', studentId);
+
+      // Auto-generate fee records for the new student from any fee structure(s)
+      // already configured for their class/branch — previously a student only
+      // ever got a fee record if someone remembered to run "Generate for class"
+      // again after they were admitted, so newly admitted students were
+      // invisible on the Fees page until then.
+      if (saved.className) {
+        const matchingStructures = await db.all(
+          'SELECT * FROM fee_structures WHERE className = ? AND branchId = ?',
+          saved.className, branchId
+        );
+        for (const structure of matchingStructures) {
+          const status = feeRecordStatus(structure.amount, 0, structure.dueDate);
+          await db.run(`
+            INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt)
+            VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
+          `, saved.id, saved.fullName, saved.className, branchId, structure.feeType, structure.academicYear, structure.amount, structure.dueDate, status, now, now);
+        }
+      }
+
+      // Notify accountants (and admins) so a newly admitted student's uniform/
+      // materials allocation doesn't get missed — surfaces in their Notifications
+      // and in the Accountant Portal's pending-allocations list.
+      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      await db.run(`
+        INSERT INTO notifications (id, title, message, description, type, priority, roles, branchId, status, createdAt)
+        VALUES (?, ?, ?, ?, 'info', 'medium', '["accountant","admin","super_admin"]', ?, 'unread', ?)
+      `, notifId, 'New Student Admitted', `${saved.fullName} was admitted to ${saved.className || 'a class'} — inventory allocation pending.`, `Admission notification for branch ${branchId}`, branchId, now);
+
       res.json(saved);
     } catch (err) {
       console.error(err);
@@ -4584,6 +5025,206 @@ async function main() {
       `, notifId, notifTitle, notifMessage, report.branchId, new Date().toISOString());
 
       res.json(updated);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+
+  // --- Teacher Attendance Endpoints ---
+  app.get('/api/teacher-attendance', async (req, res) => {
+    try {
+      const { date, month, teacherId } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM teacher_attendance WHERE 1=1';
+      const params = [];
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      if (date) { query += ' AND date = ?'; params.push(date); }
+      if (month) { query += ' AND date LIKE ?'; params.push(`${month}%`); }
+      if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
+      query += ' ORDER BY date DESC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Marking teacher attendance is an Admin/Super Admin action — accountants and
+  // teachers get read-only access via the GET route above.
+  app.post('/api/teacher-attendance/bulk', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
+      if (!entries.length) return res.status(400).json({ error: 'entries array is required' });
+
+      const now = new Date().toISOString();
+      const stmt = await db.prepare(`
+        INSERT INTO teacher_attendance (teacherId, date, status, branchId, department, markedBy, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(teacherId, date) DO UPDATE SET status=excluded.status, markedBy=excluded.markedBy, updatedAt=excluded.updatedAt
+      `);
+      for (const entry of entries) {
+        const branchId = resolveBranchId(req, entry.branchId);
+        await stmt.run(entry.teacherId, entry.date, entry.status, branchId, entry.department || null, req.user.name || 'Admin', now, now);
+      }
+      await stmt.finalize();
+
+      const date = entries[0].date;
+      const branchId = resolveBranchId(req, entries[0].branchId);
+      let query = 'SELECT * FROM teacher_attendance WHERE date = ?';
+      const params = [date];
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Salary / Payroll Endpoints ---
+  app.get('/api/salary-records', async (req, res) => {
+    try {
+      const { month, teacherId, status } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM salary_records WHERE 1=1';
+      const params = [];
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      if (month) { query += ' AND month = ?'; params.push(month); }
+      if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
+      if (status) { query += ' AND status = ?'; params.push(status); }
+      query += ' ORDER BY month DESC, teacherName ASC';
+      const rows = await db.all(query, ...params);
+      res.json(rows.map((r) => ({ ...r, isLocked: !!r.isLocked })));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.get('/api/salary-audit-log', async (req, res) => {
+    try {
+      const { teacherId, month } = req.query;
+      let query = 'SELECT * FROM salary_audit_log WHERE 1=1';
+      const params = [];
+      if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
+      if (month) { query += ' AND month = ?'; params.push(month); }
+      query += ' ORDER BY timestamp DESC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  async function writeSalaryAuditLog({ teacherId, teacherName, month, action, previousValue, newValue, changedBy, userRole, branchId }) {
+    await db.run(
+      `INSERT INTO salary_audit_log (teacherId, teacherName, month, action, previousValue, newValue, changedBy, userRole, branchId, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      teacherId, teacherName, month, action, previousValue ?? null, newValue ?? null, changedBy, userRole, branchId || null, new Date().toISOString()
+    );
+  }
+
+  // Creates or updates a Draft salary record — used by both the Teacher Attendance
+  // page (saving classes/salary-per-class) and the Accountant Portal (Create Draft).
+  app.post('/api/salary-records', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const b = req.body || {};
+      if (!b.teacherId || !b.month) return res.status(400).json({ error: 'teacherId and month are required' });
+      const branchId = resolveBranchId(req, b.branchId);
+
+      const existing = await db.get('SELECT * FROM salary_records WHERE teacherId = ? AND month = ?', b.teacherId, b.month);
+      if (existing && existing.isLocked) return res.status(409).json({ error: 'Salary is locked for this teacher and month.' });
+
+      const now = new Date().toISOString();
+      const calculatedSalary = b.salaryType === 'Monthly Fixed'
+        ? Number(b.salaryAmount || 0)
+        : Number(b.classesConducted || 0) * Number(b.salaryPerClass || 0);
+
+      await db.run(
+        `INSERT INTO salary_records (teacherId, teacherName, employeeId, branchId, department, designation, month, salaryType, salaryAmount, salaryPerClass, classesConducted, presentDays, halfDays, calculatedSalary, status, remarks, isLocked, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, 0, ?, ?)
+         ON CONFLICT(teacherId, month) DO UPDATE SET
+           teacherName=excluded.teacherName, employeeId=excluded.employeeId, branchId=excluded.branchId,
+           department=excluded.department, designation=excluded.designation, salaryType=excluded.salaryType,
+           salaryAmount=excluded.salaryAmount, salaryPerClass=excluded.salaryPerClass, classesConducted=excluded.classesConducted,
+           presentDays=excluded.presentDays, halfDays=excluded.halfDays, calculatedSalary=excluded.calculatedSalary,
+           remarks=excluded.remarks, updatedAt=excluded.updatedAt`,
+        b.teacherId, b.teacherName || '', b.employeeId || b.teacherId, branchId, b.department || null, b.designation || null,
+        b.month, b.salaryType || null, Number(b.salaryAmount || 0), Number(b.salaryPerClass || 0), Number(b.classesConducted || 0),
+        Number(b.presentDays || 0), Number(b.halfDays || 0), calculatedSalary, b.remarks || '', now, now
+      );
+
+      const saved = await db.get('SELECT * FROM salary_records WHERE teacherId = ? AND month = ?', b.teacherId, b.month);
+
+      await writeSalaryAuditLog({
+        teacherId: b.teacherId, teacherName: b.teacherName, month: b.month,
+        action: existing ? 'Updated' : 'Created',
+        previousValue: existing?.calculatedSalary, newValue: calculatedSalary,
+        changedBy: req.user.name, userRole: req.user.roles[0], branchId,
+      });
+
+      res.json({ ...saved, isLocked: !!saved.isLocked });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/salary-records/:id/mark-paid', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Salary record not found' });
+      if (record.status === 'Paid') return res.status(409).json({ error: 'Salary already marked as paid.' });
+
+      const now = new Date().toISOString();
+      await db.run(
+        `UPDATE salary_records SET status = 'Paid', paidDate = ?, paidBy = ?, isLocked = 1, lockedDate = ?, lockedBy = ?, updatedAt = ? WHERE id = ?`,
+        now, req.user.name, now, req.user.name, now, req.params.id
+      );
+      const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+
+      await writeSalaryAuditLog({
+        teacherId: record.teacherId, teacherName: record.teacherName, month: record.month,
+        action: 'Marked_Paid', newValue: record.calculatedSalary,
+        changedBy: req.user.name, userRole: req.user.roles[0], branchId: record.branchId,
+      });
+
+      res.json({ ...updated, isLocked: !!updated.isLocked });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Unlocking a paid/locked salary record is Super Admin only — it reverses a
+  // payroll decision that accountants shouldn't be able to undo unilaterally.
+  app.post('/api/salary-records/:id/unlock', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Salary record not found' });
+
+      const now = new Date().toISOString();
+      const nextStatus = record.status === 'Paid' ? 'Draft' : record.status;
+      await db.run(
+        `UPDATE salary_records SET isLocked = 0, status = ?, updatedAt = ? WHERE id = ?`,
+        nextStatus, now, req.params.id
+      );
+      const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+
+      await writeSalaryAuditLog({
+        teacherId: record.teacherId, teacherName: record.teacherName, month: record.month,
+        action: 'Unlocked', changedBy: req.user.name, userRole: req.user.roles[0], branchId: record.branchId,
+      });
+
+      res.json({ ...updated, isLocked: !!updated.isLocked });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });

@@ -92,7 +92,6 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
   { name: 'My Dashboard',     href: '/teacher',          icon: LayoutDashboard, module: 'teacher_portal' },
   { name: 'Scoreboard',       href: '/teacher/scoreboard', icon: BarChart3,    module: 'teacher_portal' },
   { name: 'Salary Slips',     href: '/teacher/salary-slips', icon: FileText,    module: 'teacher_portal' },
-  { name: 'My Classes',       href: '/my-classes',       icon: BookOpen,        module: 'my_classes' },
   { name: 'Special Classes',  href: '/special-classes',  icon: BookOpen,        module: 'special_classes' },
   { name: 'School Exam Schedule', href: '/school-exam-schedules', icon: FileText, module: 'school_exam_schedules' },
 ];
@@ -124,7 +123,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
   if (role === 'teacher') {
     return [
       { label: 'Overview',  items: allowed.filter((i) => (['dashboard', 'teacher_portal'] as Module[]).includes(i.module)) },
-      { label: 'Teaching',  items: allowed.filter((i) => (['my_classes', 'attendance', 'exam_marks', 'homework', 'materials', 'lesson_plan', 'timetable', 'special_classes', 'school_exam_schedules'] as Module[]).includes(i.module)) },
+      { label: 'Teaching',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'homework', 'materials', 'lesson_plan', 'timetable', 'special_classes', 'school_exam_schedules'] as Module[]).includes(i.module)) },
       { label: 'Students',  items: allowed.filter((i) => (['student_progress'] as Module[]).includes(i.module)) },
       { label: 'Reports',   items: allowed.filter((i) => (['daily_submission', 'notification_center'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);

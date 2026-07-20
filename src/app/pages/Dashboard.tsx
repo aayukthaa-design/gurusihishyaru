@@ -310,7 +310,7 @@ export function Dashboard() {
   }, [ledger]);
 
   const pendingAllocationsCount = React.useMemo(() => {
-    const enrolled = students.filter(s => s.status === 'Enrolled' && s.branchId === myBranchId);
+    const enrolled = students.filter(s => s.status === 'Active' && s.branchId === myBranchId);
     const allocatedIds = new Set(allocations.map(a => a.studentId));
     return enrolled.filter(s => !allocatedIds.has(s.id)).length;
   }, [students, allocations, myBranchId]);
@@ -383,7 +383,7 @@ export function Dashboard() {
     });
 
     // Student enrollment
-    students.filter(s => s.status === 'Enrolled' && s.branchId === myBranchId).forEach((s) => {
+    students.filter(s => s.status === 'Active' && s.branchId === myBranchId).forEach((s) => {
       const enrolDate = s.admissionDate || s.createdAt?.split('T')[0] || todayISO;
       list.push({
         id: `student-${s.id}`,

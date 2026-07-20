@@ -9,13 +9,16 @@ import {
   clearNotifications,
   deleteNotification,
   exportNotificationsReport,
+  fetchNotificationReads,
   getNotificationStats,
   getVisibleNotificationsForUser,
+  isUnreadForMe,
   markAllRead,
   markNotificationAsRead,
   refreshNotifications,
   restoreNotification,
   useNotifications,
+  type NotificationReadEntry,
 } from '../lib/notificationService';
 import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName } from '../lib/branchService';
@@ -57,7 +60,8 @@ export function NotificationsPage() {
   const visibleNotifications = React.useMemo(() => {
     const query = search.trim().toLowerCase();
     return scopedNotifications.filter((notification) => {
-      if (filter !== 'all' && notification.status !== filter) return false;
+      if (filter === 'unread' && !isUnreadForMe(notification)) return false;
+      if (filter === 'deleted' && notification.status !== 'deleted') return false;
       if (!query) return true;
 
       const haystack = [
@@ -87,8 +91,27 @@ export function NotificationsPage() {
     void refreshNotifications(auth.user);
   }, [auth.user]);
 
-  const activeNotifications = visibleNotifications.filter((notification) => notification.status !== 'read' && notification.status !== 'deleted' && notification.status !== 'expired');
-  const historyNotifications = visibleNotifications.filter((notification) => notification.status === 'read' || notification.status === 'deleted' || notification.status === 'expired');
+  const isStaff = auth.user?.role === 'admin' || auth.user?.role === 'super_admin' || auth.user?.role === 'accountant';
+  const [expandedReadsId, setExpandedReadsId] = React.useState<string | null>(null);
+  const [readsDetail, setReadsDetail] = React.useState<{ readCount: number; totalRecipients: number; reads: NotificationReadEntry[] } | null>(null);
+  const [loadingReads, setLoadingReads] = React.useState(false);
+
+  const toggleReadsDetail = async (id: string) => {
+    if (expandedReadsId === id) {
+      setExpandedReadsId(null);
+      setReadsDetail(null);
+      return;
+    }
+    setExpandedReadsId(id);
+    setReadsDetail(null);
+    setLoadingReads(true);
+    const detail = await fetchNotificationReads(id);
+    setReadsDetail(detail);
+    setLoadingReads(false);
+  };
+
+  const activeNotifications = visibleNotifications.filter((notification) => isUnreadForMe(notification) || notification.status === 'scheduled');
+  const historyNotifications = visibleNotifications.filter((notification) => (!isUnreadForMe(notification) && notification.status !== 'scheduled') || notification.status === 'deleted' || notification.status === 'expired');
 
   const handleSendNotification = () => {
     if (!auth.user?.branchId) return;
@@ -237,14 +260,14 @@ export function NotificationsPage() {
             </Card>
           )}
           {activeNotifications.map((notification) => (
-            <Card key={notification.id} className={`transition-all duration-300 hover:shadow-lg ${notification.status === 'unread' ? 'border-l-4 border-l-primary bg-primary/5' : ''}`}>
+            <Card key={notification.id} className={`transition-all duration-300 hover:shadow-lg ${isUnreadForMe(notification) ? 'border-l-4 border-l-primary bg-primary/5' : ''}`}>
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex-1 space-y-1">
                     <div className="flex items-center gap-2">
                       <CardTitle className="text-base">{notification.title}</CardTitle>
                       <Badge variant={notification.status === 'scheduled' ? 'secondary' : 'default'} className="h-5 px-1.5 text-[10px] uppercase">
-                        {notification.status}
+                        {notification.status === 'scheduled' ? 'scheduled' : isUnreadForMe(notification) ? 'unread' : 'read'}
                       </Badge>
                     </div>
                     <CardDescription>{notification.message}</CardDescription>
@@ -263,6 +286,12 @@ export function NotificationsPage() {
                   <p>Branch: {notification.branchId ?? 'All Branches'} • Recipient: {notification.recipient ?? 'All'} • Type: {notification.notificationType ?? notification.type}</p>
                 </div>
                 <div className="flex gap-2">
+                  {isStaff && (
+                    <Button size="sm" variant="ghost" onClick={() => toggleReadsDetail(notification.id)}>
+                      <MailOpen className="mr-1 h-3 w-3" />
+                      {notification.readCount ?? 0} read
+                    </Button>
+                  )}
                   {notification.description?.includes('Inventory Allocation Pending') && (
                     <Button
                       size="sm"
@@ -277,7 +306,7 @@ export function NotificationsPage() {
                       Allocate Inventory
                     </Button>
                   )}
-                  {(notification.status === 'unread' || notification.status === 'scheduled') && (
+                  {isUnreadForMe(notification) && notification.status !== 'scheduled' && (
                     <Button size="sm" variant="ghost" onClick={() => markNotificationAsRead(notification.id, auth.user ?? undefined)}>
                       <Check className="mr-1 h-3 w-3" />
                       Mark as Read
@@ -289,6 +318,33 @@ export function NotificationsPage() {
                   </Button>
                 </div>
               </CardContent>
+              {isStaff && expandedReadsId === notification.id && (
+                <CardContent className="border-t border-border pt-4">
+                  {loadingReads ? (
+                    <p className="text-sm text-muted-foreground">Loading…</p>
+                  ) : readsDetail ? (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium text-foreground">
+                        {readsDetail.readCount} of {readsDetail.totalRecipients || '?'} recipients have read this
+                      </p>
+                      {readsDetail.reads.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No one has read this yet.</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {readsDetail.reads.map((r) => (
+                            <li key={r.userId} className="flex items-center justify-between text-xs text-muted-foreground">
+                              <span>{r.userName} <span className="text-muted-foreground/70">({r.userRole})</span></span>
+                              <span>{formatDateTime(r.readAt)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Failed to load read receipts.</p>
+                  )}
+                </CardContent>
+              )}
             </Card>
           ))}
         </div>
@@ -331,6 +387,12 @@ export function NotificationsPage() {
                   <p>Read: {formatDateTime(notification.readAt)} • Deleted: {formatDateTime(notification.deletedAt)}</p>
                 </div>
                 <div className="flex gap-2">
+                  {isStaff && (
+                    <Button size="sm" variant="ghost" onClick={() => toggleReadsDetail(notification.id)}>
+                      <MailOpen className="mr-1 h-3 w-3" />
+                      {notification.readCount ?? 0} read
+                    </Button>
+                  )}
                   {notification.status === 'deleted' && (
                     <Button size="sm" variant="ghost" onClick={() => restoreNotification(notification.id)}>
                       <Check className="mr-1 h-3 w-3" />
@@ -343,6 +405,33 @@ export function NotificationsPage() {
                   <p>Deleted by: {notification.deletedBy ?? '—'}</p>
                 </div>
               </CardContent>
+              {isStaff && expandedReadsId === notification.id && (
+                <CardContent className="border-t border-border pt-4">
+                  {loadingReads ? (
+                    <p className="text-sm text-muted-foreground">Loading…</p>
+                  ) : readsDetail ? (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium text-foreground">
+                        {readsDetail.readCount} of {readsDetail.totalRecipients || '?'} recipients have read this
+                      </p>
+                      {readsDetail.reads.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No one has read this yet.</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {readsDetail.reads.map((r) => (
+                            <li key={r.userId} className="flex items-center justify-between text-xs text-muted-foreground">
+                              <span>{r.userName} <span className="text-muted-foreground/70">({r.userRole})</span></span>
+                              <span>{formatDateTime(r.readAt)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Failed to load read receipts.</p>
+                  )}
+                </CardContent>
+              )}
             </Card>
           ))}
         </div>

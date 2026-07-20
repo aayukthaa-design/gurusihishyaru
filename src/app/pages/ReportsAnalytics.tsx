@@ -442,7 +442,7 @@ export function ReportsAnalytics() {
   }, [submittedReports, filterYear, filterMonth]);
 
   const pendingAllocationCount = useMemo(() => {
-    const enrolled = students.filter(s => s.status === 'Enrolled' && (!branchFilter || s.branchId === branchFilter));
+    const enrolled = students.filter(s => s.status === 'Active' && (!branchFilter || s.branchId === branchFilter));
     const allocatedIds = new Set(allocations.map(a => a.studentId));
     return enrolled.filter(s => !allocatedIds.has(s.id)).length;
   }, [students, allocations, branchFilter]);
