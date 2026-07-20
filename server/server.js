@@ -6,7 +6,7 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import rateLimit from 'express-rate-limit';
 import archiver from 'archiver';
 import extract from 'extract-zip';
 import bcrypt from 'bcryptjs';
@@ -1256,18 +1256,6 @@ async function main() {
     legacyHeaders: false,
   });
   app.use('/api/', apiLimiter);
-
-  // Keyed by the mobile number being requested (not IP) — stops OTP-spam abuse
-  // against one number even from many different IPs, on top of the general
-  // per-IP authLimiter already applied to these routes.
-  const otpRequestLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) => (req.body?.mobile ? String(req.body.mobile) : ipKeyGenerator(req.ip)),
-    message: { error: 'Too many code requests for this number. Please try again later.' },
-  });
 
   let db = await initDb();
   let restoreInProgress = false;
@@ -2845,88 +2833,16 @@ async function main() {
   });
 
   // --- Parent Authentication Endpoint ---
-  // Parent login is now two-step: request a WhatsApp OTP, then verify it. A
-  // mobile number alone is no longer sufficient to obtain a session token —
-  // previously any client that knew a registered parent's mobile number could
-  // log in as them with zero further verification.
-  app.post('/api/auth/parent-login/request-otp', authLimiter, otpRequestLimiter, async (req, res) => {
+  // Direct login by registered mobile number — no OTP/password step.
+  app.post('/api/auth/parent-login', authLimiter, async (req, res) => {
     try {
       const mobile = String(req.body?.mobile || '').trim();
       if (!mobile) return res.status(400).json({ error: 'Mobile number is required' });
 
-      // Always return the same generic response whether or not the number is
-      // registered, and only actually send a code when it is — otherwise the
-      // response itself would leak which numbers are registered parent accounts.
       const parent = await db.get('SELECT * FROM parents WHERE mobile = ?', mobile);
-      const genericResponse = { success: true, message: 'If this number is registered, a verification code has been sent via WhatsApp.' };
-
-      if (!parent) return res.json(genericResponse);
-
-      const code = String(Math.floor(100000 + Math.random() * 900000));
-      const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-      const now = new Date().toISOString();
-      await db.run(
-        `INSERT INTO otp_codes (mobile, code, purpose, expiresAt, attempts, createdAt) VALUES (?, ?, 'parent_login', ?, 0, ?)
-         ON CONFLICT(mobile) DO UPDATE SET code=excluded.code, expiresAt=excluded.expiresAt, attempts=0, createdAt=excluded.createdAt`,
-        mobile, code, expiresAt, now
-      );
-
-      const settingsRows = await db.all('SELECT * FROM whatsapp_settings');
-      const settings = {};
-      settingsRows.forEach((row) => { settings[row.key] = row.value; });
-      if (settings['enable_whatsapp'] === 'true') {
-        const provider = settings['whatsapp_provider'] || 'WhatsApp Business Cloud API';
-        const config = {
-          apiToken: settings['api_token'] || '',
-          phoneNumberId: settings['phone_number_id'] || '',
-          businessAccountId: settings['business_account_id'] || '',
-          templateName: 'parent_login_otp',
-          apiVersion: settings['api_version'] || 'v17.0',
-        };
-        WhatsAppService.sendMessage(provider, config, {
-          to: mobile,
-          otpCode: code,
-          otpExpiryMinutes: '5',
-          businessName: settings['business_name'] || 'Guru Shishyaru Tutorials',
-          officialContact: settings['official_contact'] || '',
-        }).catch((e) => console.error('Failed to send parent login OTP:', e));
-      } else {
-        console.warn('WhatsApp is disabled in settings — parent login OTP was not sent. Enable it in System Settings.');
+      if (!parent) {
+        return res.status(400).json({ error: 'This mobile number is not registered with Guru Shishyaru Tutorials.' });
       }
-
-      res.json(genericResponse);
-    } catch (err) {
-      console.error('Request parent OTP error:', err);
-      res.status(500).json({ error: 'Failed to send verification code' });
-    }
-  });
-
-  app.post('/api/auth/parent-login/verify-otp', authLimiter, async (req, res) => {
-    try {
-      const mobile = String(req.body?.mobile || '').trim();
-      const code = String(req.body?.code || '').trim();
-      if (!mobile || !code) return res.status(400).json({ error: 'Mobile number and code are required' });
-
-      const otpRow = await db.get('SELECT * FROM otp_codes WHERE mobile = ?', mobile);
-      const genericError = { error: 'Invalid or expired code. Please request a new one.' };
-      if (!otpRow) return res.status(400).json(genericError);
-      if (new Date(otpRow.expiresAt) < new Date()) {
-        await db.run('DELETE FROM otp_codes WHERE mobile = ?', mobile);
-        return res.status(400).json(genericError);
-      }
-      if (otpRow.attempts >= 5) {
-        await db.run('DELETE FROM otp_codes WHERE mobile = ?', mobile);
-        return res.status(429).json({ error: 'Too many incorrect attempts. Please request a new code.' });
-      }
-      if (otpRow.code !== code) {
-        await db.run('UPDATE otp_codes SET attempts = attempts + 1 WHERE mobile = ?', mobile);
-        return res.status(400).json(genericError);
-      }
-
-      const parent = await db.get('SELECT * FROM parents WHERE mobile = ?', mobile);
-      if (!parent) return res.status(400).json(genericError);
-
-      await db.run('DELETE FROM otp_codes WHERE mobile = ?', mobile);
 
       const studentRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', parent.id);
       const linkedStudentIds = studentRows.map(r => r.studentId);
@@ -2949,8 +2865,8 @@ async function main() {
         }
       });
     } catch (err) {
-      console.error('Verify parent OTP error:', err);
-      res.status(500).json({ error: 'Failed to verify code' });
+      console.error('Parent login error:', err);
+      res.status(500).json({ error: 'Failed to log in' });
     }
   });
 

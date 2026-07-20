@@ -129,40 +129,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_LOADING', payload: false });
   }, []);
 
-  // Parent login step 1: request a WhatsApp OTP. Deliberately does not reveal
-  // whether the mobile number is registered — the response is identical either way.
-  const requestParentOtp = useCallback(async (mobile: string): Promise<{ success: boolean; error?: string }> => {
-    try {
-      const response = await apiFetch('/api/auth/parent-login/request-otp', {
-        method: 'POST',
-        skipAuth: true,
-        body: { mobile: mobile.trim() },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        return { success: false, error: data.error || 'Failed to send verification code.' };
-      }
-      return { success: true };
-    } catch (err) {
-      console.error('Request parent OTP error:', err);
-      return { success: false, error: 'Connection to server failed. Please try again.' };
-    }
-  }, []);
-
-  // Parent login step 2: verify the code and, on success, establish the session.
-  const verifyParentOtp = useCallback(
-    async (mobile: string, code: string, rememberMe = false): Promise<{ success: boolean; error?: string }> => {
+  // Parent login: direct login by registered mobile number, no OTP step.
+  const loginParent = useCallback(
+    async (mobile: string, rememberMe = false): Promise<{ success: boolean; error?: string }> => {
       dispatch({ type: 'SET_LOADING', payload: true });
       try {
-        const response = await apiFetch('/api/auth/parent-login/verify-otp', {
+        const response = await apiFetch('/api/auth/parent-login', {
           method: 'POST',
           skipAuth: true,
-          body: { mobile: mobile.trim(), code: code.trim() },
+          body: { mobile: mobile.trim() },
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || !data.success || !data.user || !data.token) {
           dispatch({ type: 'SET_LOADING', payload: false });
-          return { success: false, error: data.error || 'Invalid or expired code.' };
+          return { success: false, error: data.error || 'This mobile number is not registered with Guru Shishyaru Tutorials.' };
         }
 
         const user: User = { ...data.user, roles: ['parent'] };
@@ -175,7 +155,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         dispatch({ type: 'LOGIN_SUCCESS', payload: { user, token } });
         return { success: true };
       } catch (err) {
-        console.error('Verify parent OTP error:', err);
+        console.error('Parent login error:', err);
         dispatch({ type: 'SET_LOADING', payload: false });
         return { success: false, error: 'Connection to server failed. Please try again.' };
       }
@@ -288,8 +268,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     hasPermission: checkPermission,
     hasModuleAccess: checkModuleAccess,
     canAccess,
-    requestParentOtp,
-    verifyParentOtp,
+    loginParent,
     updateUser,
   };
 

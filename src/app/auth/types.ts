@@ -79,7 +79,7 @@ export interface AuthState {
 }
 
 export interface LoginCredentials {
-  /** Email or mobile number for staff/teacher/admin login. Parent login uses requestParentOtp/verifyParentOtp instead. */
+  /** Email or mobile number for staff/teacher/admin login. Parent login uses loginParent instead. */
   email: string;
   password?: string;
   rememberMe?: boolean;
@@ -93,10 +93,8 @@ export interface AuthContextType extends AuthState {
   canAccess: (path: string) => boolean;
   /** Switches the active role for a multi-role user. UI/UX only — server-side authorization always uses the full token `roles`. */
   switchRole: (role: Role) => void;
-  /** Step 1 of parent login: sends a WhatsApp OTP to the given mobile number, if registered. */
-  requestParentOtp: (mobile: string) => Promise<{ success: boolean; error?: string }>;
-  /** Step 2 of parent login: verifies the OTP and, on success, establishes the session. */
-  verifyParentOtp: (mobile: string, code: string, rememberMe?: boolean) => Promise<{ success: boolean; error?: string }>;
+  /** Parent login: logs in directly with a registered mobile number, no further verification. */
+  loginParent: (mobile: string, rememberMe?: boolean) => Promise<{ success: boolean; error?: string }>;
   /** Patches the cached user object in both context state and storage (e.g. after clearing mustChangePassword). */
   updateUser: (patch: Partial<User>) => void;
 }
