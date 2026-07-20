@@ -92,6 +92,11 @@ export function NotificationsPage() {
   }, [auth.user]);
 
   const isStaff = auth.user?.role === 'admin' || auth.user?.role === 'super_admin' || auth.user?.role === 'accountant';
+  const isTeacher = auth.user?.role === 'teacher';
+  // Teachers can see read-receipts for Materials notifications specifically
+  // (did parents see the study material I posted) — matches the backend's
+  // narrower allowance at GET /api/notifications/:id/reads.
+  const canSeeReadsFor = (notification: { notificationType?: string }) => isStaff || (isTeacher && notification.notificationType === 'Materials');
   const [expandedReadsId, setExpandedReadsId] = React.useState<string | null>(null);
   const [readsDetail, setReadsDetail] = React.useState<{ readCount: number; totalRecipients: number; reads: NotificationReadEntry[] } | null>(null);
   const [loadingReads, setLoadingReads] = React.useState(false);
@@ -286,7 +291,7 @@ export function NotificationsPage() {
                   <p>Branch: {notification.branchId ?? 'All Branches'} • Recipient: {notification.recipient ?? 'All'} • Type: {notification.notificationType ?? notification.type}</p>
                 </div>
                 <div className="flex gap-2">
-                  {isStaff && (
+                  {canSeeReadsFor(notification) && (
                     <Button size="sm" variant="ghost" onClick={() => toggleReadsDetail(notification.id)}>
                       <MailOpen className="mr-1 h-3 w-3" />
                       {notification.readCount ?? 0} read
@@ -318,7 +323,7 @@ export function NotificationsPage() {
                   </Button>
                 </div>
               </CardContent>
-              {isStaff && expandedReadsId === notification.id && (
+              {canSeeReadsFor(notification) && expandedReadsId === notification.id && (
                 <CardContent className="border-t border-border pt-4">
                   {loadingReads ? (
                     <p className="text-sm text-muted-foreground">Loading…</p>
@@ -387,7 +392,7 @@ export function NotificationsPage() {
                   <p>Read: {formatDateTime(notification.readAt)} • Deleted: {formatDateTime(notification.deletedAt)}</p>
                 </div>
                 <div className="flex gap-2">
-                  {isStaff && (
+                  {canSeeReadsFor(notification) && (
                     <Button size="sm" variant="ghost" onClick={() => toggleReadsDetail(notification.id)}>
                       <MailOpen className="mr-1 h-3 w-3" />
                       {notification.readCount ?? 0} read
@@ -405,7 +410,7 @@ export function NotificationsPage() {
                   <p>Deleted by: {notification.deletedBy ?? '—'}</p>
                 </div>
               </CardContent>
-              {isStaff && expandedReadsId === notification.id && (
+              {canSeeReadsFor(notification) && expandedReadsId === notification.id && (
                 <CardContent className="border-t border-border pt-4">
                   {loadingReads ? (
                     <p className="text-sm text-muted-foreground">Loading…</p>

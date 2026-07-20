@@ -2437,11 +2437,24 @@ async function main() {
 
     let count = 0;
     if (roles.includes('parent')) {
-      const parents = await db.all(
-        notification.branchId ? 'SELECT id FROM parents WHERE status = ? AND branchId = ?' : 'SELECT id FROM parents WHERE status = ?',
-        ...(notification.branchId ? ['Active', notification.branchId] : ['Active'])
-      );
-      count += parents.length;
+      if (notification.classNames?.length) {
+        // Class-scoped parent notifications (materials, special classes) only
+        // actually reach parents of students in those specific classes — not
+        // every parent in the branch, so count against that narrower set.
+        const placeholders = notification.classNames.map(() => '?').join(',');
+        const params = notification.branchId ? [...notification.classNames, notification.branchId] : notification.classNames;
+        const query = notification.branchId
+          ? `SELECT DISTINCT ps.parentId FROM parent_student ps JOIN students s ON s.id = ps.studentId WHERE s.className IN (${placeholders}) AND s.branchId = ?`
+          : `SELECT DISTINCT ps.parentId FROM parent_student ps JOIN students s ON s.id = ps.studentId WHERE s.className IN (${placeholders})`;
+        const rows = await db.all(query, ...params);
+        count += rows.length;
+      } else {
+        const parents = await db.all(
+          notification.branchId ? 'SELECT id FROM parents WHERE status = ? AND branchId = ?' : 'SELECT id FROM parents WHERE status = ?',
+          ...(notification.branchId ? ['Active', notification.branchId] : ['Active'])
+        );
+        count += parents.length;
+      }
     }
     const staffRoles = roles.filter((r) => r !== 'parent');
     if (staffRoles.length) {
@@ -2512,11 +2525,21 @@ async function main() {
   // Full read-by list for one notification — who has actually seen it and when.
   // Staff-only: this is for the sender (admin/accountant/etc.) to audit delivery,
   // not something a parent/teacher recipient needs to see about other recipients.
+  // Teachers get a narrower allowance: only Materials notifications (e.g. "did
+  // parents see the study material I posted") — there's no stored notion of
+  // which teacher authored a given notification, so this can't be scoped down
+  // to "their own" posts specifically without a schema change, but it's kept
+  // to material-sharing notifications rather than opening up every broadcast
+  // (payroll, admissions, etc.) to every teacher.
   app.get('/api/notifications/:id/reads', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const roles = req.user.roles;
+    const isStaff = roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r));
+    const isTeacherViewingMaterials = roles.includes('teacher');
+    if (!isStaff && !isTeacherViewingMaterials) return res.status(403).json({ error: 'Forbidden' });
     try {
       const row = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
       if (!row) return res.status(404).json({ error: 'Notification not found' });
+      if (!isStaff && row.notificationType !== 'Materials') return res.status(403).json({ error: 'Forbidden' });
       const notif = mapRowToNotification(row);
 
       const [reads, totalRecipients] = await Promise.all([
