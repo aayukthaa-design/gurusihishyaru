@@ -242,7 +242,7 @@ async function runImport(filePath, { dryRun = false } = {}) {
   const duplicates = new Set();
   const existingKeySet = new Set(existing.map(s => `${(s.firstName||'').toLowerCase()}|${(s.lastName||'').toLowerCase()}|${(s.dob||'').toString()}|${(s.primaryParentMobile||'').toString()}`));
 
-  let processed = 0; let imported = 0; let skipped = 0; let invalid = 0;
+  let processed = 0; let imported = 0; let skipped = 0; let invalid = 0; let blank = 0;
   const branchCounts = {};
   const naFieldsCounter = {};
   const needsReview = [];
@@ -256,6 +256,15 @@ async function runImport(filePath, { dryRun = false } = {}) {
 
   for (const r of rows) {
     processed++;
+
+    // A row with no name at all is spreadsheet filler (e.g. Class/Batch/Status
+    // columns dragged further down than the real data), not a student — importing
+    // it would create a placeholder "NA NA" record with a bogus parent account.
+    if (!String(r['First Name'] || '').trim() && !String(r['Last Name'] || '').trim()) {
+      blank++;
+      continue;
+    }
+
     const mapped = mapRow(r);
 
     // Count NA fields
@@ -326,6 +335,7 @@ async function runImport(filePath, { dryRun = false } = {}) {
     processed,
     imported,
     skipped,
+    blank,
     invalid,
     branchCounts,
     naFieldsCounter,
