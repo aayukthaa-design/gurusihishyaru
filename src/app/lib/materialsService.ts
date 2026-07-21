@@ -1,7 +1,7 @@
 import { createStore, useStoreValue } from './store';
 import { addNotification } from './notificationService';
 import { apiFetch } from './apiClient';
-import { getStudentsByIds } from './studentService';
+import { getStudentsByIds, refreshStudents } from './studentService';
 
 export interface StudyMaterial {
   id: number;
@@ -38,6 +38,10 @@ export async function refreshMaterials(user?: any): Promise<StudyMaterial[]> {
     const params = new URLSearchParams();
     if (user.branchId) params.set('branchId', user.branchId);
     if (user.role === 'parent' && user.linkedStudentIds?.length) {
+      // The shared student cache may still hold its pre-login (unauthenticated,
+      // silently-failed) empty snapshot the first time a parent hits this page,
+      // which would otherwise scope classNames to [] and hide every material.
+      await refreshStudents();
       const students = getStudentsByIds(user.linkedStudentIds);
       const classes = Array.from(new Set(students.map((s: any) => s.className)));
       params.set('classNames', classes.join(','));

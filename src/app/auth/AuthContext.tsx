@@ -18,6 +18,7 @@ import type {
 import { isTokenExpired } from './jwt';
 import { hasModuleAccess, hasPermission, canAccessRoute, getPrimaryRole } from './rbac';
 import { refreshNotifications } from '../lib/notificationService';
+import { refreshStudents } from '../lib/studentService';
 import { apiFetch, setUnauthorizedHandler } from '../lib/apiClient';
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
@@ -84,6 +85,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (state.user) {
       void refreshNotifications(state.user);
+      // The module-level initial fetch in studentService runs before login (no
+      // token yet) and silently no-ops, so the parent/homework/materials pages
+      // that read the student cache synchronously would otherwise stay empty
+      // for the entire session — re-fetch now that we have an authenticated user.
+      void refreshStudents();
     }
   }, [state.user]);
 

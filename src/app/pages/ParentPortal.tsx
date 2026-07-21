@@ -15,7 +15,7 @@ import { Link } from 'react-router';
 import { Header } from '../components/Header';
 import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
-import { getStudentsByIds } from '../lib/studentService';
+import { useStudents } from '../lib/studentService';
 import { useNotifications, getVisibleNotificationsForUser } from '../lib/notificationService';
 import { refreshHomework } from '../lib/homeworkService';
 import { subscribeMarks, MarkRecord } from '../lib/examMarksService';
@@ -30,7 +30,11 @@ export function ParentPortal() {
   const notifications = useNotifications();
   const visibleNotifications = getVisibleNotificationsForUser(notifications, user);
 
-  const students = useMemo(() => getStudentsByIds(user?.linkedStudentIds ?? []), [user?.linkedStudentIds]);
+  const allStudents = useStudents();
+  const students = useMemo(
+    () => allStudents.filter((student) => user?.linkedStudentIds?.includes(student.id)),
+    [allStudents, user?.linkedStudentIds]
+  );
   const [selectedStudentId, setSelectedStudentId] = useState<string>('');
 
   useEffect(() => {

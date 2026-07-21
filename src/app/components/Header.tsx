@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { ThemeToggle } from './ThemeToggle';
 import { useAuth } from '../auth/AuthContext';
 import { getRoleLabel, defaultRouteForRole } from '../auth/rbac';
+import { useNotifications, getNotificationStats } from '../lib/notificationService';
 
 interface HeaderProps {
   title: string;
@@ -11,6 +12,8 @@ interface HeaderProps {
 export function Header({ title }: HeaderProps) {
   const { user, switchRole } = useAuth();
   const navigate = useNavigate();
+  const notifications = useNotifications();
+  const unreadCount = getNotificationStats(notifications, user).unread;
 
   const handleRoleChange = (role: string) => {
     switchRole(role as NonNullable<typeof user>['role']);
@@ -33,9 +36,15 @@ export function Header({ title }: HeaderProps) {
         </div>
 
         {/* Notifications */}
-        <button className="relative rounded-lg border border-border bg-card p-2 transition-all hover:bg-secondary">
+        <button
+          onClick={() => navigate('/notifications')}
+          className="relative rounded-lg border border-border bg-card p-2 transition-all hover:bg-secondary"
+          aria-label={unreadCount > 0 ? `${unreadCount} unread notifications` : 'Notifications'}
+        >
           <Bell className="h-4 w-4" />
-          <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-destructive" />
+          {unreadCount > 0 && (
+            <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-destructive" />
+          )}
         </button>
 
         <ThemeToggle />

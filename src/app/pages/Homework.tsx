@@ -6,7 +6,7 @@ import {
   FileSpreadsheet, Edit3
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
-import { getStudentsForClass } from '../lib/studentService';
+import { getStudentsForClass, useStudents } from '../lib/studentService';
 import { getBranchName } from '../lib/branchService';
 import {
   useHomework,
@@ -50,12 +50,11 @@ export function Homework() {
   const [editingHomeworkId, setEditingHomeworkId] = useState<string | null>(null);
 
   // Parent student selection
+  const allStudents = useStudents();
   const parentStudents = useMemo(() => {
     if (user?.role !== 'parent' || !user.linkedStudentIds) return [];
-    // We can call getStudentsByIds
-    const students = getStudentsForClass();
-    return students.filter(s => user.linkedStudentIds?.includes(s.id));
-  }, [user]);
+    return allStudents.filter(s => user.linkedStudentIds?.includes(s.id));
+  }, [user, allStudents]);
 
   const [selectedStudentId, setSelectedStudentId] = useState(parentStudents[0]?.id || '');
   const selectedStudent = useMemo(() => {
