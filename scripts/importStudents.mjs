@@ -5,6 +5,11 @@ import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 
 const API_BASE = process.env.API_BASE || 'http://localhost:4000';
+// The server requires auth on every /api/* route except /api/auth/*. Without this,
+// postStudentAPI's requests always 401 and every import silently falls through to
+// the direct-SQLite fallback, skipping the server's own validation entirely.
+const API_TOKEN = process.env.API_TOKEN || '';
+const authHeaders = API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {};
 
 function titleCase(str) {
   return String(str || '')
@@ -35,11 +40,29 @@ function normalizeClass(c) {
   return v.replace(/Grade\s*/i, '').trim();
 }
 
+const KNOWN_BOARDS = { CBSE: 'CBSE', ICSE: 'ICSE', STATE: 'State' };
+
+// The "Batch" column in the real admissions sheet holds the academic board
+// (CBSE/State/ICSE), not a session label. A few source rows have a raw
+// Excel time value (e.g. someone typed "4:30" into that cell) which xlsx
+// hands us as a bare number like 0.1875 — importing that as literal batch
+// text would silently corrupt the record, so those get flagged instead of
+// normalized/guessed.
 function normalizeBatch(b) {
+  // xlsx (with cellDates:true, used for the Date-of-Birth/Admission-Date columns)
+  // auto-converts any Excel time-serial-looking cell to a JS Date — including a
+  // stray typo like "4:30" someone typed into the Batch column instead of a board
+  // name. A raw number can also show up depending on the workbook.
+  if (typeof b === 'number' || b instanceof Date) {
+    return { value: '', needsReview: true, raw: b instanceof Date ? b.toISOString() : b };
+  }
   const v = String(b || '').trim();
-  if (!v) return 'NA';
-  // Title-case common words and keep numbers
-  return titleCase(v.replace(/\s+/g, ' '));
+  if (!v) return { value: 'NA', needsReview: false, raw: b };
+  const known = KNOWN_BOARDS[v.toUpperCase()];
+  if (known) return { value: known, needsReview: false, raw: b };
+  // Unrecognized text (not CBSE/State/ICSE) — still import so the row isn't
+  // dropped, but flag it since it doesn't match the real board model.
+  return { value: titleCase(v.replace(/\s+/g, ' ')), needsReview: true, raw: b };
 }
 
 function normalizeStatus(s) {
@@ -70,7 +93,7 @@ function parseDate(value) {
 
 async function fetchExistingStudents() {
   try {
-    const res = await fetch(`${API_BASE}/api/students`);
+    const res = await fetch(`${API_BASE}/api/students`, { headers: authHeaders });
     if (res.ok) return await res.json();
     console.error('Failed to fetch students from API, status', res.status);
   } catch (err) {
@@ -90,6 +113,17 @@ async function fetchExistingStudents() {
   }
 }
 
+// Excel stores mobile-number columns as numbers, not text. Left as a JS number
+// all the way to the API, a 10-digit value exceeds the sqlite3 driver's 32-bit
+// int-bind threshold, gets bound as a float, and lands in the (TEXT) column as
+// "9535755739.0" — silently breaking that family's parent login. Force to a
+// clean digit string here instead.
+function toMobileString(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'number') return String(Math.round(v));
+  return String(v).trim();
+}
+
 function mapRow(row) {
   // Column mapping per user specification
   const firstName = row['First Name'] || row['FirstName'] || row['First'] || '';
@@ -97,7 +131,8 @@ function mapRow(row) {
   const gender = row['Gender'] || 'NA';
   const dob = parseDate(row['Date of Birth'] || row['DOB'] || row['Birth Date']);
   const className = normalizeClass(row['Class']);
-  const batch = normalizeBatch(row['Batch']);
+  const batchResult = normalizeBatch(row['Batch']);
+  const batch = batchResult.value;
   const admissionDate = parseDate(row['Admission Date']);
   const branch = normalizeBranch(row['Assigned Branch'] || row['Branch']);
   const status = normalizeStatus(row['Status']);
@@ -106,12 +141,12 @@ function mapRow(row) {
   const motherName = row['Mother Name'] || 'NA';
   const primaryParentName = row['Primary Parent / Guardian Name'] || 'NA';
   const relationship = row['Relationship'] || 'NA';
-  const fatherMobile = row['Father Mobile Number'] || 'NA';
-  const motherMobile = row['Mother Mobile Number'] || 'NA';
-  const primaryParentMobile = row['Primary Parent Login Mobile'] || row['Parent Login Mobile'] || 'NA';
+  const fatherMobile = toMobileString(row['Father Mobile Number']) || 'NA';
+  const motherMobile = toMobileString(row['Mother Mobile Number']) || 'NA';
+  const primaryParentMobile = toMobileString(row['Primary Parent Login Mobile']) || toMobileString(row['Parent Login Mobile']) || 'NA';
   const parentEmail = row['Parent Email'] || 'NA';
   const guardianName = row['Guardian Name (Optional)'] || row['Guardian Name'] || 'NA';
-  const guardianMobile = row['Guardian Mobile (Optional)'] || row['Guardian Mobile'] || 'NA';
+  const guardianMobile = toMobileString(row['Guardian Mobile (Optional)']) || toMobileString(row['Guardian Mobile']) || 'NA';
 
   const filledNAFields = [];
   // Collect fields that were empty and set to NA
@@ -143,6 +178,8 @@ function mapRow(row) {
     guardianMobile: guardianMobile || 'NA',
     addressRaw: address,
     filledNAFields,
+    batchNeedsReview: batchResult.needsReview,
+    batchRaw: batchResult.raw,
   };
 }
 
@@ -150,7 +187,7 @@ async function postStudentAPI(student) {
   try {
     const res = await fetch(`${API_BASE}/api/students`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
       body: JSON.stringify(student)
     });
     if (res.ok) return await res.json();
@@ -190,7 +227,7 @@ async function insertStudentDB(db, s) {
   }
 }
 
-async function runImport(filePath) {
+async function runImport(filePath, { dryRun = false } = {}) {
   if (!fs.existsSync(filePath)) {
     console.error('File not found:', filePath);
     process.exit(1);
@@ -208,11 +245,12 @@ async function runImport(filePath) {
   let processed = 0; let imported = 0; let skipped = 0; let invalid = 0;
   const branchCounts = {};
   const naFieldsCounter = {};
+  const needsReview = [];
 
-  // Try to open DB for fallback writes
+  // Try to open DB for fallback writes (skipped entirely in dry-run mode)
   let db = null;
   const dbPath = path.resolve(process.cwd(), 'server', 'data.db');
-  if (fs.existsSync(dbPath)) {
+  if (!dryRun && fs.existsSync(dbPath)) {
     db = await open({ filename: dbPath, driver: sqlite3.Database });
   }
 
@@ -223,9 +261,19 @@ async function runImport(filePath) {
     // Count NA fields
     for (const f of mapped.filledNAFields) naFieldsCounter[f] = (naFieldsCounter[f] || 0) + 1;
 
+    if (mapped.batchNeedsReview) {
+      needsReview.push({ name: `${mapped.firstName} ${mapped.lastName}`, className: mapped.className, rawBatch: mapped.batchRaw, resolvedBatch: mapped.batch });
+    }
+
     const key = `${(mapped.firstName||'').toLowerCase()}|${(mapped.lastName||'').toLowerCase()}|${(mapped.dob||'').toString()}|${(mapped.primaryParentMobile||'').toString()}`;
     if (existingKeySet.has(key) || duplicates.has(key)) {
       skipped++; duplicates.add(key); continue;
+    }
+
+    if (dryRun) {
+      imported++; // "would import"
+      existingKeySet.add(key);
+      continue;
     }
 
     // Prepare payload matching server expectation
@@ -270,23 +318,27 @@ async function runImport(filePath) {
 
   if (db) await db.close();
 
-  // Final verification read
-  const finalList = await fetchExistingStudents();
+  // Final verification read (skipped in dry-run — nothing was written)
+  const finalList = dryRun ? existing : await fetchExistingStudents();
 
   const report = {
+    dryRun,
     processed,
     imported,
     skipped,
     invalid,
     branchCounts,
     naFieldsCounter,
+    needsReview,
     totalAfterImport: finalList.length
   };
 
-  console.log('\nImport Report:');
+  console.log(dryRun ? '\nDry-run Report (nothing was written):' : '\nImport Report:');
   console.log(JSON.stringify(report, null, 2));
 }
 
 // CLI
-const argPath = process.argv[2] || path.resolve(process.cwd(), 'imports', 'students.xlsx');
-await runImport(argPath);
+const args = process.argv.slice(2).filter((a) => a !== '--dry-run');
+const dryRun = process.argv.includes('--dry-run');
+const argPath = args[0] || path.resolve(process.cwd(), 'imports', 'students.xlsx');
+await runImport(argPath, { dryRun });

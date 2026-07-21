@@ -3433,6 +3433,14 @@ async function main() {
       if (!s.firstName || !s.lastName || !s.primaryParentMobile) {
         return res.status(400).json({ error: 'First name, last name, and primary parent mobile are required' });
       }
+      // A mobile number sent as a JSON number (rather than a string) exceeds the
+      // sqlite3 driver's 32-bit int-bind range, gets bound as a float, and lands
+      // in these TEXT columns as e.g. "9535755739.0" — silently breaking that
+      // family's parent login. Force to plain strings regardless of caller.
+      s.fatherMobile = s.fatherMobile != null ? String(s.fatherMobile) : s.fatherMobile;
+      s.motherMobile = s.motherMobile != null ? String(s.motherMobile) : s.motherMobile;
+      s.primaryParentMobile = String(s.primaryParentMobile);
+      s.guardianMobile = s.guardianMobile != null ? String(s.guardianMobile) : s.guardianMobile;
 
       const now = new Date().toISOString();
       const studentId = s.id || `STU${Date.now()}`;
