@@ -3,10 +3,11 @@ import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { apiFetch } from '../lib/apiClient';
-import { 
-  Calendar, Clock, MapPin, FileText, User, Plus, Edit2, 
-  Trash2, XCircle, CheckCircle2, Download, AlertCircle, RefreshCw, BarChart2 
+import {
+  Calendar, Clock, MapPin, FileText, User, Plus, Edit2,
+  Trash2, XCircle, CheckCircle2, Download, AlertCircle, RefreshCw, BarChart2
 } from 'lucide-react';
+import { GRADES, BOARDS } from '../lib/classConstants';
 
 interface SpecialClass {
   id: number;
@@ -67,8 +68,8 @@ export function SpecialClasses() {
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState('Mathematics');
   const [branchId, setBranchId] = useState('');
-  const [className, setClassName] = useState('10th A');
-  const [batch, setBatch] = useState('Batch A');
+  const [className, setClassName] = useState('10th');
+  const [batch, setBatch] = useState(BOARDS[0]);
   const [date, setDate] = useState('');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
@@ -204,8 +205,8 @@ export function SpecialClasses() {
     setEditId(null);
     setTitle('');
     setSubject('Mathematics');
-    setClassName('10th A');
-    setBatch('Batch A');
+    setClassName('10th');
+    setBatch(BOARDS[0]);
     setDate('');
     setStartTime('');
     setEndTime('');
@@ -607,30 +608,18 @@ export function SpecialClasses() {
                     onChange={(e) => setClassName(e.target.value)}
                     className="w-full rounded-xl border border-input bg-input-background px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                   >
-                    <option>10th A</option>
-                    <option>10th B</option>
-                    <option>10th C</option>
-                    <option>9th A</option>
-                    <option>9th B</option>
-                    <option>11th A</option>
-                    <option>11th B</option>
-                    <option>12th A</option>
-                    <option>12th B</option>
+                    {GRADES.map((g) => <option key={g}>{g}</option>)}
                   </select>
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="font-semibold text-muted-foreground">Batch *</label>
+                  <label className="font-semibold text-muted-foreground">Board *</label>
                   <select
                     value={batch}
                     onChange={(e) => setBatch(e.target.value)}
                     className="w-full rounded-xl border border-input bg-input-background px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                   >
-                    <option>Batch A</option>
-                    <option>Batch B</option>
-                    <option>Batch C</option>
-                    <option>Morning</option>
-                    <option>Evening</option>
+                    {BOARDS.map((b) => <option key={b}>{b}</option>)}
                   </select>
                 </div>
               </div>

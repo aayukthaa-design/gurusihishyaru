@@ -7,9 +7,10 @@ import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceServ
 import { saveAttendanceAPI } from '../lib/attendanceService';
 import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
+import { GRADES, BOARDS } from '../lib/classConstants';
 
 
-const CLASSES = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B', '10th C', '11th A', '11th B', '12th A', '12th B'];
+const CLASSES = GRADES;
 
 const TODAY = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const TODAY_ISO = new Date().toISOString().split('T')[0];
@@ -19,6 +20,7 @@ export function Attendance() {
   const branches = getBranches();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const [selectedClass, setSelectedClass] = useState('');
+  const [selectedBoard, setSelectedBoard] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [attendance, setAttendance] = useState<Record<string, 'present' | 'absent'>>({});
   const [saved, setSaved] = useState(false);
@@ -76,16 +78,16 @@ export function Attendance() {
     loadRecentAttendance();
   }, []);
 
-  // Fetch students for selected class and branch
+  // Fetch students for selected class, board and branch
   useEffect(() => {
-    if (!selectedClass) {
+    if (!selectedClass || !selectedBoard) {
       setStudents([]);
       return;
     }
     setLoading(true);
-    const url = `/api/students?className=${encodeURIComponent(selectedClass)}` + 
+    const url = `/api/students?className=${encodeURIComponent(selectedClass)}&batch=${encodeURIComponent(selectedBoard)}` +
                 (branchFilter ? `&branchId=${encodeURIComponent(branchFilter)}` : '');
-    
+
     apiFetch(url)
       .then((res) => res.json())
       .then((data) => {
@@ -119,7 +121,7 @@ export function Attendance() {
           setSaved(false);
         } else {
           // Fallback to in-memory students when API returns no data
-          const local = getStudentsForClass(selectedClass, branchFilter);
+          const local = getStudentsForClass(selectedClass, branchFilter, selectedBoard);
           const mapped = local.map((s) => ({
             id: s.id,
             name: `${s.firstName} ${s.lastName}`,
@@ -150,7 +152,7 @@ export function Attendance() {
       })
       .catch((err) => {
         console.error('Failed to load students for class (API), falling back to local cache', err);
-        const local = getStudentsForClass(selectedClass, branchFilter);
+        const local = getStudentsForClass(selectedClass, branchFilter, selectedBoard);
         const mapped = local.map((s) => ({
           id: s.id,
           name: `${s.firstName} ${s.lastName}`,
@@ -167,7 +169,7 @@ export function Attendance() {
         setSaved(false);
       })
       .finally(() => setLoading(false));
-  }, [selectedClass, branchFilter]);
+  }, [selectedClass, selectedBoard, branchFilter]);
 
 
   const toggle = (id: string) => {
@@ -340,7 +342,7 @@ export function Attendance() {
             {CLASSES.map((cls) => (
               <button
                 key={cls}
-                onClick={() => { setSelectedClass(cls); setAttendance({}); setSaved(false); }}
+                onClick={() => { setSelectedClass(cls); setSelectedBoard(''); setAttendance({}); setSaved(false); }}
                 className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${
                   selectedClass === cls
                     ? 'border-primary bg-primary text-primary-foreground'
@@ -353,13 +355,38 @@ export function Attendance() {
           </div>
         </div>
 
-        {/* ── Step 2: Mark Attendance ── */}
+        {/* ── Step 2: Select Board ── */}
         {selectedClass && (
+          <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+            <h2 className="mb-4 text-base font-semibold text-foreground">
+              <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
+              Select Board — {selectedClass}
+            </h2>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {BOARDS.map((board) => (
+                <button
+                  key={board}
+                  onClick={() => { setSelectedBoard(board); setAttendance({}); setSaved(false); }}
+                  className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${
+                    selectedBoard === board
+                      ? 'border-primary bg-primary text-primary-foreground'
+                      : 'border-border bg-secondary text-foreground hover:border-primary/40'
+                  }`}
+                >
+                  {board}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Step 3: Mark Attendance ── */}
+        {selectedClass && selectedBoard && (
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold text-foreground">
-                <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-                Mark Attendance — {selectedClass}
+                <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">3</span>
+                Mark Attendance — {selectedClass} ({selectedBoard})
               </h2>
               <div className="flex gap-2">
                 <button
@@ -380,7 +407,7 @@ export function Attendance() {
             {loading ? (
               <div className="text-center py-6 text-sm text-muted-foreground">Loading class student profiles...</div>
             ) : students.length === 0 ? (
-              <div className="text-center py-6 text-sm text-muted-foreground">No students enrolled in {selectedClass} for this branch.</div>
+              <div className="text-center py-6 text-sm text-muted-foreground">No students enrolled in {selectedClass} ({selectedBoard}) for this branch.</div>
             ) : (
               <div className="space-y-2">
                 {students.map((s) => {

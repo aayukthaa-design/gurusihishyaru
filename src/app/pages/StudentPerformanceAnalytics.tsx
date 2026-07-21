@@ -115,7 +115,7 @@ export function StudentPerformanceAnalytics() {
         admissionNumber: student?.admissionNumber || 'ADM' + mark.studentId.replace(/\D/g, ''),
         branchId: student?.branchId || (exam?.teacherId === 'TCH002' ? 'branch_jayanagar' : 'branch_rajajinagar'),
         branchName: student?.branchName || (exam?.teacherId === 'TCH002' ? 'Jayanagar Branch' : 'Rajajinagar Branch'),
-        className: exam?.className || student?.className || '10th A',
+        className: exam?.className || student?.className || '10th',
         batch: exam?.batch || 'Batch A',
         subject: exam?.subject || 'Mathematics',
         examId: mark.examId,

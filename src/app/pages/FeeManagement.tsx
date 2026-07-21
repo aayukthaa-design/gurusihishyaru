@@ -17,6 +17,7 @@ import {
   FeeRecord,
 } from '../lib/feeService';
 import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus } from 'lucide-react';
+import { GRADES } from '../lib/classConstants';
 
 const STATUS_CONFIG = {
   Paid:            { icon: CheckCircle2, color: 'text-green-600 dark:text-green-400',  bg: 'bg-green-100 dark:bg-green-900/40' },
@@ -25,7 +26,7 @@ const STATUS_CONFIG = {
   Overdue:         { icon: AlertCircle,   color: 'text-red-600 dark:text-red-400',      bg: 'bg-red-100 dark:bg-red-900/40' },
 } as const;
 
-const CLASS_OPTIONS = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B', '10th C', '11th A', '11th B', '12th A', '12th B'];
+const CLASS_OPTIONS = GRADES;
 const FEE_TYPES = ['Tuition', 'Admission', 'Exam', 'Transport', 'Other'];
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
 

@@ -5,6 +5,7 @@ import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { enrollAdmissionByApplicantName } from '../lib/admissionService';
 import { useStudents, addStudentAPI, updateStudentAPI, refreshStudents } from '../lib/studentService';
+import { GRADES, BOARDS } from '../lib/classConstants';
 import {
   Users, Plus, Search, Eye, Edit2, ChevronRight,
   X, GraduationCap, Phone, MapPin, CalendarDays,
@@ -38,8 +39,8 @@ interface Student {
   guardianMobile?: string;
 }
 
-const CLASSES = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B', '10th C', '11th A', '11th B', '12th A', '12th B'];
-const BATCHES = ['Batch A', 'Batch B', 'Batch C', 'Morning', 'Evening'];
+const CLASSES = GRADES;
+const BATCHES = BOARDS;
 
 const EMPTY_FORM: Omit<Student, 'id'> = {
   branchId: '',
@@ -123,9 +124,9 @@ function StudentForm({
           </select>
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-foreground">Batch <span className="text-destructive">*</span></label>
+          <label className="mb-1.5 block text-sm font-medium text-foreground">Board <span className="text-destructive">*</span></label>
           <select value={form.batch} onChange={(e) => set('batch', e.target.value)} className="field">
-            <option value="">Select batch…</option>
+            <option value="">Select board…</option>
             {BATCHES.map((b) => <option key={b}>{b}</option>)}
           </select>
         </div>
@@ -296,7 +297,7 @@ function StudentProfile({ student, onClose }: { student: Student; onClose: () =>
         {[
           { icon: CalendarDays, label: 'Date of Birth', value: student.dob },
           { icon: Users, label: 'Gender', value: student.gender },
-          { icon: GraduationCap, label: 'Class & Batch', value: `${student.class} — ${student.batch}` },
+          { icon: GraduationCap, label: 'Class & Board', value: `${student.class} — ${student.batch}` },
           { icon: CalendarDays, label: 'Admission Date', value: student.admissionDate },
           { icon: Phone, label: 'Primary Parent Name', value: student.primaryParentName || student.parentName },
           { icon: Phone, label: 'Primary Parent Mobile', value: student.primaryParentMobile || student.parentMobile },
@@ -521,7 +522,7 @@ export function StudentManagement() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-border bg-secondary/40">
-                  {['Student', 'Class', 'Batch', 'Primary Parent', 'Parent Login Mobile', 'Status', ''].map((heading) => (
+                  {['Student', 'Class', 'Board', 'Primary Parent', 'Parent Login Mobile', 'Status', ''].map((heading) => (
                     <th key={heading} className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">{heading}</th>
                   ))}
                 </tr>

@@ -62,7 +62,7 @@ export async function refreshStudents(): Promise<StudentRecord[]> {
 // Initial load
 void refreshStudents();
 
-export function getStudentsForClass(className?: string, branchId?: string): StudentRecord[] {
+export function getStudentsForClass(className?: string, branchId?: string, batch?: string): StudentRecord[] {
   const list = studentStore.getState();
   return list.filter((student) => {
     // Normalise class names
@@ -70,7 +70,8 @@ export function getStudentsForClass(className?: string, branchId?: string): Stud
     const filterClass = className ? className.replace('Grade ', '') : '';
     const matchesClass = !className || sClass === filterClass;
     const matchesBranch = !branchId || student.branchId === branchId;
-    return matchesClass && matchesBranch;
+    const matchesBoard = !batch || student.batch === batch;
+    return matchesClass && matchesBranch && matchesBoard;
   });
 }
 

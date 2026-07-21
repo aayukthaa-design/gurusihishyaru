@@ -24,9 +24,10 @@ import {
   HomeworkAttachment
 } from '../lib/homeworkService';
 import { apiFetch } from '../lib/apiClient';
+import { GRADES, BOARDS } from '../lib/classConstants';
 
-const CLASS_OPTIONS = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B'];
-const BATCH_OPTIONS = ['Batch A', 'Batch B', 'Morning', 'Evening'];
+const CLASS_OPTIONS = GRADES;
+const BATCH_OPTIONS = BOARDS;
 const SUBJECT_OPTIONS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'Computer Science'];
 
 const API_BASE = '';
@@ -487,7 +488,7 @@ export function Homework() {
                   </label>
 
                   <label className="grid gap-2 text-sm font-semibold">
-                    <span>Batch *</span>
+                    <span>Board *</span>
                     <select
                       value={batch}
                       onChange={(e) => setBatch(e.target.value)}
@@ -670,7 +671,7 @@ export function Homework() {
                   <p className="mt-1 font-bold text-foreground">{selectedClass}</p>
                 </div>
                 <div className="rounded-2xl border bg-background p-3.5 text-sm">
-                  <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Subject & Batch</p>
+                  <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Subject & Board</p>
                   <p className="mt-1 font-bold text-foreground">{subject} · {batch}</p>
                 </div>
                 <div className="rounded-2xl border bg-background p-3.5 text-sm">

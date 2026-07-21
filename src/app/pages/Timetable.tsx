@@ -5,8 +5,9 @@ import { useTeacherProfiles } from './TeacherManagement';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
 import { X } from 'lucide-react';
+import { GRADES } from '../lib/classConstants';
 
-const CLASSES = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B', '10th C', '11th A', '11th B', '12th A', '12th B'];
+const CLASSES = GRADES;
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const periods = ['08:00-09:00', '09:00-10:00', '10:00-11:00', '11:30-12:30', '12:30-01:30', '02:00-03:00'];
 const SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Geography', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];

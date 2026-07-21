@@ -8,6 +8,7 @@ import { submitExamAttendanceRecords } from '../lib/examAttendanceService';
 import { updateExamStatus } from '../lib/examService';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../lib/apiClient';
+import { BOARDS } from '../lib/classConstants';
 
 export function TeacherCreateExam() {
   const { user } = useAuth();
@@ -32,28 +33,13 @@ export function TeacherCreateExam() {
   const [attendanceMessage, setAttendanceMessage] = React.useState<string | null>(null);
   const [attendanceSuccess, setAttendanceSuccess] = React.useState(false);
 
-  // Subjects by class (fallback mapping) — teachers can pick subjects relevant to the selected class
-  const SUBJECTS_BY_CLASS: Record<string, string[]> = {
-    '8th A': ['Math', 'Science', 'English'],
-    '8th B': ['Math', 'Science', 'English'],
-    '9th A': ['Math', 'Physics', 'English'],
-    '9th B': ['Math', 'Physics', 'English'],
-    '10th A': ['Mathematics', 'Chemistry', 'Biology'],
-    '10th B': ['Mathematics', 'Chemistry', 'Biology'],
-  };
+  // Fallback subject list used only when no real allocation data exists yet for this
+  // teacher/class — not class-specific, since the real subjects always come from allocMap.
+  const SUBJECT_FALLBACKS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'Computer Science'];
 
-  const BATCHES_BY_CLASS: Record<string, string[]> = {
-    '8th A': ['2026-Morning','2026-Evening'],
-    '8th B': ['2026-Morning','2026-Evening'],
-    '9th A': ['2026-Morning'],
-    '9th B': ['2026-Morning'],
-    '10th A': ['2026-Day'],
-    '10th B': ['2026-Day'],
-  };
+  const batchesForClass = allocMap[className]?.batches || BOARDS;
 
-  const batchesForClass = allocMap[className]?.batches || BATCHES_BY_CLASS[className] || [];
-
-  const subjectsForClass = allocMap[className]?.subjects || SUBJECTS_BY_CLASS[className] || [];
+  const subjectsForClass = allocMap[className]?.subjects || SUBJECT_FALLBACKS;
   
   React.useEffect(() => {
     if (!classesState.includes(className) && classesState.length > 0) setClassName(classesState[0]);
@@ -265,7 +251,7 @@ export function TeacherCreateExam() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-muted-foreground">Batch</label>
+            <label className="block text-sm font-medium text-muted-foreground">Board</label>
             {batchesForClass.length > 0 ? (
               <select value={batch} onChange={(e)=>setBatch(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
                 {batchesForClass.map((b)=> <option key={b} value={b}>{b}</option>)}

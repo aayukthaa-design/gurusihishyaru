@@ -12,8 +12,9 @@ import {
   StudyMaterial,
 } from '../lib/materialsService';
 import { Library, Upload, Trash2, Download, Loader2, FileText } from 'lucide-react';
+import { BOARDS } from '../lib/classConstants';
 
-const BATCH_OPTIONS = ['Batch A', 'Batch B', 'Morning', 'Evening'];
+const BATCH_OPTIONS = BOARDS;
 
 export function Materials() {
   const { user } = useAuth();
@@ -189,7 +190,7 @@ export function Materials() {
                   </select>
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm">
-                  <span className="font-medium text-foreground">Batch</span>
+                  <span className="font-medium text-foreground">Board</span>
                   <select
                     value={batch}
                     onChange={(e) => setBatch(e.target.value)}

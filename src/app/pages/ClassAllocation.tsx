@@ -8,6 +8,7 @@ import { Button } from '../components/ui/button';
 import { addNotification } from '../lib/notificationService';
 import { apiFetch } from '../lib/apiClient';
 import { useTeacherProfiles, refreshTeacherProfiles } from './TeacherManagement';
+import { GRADES, BOARDS } from '../lib/classConstants';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -24,8 +25,8 @@ export interface Allocation {
   status: 'Assigned' | 'Pending' | 'Removed';
 }
 
-const CLASSES = ['8th A', '8th B', '9th A', '9th B', '10th A', '10th B', '10th C', '11th A', '11th B', '12th A', '12th B'];
-const BATCHES = ['Batch A', 'Batch B', 'Batch C', 'Morning', 'Evening'];
+const CLASSES = GRADES;
+const BATCHES = BOARDS;
 const ALL_SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];
 
 const EMPTY_FORM = { teacherId: '', teacherName: '', class: CLASSES[0], subject: ALL_SUBJECTS[0], batch: BATCHES[0], students: 0, weeklyHours: 0 };
@@ -178,7 +179,7 @@ export function ClassAllocation() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-border bg-secondary/40">
-                {['Teacher', 'Class', 'Subject', 'Batch', 'Students', 'Hours', 'Status', ''].map((h) => (
+                {['Teacher', 'Class', 'Subject', 'Board', 'Students', 'Hours', 'Status', ''].map((h) => (
                   <th key={h} className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">{h}</th>
                 ))}
               </tr>
@@ -268,7 +269,7 @@ export function ClassAllocation() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium">Batch</label>
+                <label className="block text-sm font-medium">Board</label>
                 <select className="w-full border rounded px-2 py-1" value={selected.batch} onChange={(e) => handleChange('batch', e.target.value)}>
                   {BATCHES.map((b) => (
                     <option key={b} value={b}>{b}</option>
@@ -330,7 +331,7 @@ export function ClassAllocation() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium">Batch</label>
+              <label className="block text-sm font-medium">Board</label>
               <select className="w-full border rounded px-2 py-1" value={addForm.batch} onChange={(e) => setAddForm((p) => ({ ...p, batch: e.target.value }))}>
                 {BATCHES.map((b) => <option key={b} value={b}>{b}</option>)}
               </select>

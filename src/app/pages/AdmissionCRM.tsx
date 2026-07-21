@@ -22,7 +22,7 @@ import { composeWhatsAppMessage, getWhatsAppBusinessName } from '../lib/whatsapp
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
 
-const EMPTY_ENQUIRY = { applicantName: '', grade: '10th A', contactNumber: '', email: '', appliedDate: new Date().toISOString().slice(0, 10) };
+const EMPTY_ENQUIRY = { applicantName: '', grade: '10th', contactNumber: '', email: '', appliedDate: new Date().toISOString().slice(0, 10) };
 
 export function AdmissionCRM() {
   const { user } = useAuth();
@@ -180,7 +180,7 @@ export function AdmissionCRM() {
             </div>
             <div>
               <label className="block text-sm font-medium">Grade / Class</label>
-              <input className="w-full border rounded px-2 py-1" value={addForm.grade} onChange={(e) => setAddForm((p) => ({ ...p, grade: e.target.value }))} placeholder="e.g. 10th A" />
+              <input className="w-full border rounded px-2 py-1" value={addForm.grade} onChange={(e) => setAddForm((p) => ({ ...p, grade: e.target.value }))} placeholder="e.g. 10th" />
             </div>
             <div>
               <label className="block text-sm font-medium">Contact Number</label>

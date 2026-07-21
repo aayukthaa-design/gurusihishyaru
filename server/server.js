@@ -3328,7 +3328,7 @@ async function main() {
         return res.status(403).json({ error: 'Forbidden' });
       }
 
-      const { className } = req.query;
+      const { className, batch } = req.query;
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM students';
       const params = [];
@@ -3337,6 +3337,10 @@ async function main() {
       if (className) {
         conditions.push('className = ?');
         params.push(className);
+      }
+      if (batch) {
+        conditions.push('batch = ?');
+        params.push(batch);
       }
       if (branchId) {
         conditions.push('branchId = ?');
