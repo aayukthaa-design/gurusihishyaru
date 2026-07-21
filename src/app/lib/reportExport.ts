@@ -43,6 +43,14 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
+// jsPDF's core fonts (Times/Helvetica/Courier) don't include the ₹ glyph (U+20B9) —
+// it renders as a broken/superscript character in the exported PDF. formatCurrency()
+// output also feeds an on-screen summary-card UI (ReportsAnalytics), where ₹ renders
+// fine, so the swap happens only here, at the point values are written into the PDF.
+function pdfSafe(text: string): string {
+  return text.replace(/₹/g, 'Rs. ');
+}
+
 function formatNumber(value: number) {
   return new Intl.NumberFormat('en-IN').format(value);
 }
@@ -372,7 +380,7 @@ export async function exportReportToPdf(
   const lowestScore = Math.max(35, Math.round(examAverage - 10));
   const passPercentage = Math.min(100, Math.max(65, Math.round(examAverage + 12)));
 
-  const overviewRows = data.summaryCards.map((card) => [card.label, `${card.value} • ${card.note}`]);
+  const overviewRows = data.summaryCards.map((card) => [card.label, pdfSafe(`${card.value} • ${card.note}`)]);
   const revenueInsight = revenueDelta >= 0
     ? `Monthly revenue increased by ${Math.abs(revenueDelta)}% compared to the previous month because of stronger fee collections.`
     : `Monthly revenue declined by ${Math.abs(revenueDelta)}% compared to the previous month and should be supported with stronger collections.`;
@@ -403,7 +411,7 @@ export async function exportReportToPdf(
   
   // Executive Summary
   pdfService.addMainHeading('Executive Summary');
-  pdfService.addParagraph(data.executiveSummary);
+  pdfService.addParagraph(pdfSafe(data.executiveSummary));
   pdfService.addParagraph(`The institute is currently showing ${getTrendLabel(revenueDelta)} revenue movement, ${getTrendLabel(enrollmentDelta)} enrollment movement, ${getTrendLabel(attendanceDelta)} attendance movement, and ${getTrendLabel(examDelta)} academic performance movement for the reporting period.`);
   
   pdfService.addSectionHeading('Dashboard Overview');
@@ -418,8 +426,8 @@ export async function exportReportToPdf(
     pdfService.addImage(revenueImage, 'PNG', pdfService.getContentWidth(), 60);
   }
   pdfService.addTable([['Metric', 'Value']], [
-    ['Current Revenue', formatCurrency(revenueCurrent)],
-    ['Previous Revenue', formatCurrency(revenuePrevious)],
+    ['Current Revenue', pdfSafe(formatCurrency(revenueCurrent))],
+    ['Previous Revenue', pdfSafe(formatCurrency(revenuePrevious))],
     ['Percentage Change', `${revenueDelta >= 0 ? '+' : ''}${revenueDelta}%`],
     ['Trend', getTrendLabel(revenueDelta)],
     ['Business Insight', revenueInsight],
@@ -482,15 +490,15 @@ export async function exportReportToPdf(
     pdfService.addImage(feeImage, 'PNG', pdfService.getContentWidth(), 60);
   }
   pdfService.addTable([['Metric', 'Value']], [
-    ['Collected Fees', formatCurrency(feeCurrent)],
-    ['Pending Fees', formatCurrency(pendingFees)],
+    ['Collected Fees', pdfSafe(formatCurrency(feeCurrent))],
+    ['Pending Fees', pdfSafe(formatCurrency(pendingFees))],
     ['Collection Rate', `${collectionRate}%`],
     ['Business Insight', feeInsight],
   ]);
 
   // Summary
   pdfService.addMainHeading('Institute Performance Summary');
-  pdfService.addParagraph(instituteSummary);
+  pdfService.addParagraph(pdfSafe(instituteSummary));
 
   if (data.smsLogs && data.smsLogs.length > 0) {
     pdfService.addMainHeading('Attendance WhatsApp Alerts Log');
@@ -606,6 +614,14 @@ function renderSalarySlip(
   netSalary: string,
   generatedBy: string
 ) {
+  // Callers format these with formatIndianCurrency() (₹), which jsPDF's core fonts can't
+  // render — swap to the PDF-safe "Rs." form here rather than requiring every caller to
+  // remember it.
+  baseAmount = pdfSafe(baseAmount);
+  attendanceStr = pdfSafe(attendanceStr);
+  grossSalary = pdfSafe(grossSalary);
+  netSalary = pdfSafe(netSalary);
+
   const doc = pdfService.getDoc();
   const pageWidth = doc.internal.pageSize.getWidth();
   const marginLeft = 25.4;

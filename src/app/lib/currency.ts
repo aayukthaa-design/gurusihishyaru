@@ -14,3 +14,11 @@ export function formatIndianCurrency(value: number | string | null | undefined):
     minimumFractionDigits: 0,
   }).format(numericValue);
 }
+
+// jsPDF's core fonts (Times/Helvetica/Courier) don't include the ₹ glyph (U+20B9) —
+// it renders as a broken/superscript character in exported PDFs. Use this instead of
+// formatIndianCurrency() for any value written directly into a jsPDF document/table;
+// keep formatIndianCurrency() for on-screen UI, which renders ₹ fine.
+export function formatIndianCurrencyForPdf(value: number | string | null | undefined): string {
+  return formatIndianCurrency(value).replace('₹', 'Rs. ');
+}

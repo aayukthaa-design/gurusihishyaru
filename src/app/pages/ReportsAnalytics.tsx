@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName } from '../lib/branchService';
 import { buildReportExportData, exportReportToExcel, exportReportToPdf } from '../lib/reportExport';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
-import { formatIndianCurrency } from '../lib/currency';
+import { formatIndianCurrency, formatIndianCurrencyForPdf } from '../lib/currency';
 import { utils, writeFile } from 'xlsx';
 import { apiFetch } from '../lib/apiClient';
 import { fetchAttendance } from '../lib/attendanceService';
@@ -146,14 +146,14 @@ export function ReportsAnalytics() {
 
       pdfService.addSectionHeading('Key Summary Metrics');
       const metricsBody = [
-        ['Total Branch Monthly Income', formatIndianCurrency(report.totalIncome)],
-        ['Total Branch Monthly Expense', formatIndianCurrency(report.totalExpense)],
-        ['Calculated Net Profit', formatIndianCurrency(report.netProfit)],
+        ['Total Branch Monthly Income', formatIndianCurrencyForPdf(report.totalIncome)],
+        ['Total Branch Monthly Expense', formatIndianCurrencyForPdf(report.totalExpense)],
+        ['Calculated Net Profit', formatIndianCurrencyForPdf(report.netProfit)],
         ['New Student Admissions Count', `${report.studentAdmissions} students`],
         ['Inventory Materials Purchased', `${report.inventoryPurchased} items`],
         ['Inventory Materials Allocated', `${report.inventoryAllocated} items`],
         ['Inventory Stock Remaining', `${report.inventoryRemaining} items`],
-        ['Outstanding Fees (Estimated)', formatIndianCurrency(report.outstandingFees)]
+        ['Outstanding Fees (Estimated)', formatIndianCurrencyForPdf(report.outstandingFees)]
       ];
       pdfService.addTable([metaHeaders], metricsBody);
       
@@ -456,12 +456,12 @@ export function ReportsAnalytics() {
       if (reportCategory === 'income') {
         pdfService.addTitle(`Income Report - ${filterMonth}/${filterYear} (${branchName})`);
         const headers = ['Date', 'Voucher', 'Category', 'Amount', 'Description'];
-        const body = filteredIncome.map(t => [t.date, t.voucherNumber, t.category, formatIndianCurrency(t.amount), t.description]);
+        const body = filteredIncome.map(t => [t.date, t.voucherNumber, t.category, formatIndianCurrencyForPdf(t.amount), t.description]);
         pdfService.addTable([headers], body);
       } else if (reportCategory === 'expense') {
         pdfService.addTitle(`Expense Report - ${filterMonth}/${filterYear} (${branchName})`);
         const headers = ['Date', 'Voucher', 'Category', 'Amount', 'Description'];
-        const body = filteredExpense.map(t => [t.date, t.voucherNumber, t.category, formatIndianCurrency(t.amount), t.description]);
+        const body = filteredExpense.map(t => [t.date, t.voucherNumber, t.category, formatIndianCurrencyForPdf(t.amount), t.description]);
         pdfService.addTable([headers], body);
       } else if (reportCategory === 'inventory') {
         pdfService.addTitle(`Inventory Levels Report (${branchName})`);
@@ -481,9 +481,9 @@ export function ReportsAnalytics() {
         if (selectedMonthlyReport) {
           const headers = ['Metric', 'Value'];
           const body = [
-            ['Total Income', formatIndianCurrency(selectedMonthlyReport.totalIncome)],
-            ['Total Expenses', formatIndianCurrency(selectedMonthlyReport.totalExpense)],
-            ['Net Balance', formatIndianCurrency(selectedMonthlyReport.netProfit)],
+            ['Total Income', formatIndianCurrencyForPdf(selectedMonthlyReport.totalIncome)],
+            ['Total Expenses', formatIndianCurrencyForPdf(selectedMonthlyReport.totalExpense)],
+            ['Net Balance', formatIndianCurrencyForPdf(selectedMonthlyReport.netProfit)],
             ['Inventory Purchased', `${selectedMonthlyReport.inventoryPurchased} items`],
             ['Inventory Allocated', `${selectedMonthlyReport.inventoryAllocated} items`],
             ['Remaining Inventory', `${selectedMonthlyReport.inventoryRemaining} items`],

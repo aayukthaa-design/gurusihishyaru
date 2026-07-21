@@ -17,7 +17,23 @@ export class PDFTemplateService {
   // asset or page size ever changes.
   private headerHeight: number = 63;
   private footerTop: number;
-  
+
+  // The letterhead PDF asset (public/letterhead.pdf) has its own baked-in footer band —
+  // a horizontal rule plus "This is a computer-generated document..." / "Page 1" text —
+  // burned into the artwork itself (see the note in exportWithLetterhead() on why we
+  // can't suppress or edit it). It's a US Letter page (612x792pt) fit-scaled and centered
+  // onto an A4 content page, so that band does NOT sit flush with the bottom margin the
+  // way the dynamically-drawn footer does; it lands well above it. Body content used to be
+  // allowed to flow all the way down to just above the dynamic footer, overlapping this
+  // band. Derived from the artwork's own text position (pdftotext -bbox on letterhead.pdf:
+  // the rule above the disclaimer starts at y=589.49pt of 792pt, i.e. 202.51pt from its own
+  // bottom edge), transformed through the same fitScale/centering math as
+  // exportWithLetterhead(): fitScale = min(595.28/612, 841.89/792) = 0.9727, letterhead
+  // bottom offset = (841.89 - 792*0.9727)/2 = 35.76pt, so the rule lands at
+  // 35.76 + 202.51*0.9727 = 232.7pt (~82.1mm) from the bottom of the final A4 page, i.e.
+  // ~214.9mm from the top. Re-derive this if the letterhead asset or page size changes.
+  private letterheadFooterBandTop: number = 214.9;
+
   private bodyTop: number;
   private bodyBottom: number;
   
@@ -37,9 +53,12 @@ export class PDFTemplateService {
 
     this.footerTop = this.pageHeight - this.margins.bottom - 10; // footer positioned above bottom margin
 
-    // Calculate printable body region below letterhead and above footer
+    // Calculate printable body region below letterhead and above footer. Must clear
+    // whichever comes first: the dynamically-drawn "Generated: ... / Page X of Y" line,
+    // or the letterhead artwork's own baked-in footer band (see letterheadFooterBandTop) —
+    // a few mm of buffer above the latter so a heading's ascender doesn't touch its rule.
     this.bodyTop = this.headerHeight + 7; // ensure content starts below the letterhead
-    this.bodyBottom = this.footerTop - 10; // keep content above footer
+    this.bodyBottom = Math.min(this.footerTop - 10, this.letterheadFooterBandTop - 6);
     this.currentY = this.bodyTop;
   }
 
@@ -146,7 +165,12 @@ export class PDFTemplateService {
         lineColor: [200, 200, 200],
         lineWidth: 0.1,
         textColor: [0, 0, 0],
-        cellWidth: 'wrap',
+        // NOT 'wrap': jspdf-autotable sizes each 'wrap' column independently up to the
+        // *full* available page width based on its own unwrapped content, so a long cell
+        // (e.g. a "Business Insight" sentence) claims close to the whole row's width and
+        // pushes the table past the right margin instead of wrapping. The default 'auto'
+        // distributes/shrinks column widths to fit tableWidth first, wrapping text (via
+        // overflow:'linebreak' above) to whatever space that leaves.
       },
       headStyles: {
         fontStyle: 'bold',
