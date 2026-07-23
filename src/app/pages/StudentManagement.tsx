@@ -399,7 +399,7 @@ export function StudentManagement() {
         .toLowerCase()
         .includes(search.toLowerCase());
       const matchesClass = !classFilter || student.class === classFilter;
-      return matchesSearch && matchesClass;
+      return matchesSearch && matchesClass && student.status !== 'Inactive';
     });
   }, [branchFilter, classFilter, search, students, user]);
 
