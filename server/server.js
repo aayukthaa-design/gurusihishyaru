@@ -3579,6 +3579,20 @@ async function main() {
     }
   });
 
+  app.delete('/api/students/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT id FROM students WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Student not found' });
+      // Soft delete: keeps fee/attendance/homework history intact, mirrors teacher deactivation
+      await db.run(`UPDATE students SET status='Inactive' WHERE id=?`, req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Delete student error:', err);
+      res.status(500).json({ error: 'Failed to delete student' });
+    }
+  });
+
   // --- Parents API ---
   app.get('/api/parents', async (req, res) => {
     if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });

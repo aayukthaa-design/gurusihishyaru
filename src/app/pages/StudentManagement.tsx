@@ -4,10 +4,10 @@ import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { enrollAdmissionByApplicantName } from '../lib/admissionService';
-import { useStudents, addStudentAPI, updateStudentAPI, refreshStudents } from '../lib/studentService';
+import { useStudents, addStudentAPI, updateStudentAPI, deleteStudentAPI, refreshStudents } from '../lib/studentService';
 import { GRADES, BOARDS } from '../lib/classConstants';
 import {
-  Users, Plus, Search, Eye, Edit2, ChevronRight,
+  Users, Plus, Search, Eye, Edit2, Trash2, ChevronRight,
   X, GraduationCap, Phone, MapPin, CalendarDays,
 } from 'lucide-react';
 
@@ -431,6 +431,14 @@ export function StudentManagement() {
     setPanel('none');
   };
 
+  const canDelete = user?.role === 'admin' || user?.role === 'super_admin';
+
+  const handleDelete = async (id: string, name: string) => {
+    if (!window.confirm(`Delete ${name}? They will be marked Inactive and hidden from active rosters. Fee, attendance and homework history is kept.`)) return;
+    await deleteStudentAPI(id);
+    if (panel !== 'none' && typeof panel === 'object' && panel.id === id) setPanel('none');
+  };
+
   const editStudent = panel !== 'none' && typeof panel === 'object' && panel.type === 'edit' ? students.find((student) => student.id === panel.id) : null;
   const viewStudent = panel !== 'none' && typeof panel === 'object' && panel.type === 'view' ? students.find((student) => student.id === panel.id) : null;
 
@@ -558,6 +566,11 @@ export function StudentManagement() {
                         <button onClick={() => setPanel({ type: 'edit', id: student.id })} className="rounded-lg p-1.5 transition-colors hover:bg-secondary" title="Edit">
                           <Edit2 className="h-4 w-4 text-muted-foreground" />
                         </button>
+                        {canDelete && (
+                          <button onClick={() => handleDelete(student.id, `${student.firstName} ${student.lastName}`)} className="rounded-lg p-1.5 transition-colors hover:bg-red-50 dark:hover:bg-red-950/40" title="Delete">
+                            <Trash2 className="h-4 w-4 text-red-500" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

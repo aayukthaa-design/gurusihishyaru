@@ -125,6 +125,19 @@ export async function updateStudentAPI(id: string, student: Partial<StudentRecor
   return null;
 }
 
+export async function deleteStudentAPI(id: string): Promise<boolean> {
+  try {
+    const res = await apiFetch(`${API_BASE}/api/students/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      await refreshStudents();
+      return true;
+    }
+  } catch (err) {
+    console.error('deleteStudentAPI error:', err);
+  }
+  return false;
+}
+
 export function useStudents() {
   return useStoreValue(studentStore);
 }
