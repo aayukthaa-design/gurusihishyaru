@@ -875,7 +875,93 @@ async function initDb() {
       updatedAt TEXT,
       UNIQUE(className, dayOfWeek, period)
     );
+
+    CREATE TABLE IF NOT EXISTS branches (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      code TEXT,
+      address TEXT,
+      city TEXT,
+      state TEXT,
+      pincode TEXT,
+      contactNumber TEXT,
+      email TEXT,
+      branchHead TEXT,
+      openingDate TEXT,
+      status TEXT DEFAULT 'Active',
+      createdAt TEXT,
+      updatedAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_submissions (
+      id TEXT PRIMARY KEY,
+      date TEXT NOT NULL,
+      className TEXT NOT NULL,
+      subject TEXT,
+      topic TEXT,
+      homework TEXT,
+      attendanceStatus TEXT,
+      notes TEXT,
+      teacherId TEXT,
+      teacherName TEXT,
+      branchId TEXT,
+      createdAt TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS exam_attendance (
+      id TEXT PRIMARY KEY,
+      examId TEXT NOT NULL,
+      studentId TEXT NOT NULL,
+      studentName TEXT,
+      rollNumber TEXT,
+      admissionNumber TEXT,
+      className TEXT,
+      branchId TEXT,
+      branchName TEXT,
+      status TEXT,
+      date TEXT,
+      time TEXT,
+      teacherId TEXT,
+      teacherName TEXT,
+      subjectId TEXT,
+      subjectName TEXT,
+      classId TEXT,
+      recordedBy TEXT,
+      isLocked INTEGER DEFAULT 0,
+      lockedBy TEXT,
+      lockedAt TEXT,
+      createdAt TEXT,
+      updatedAt TEXT,
+      UNIQUE(examId, studentId)
+    );
+
+    CREATE TABLE IF NOT EXISTS classes (
+      id TEXT PRIMARY KEY,
+      className TEXT NOT NULL,
+      batchName TEXT,
+      course TEXT,
+      subject TEXT,
+      assignedTeacherId TEXT,
+      branchId TEXT,
+      roomNumber TEXT,
+      maxStudents INTEGER,
+      startDate TEXT,
+      endDate TEXT,
+      classTiming TEXT,
+      daysOfWeek TEXT,
+      status TEXT DEFAULT 'Active',
+      createdAt TEXT
+    );
   `);
+
+  // Seed the one real branch that predates this table — its id must stay
+  // 'branch_main' since it's already hardcoded onto existing users/students.
+  try {
+    await db.exec(`
+      INSERT OR IGNORE INTO branches (id, name, code, address, city, state, pincode, contactNumber, email, branchHead, openingDate, status, createdAt, updatedAt)
+      VALUES ('branch_main', 'Main', 'MAIN', '', '', '', '', '', '', '', '', 'Active', '${new Date().toISOString()}', '${new Date().toISOString()}');
+    `);
+  } catch (e) {}
 
   try { await db.exec("ALTER TABLE allocations ADD COLUMN branchId TEXT;"); } catch(e) {}
   try { await db.exec("ALTER TABLE allocations ADD COLUMN status TEXT DEFAULT 'Assigned';"); } catch(e) {}
@@ -4751,8 +4837,186 @@ async function main() {
     }
   });
 
+  // --- Branch Endpoints ---
+
+  app.get('/api/branches', async (req, res) => {
+    try {
+      const rows = await db.all('SELECT * FROM branches ORDER BY createdAt ASC');
+      res.json(rows);
+    } catch (error) { console.error('List branches error:', error); res.status(500).json({ error: 'Failed to load branches' }); }
+  });
+  app.post('/api/branches', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { name, code, address, city, state, pincode, contactNumber, email, branchHead, openingDate, status } = req.body;
+      if (!name || !code) return res.status(400).json({ error: 'Branch name and code are required' });
+      const id = `branch_${Date.now()}`;
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO branches (id, name, code, address, city, state, pincode, contactNumber, email, branchHead, openingDate, status, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, name, code, address || '', city || '', state || '', pincode || '', contactNumber || '', email || '', branchHead || '', openingDate || '', status || 'Active', now, now
+      );
+      const branch = await db.get('SELECT * FROM branches WHERE id = ?', id);
+      res.json(branch);
+    } catch (error) { console.error('Create branch error:', error); res.status(500).json({ error: 'Failed to create branch' }); }
+  });
+  app.put('/api/branches/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM branches WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Branch not found' });
+      const { name, code, address, city, state, pincode, contactNumber, email, branchHead, openingDate, status } = req.body;
+      await db.run(
+        `UPDATE branches SET name=?, code=?, address=?, city=?, state=?, pincode=?, contactNumber=?, email=?, branchHead=?, openingDate=?, status=?, updatedAt=? WHERE id=?`,
+        name ?? existing.name, code ?? existing.code, address ?? existing.address, city ?? existing.city, state ?? existing.state,
+        pincode ?? existing.pincode, contactNumber ?? existing.contactNumber, email ?? existing.email, branchHead ?? existing.branchHead,
+        openingDate ?? existing.openingDate, status ?? existing.status, new Date().toISOString(), req.params.id
+      );
+      const branch = await db.get('SELECT * FROM branches WHERE id = ?', req.params.id);
+      res.json(branch);
+    } catch (error) { console.error('Update branch error:', error); res.status(500).json({ error: 'Failed to update branch' }); }
+  });
+  app.delete('/api/branches/:id', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    if (req.params.id === 'branch_main') return res.status(400).json({ error: 'The Main branch cannot be deleted' });
+    try {
+      await db.run('DELETE FROM branches WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (error) { console.error('Delete branch error:', error); res.status(500).json({ error: 'Failed to delete branch' }); }
+  });
+
+  // --- Daily Teacher Submission Endpoints ---
+
+  app.get('/api/daily-submissions', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const rows = branchId
+        ? await db.all('SELECT * FROM daily_submissions WHERE branchId = ? ORDER BY createdAt DESC', branchId)
+        : await db.all('SELECT * FROM daily_submissions ORDER BY createdAt DESC');
+      res.json(rows);
+    } catch (error) { console.error('List daily submissions error:', error); res.status(500).json({ error: 'Failed to load daily submissions' }); }
+  });
+  app.post('/api/daily-submissions', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { date, className, subject, topic, homework, attendanceStatus, notes } = req.body;
+      if (!date || !className) return res.status(400).json({ error: 'Date and class are required' });
+      const id = `SUB${Date.now()}`;
+      const now = new Date().toISOString();
+      const branchId = resolveBranchId(req, req.body.branchId);
+      await db.run(
+        `INSERT INTO daily_submissions (id, date, className, subject, topic, homework, attendanceStatus, notes, teacherId, teacherName, branchId, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, date, className, subject || '', topic || '', homework || '', attendanceStatus || '', notes || '', req.user.sub, req.user.name, branchId || null, now
+      );
+      const submission = await db.get('SELECT * FROM daily_submissions WHERE id = ?', id);
+      res.json(submission);
+    } catch (error) { console.error('Create daily submission error:', error); res.status(500).json({ error: 'Failed to save daily submission' }); }
+  });
+
+  // --- Exam Attendance Endpoints ---
+
+  app.get('/api/exam-attendance', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const conditions = [];
+      const params = [];
+      if (req.query.examId) { conditions.push('examId = ?'); params.push(req.query.examId); }
+      if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await db.all(`SELECT * FROM exam_attendance ${where} ORDER BY createdAt ASC`, ...params);
+      res.json(rows.map((row) => ({ ...row, isLocked: Boolean(row.isLocked) })));
+    } catch (error) { console.error('List exam attendance error:', error); res.status(500).json({ error: 'Failed to load exam attendance' }); }
+  });
+  app.post('/api/exam-attendance/bulk', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const submissions = Array.isArray(req.body?.submissions) ? req.body.submissions : [];
+      if (!submissions.length) return res.status(400).json({ error: 'No attendance records provided' });
+
+      // Reject the whole batch up front if any targeted record is already locked —
+      // matches the original all-or-nothing behaviour of the in-memory version.
+      for (const submission of submissions) {
+        const existing = await db.get('SELECT isLocked FROM exam_attendance WHERE examId = ? AND studentId = ?', submission.examId, submission.studentId);
+        if (existing?.isLocked) return res.status(400).json({ error: 'Attendance for this exam has been finalized.' });
+      }
+
+      const now = new Date().toISOString();
+      const saved = [];
+      for (const submission of submissions) {
+        const id = `EAT${Date.now()}${Math.floor(Math.random() * 1000)}`;
+        await db.run(
+          `INSERT INTO exam_attendance (id, examId, studentId, studentName, rollNumber, admissionNumber, className, branchId, branchName, status, date, time, teacherId, teacherName, subjectId, subjectName, classId, recordedBy, isLocked, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+           ON CONFLICT(examId, studentId) DO UPDATE SET
+             studentName=excluded.studentName, rollNumber=excluded.rollNumber, admissionNumber=excluded.admissionNumber,
+             className=excluded.className, branchId=excluded.branchId, branchName=excluded.branchName, status=excluded.status,
+             date=excluded.date, time=excluded.time, teacherId=excluded.teacherId, teacherName=excluded.teacherName,
+             subjectId=excluded.subjectId, subjectName=excluded.subjectName, classId=excluded.classId, recordedBy=excluded.recordedBy,
+             updatedAt=excluded.updatedAt`,
+          id, submission.examId, submission.studentId, submission.studentName, submission.rollNumber, submission.admissionNumber,
+          submission.className, submission.branchId, submission.branchName, submission.status, submission.date, submission.time,
+          submission.teacherId, submission.teacherName, submission.subjectId, submission.subjectName, submission.classId,
+          submission.recordedBy, now, now
+        );
+        const row = await db.get('SELECT * FROM exam_attendance WHERE examId = ? AND studentId = ?', submission.examId, submission.studentId);
+        saved.push({ ...row, isLocked: Boolean(row.isLocked) });
+      }
+      res.json(saved);
+    } catch (error) { console.error('Submit exam attendance error:', error); res.status(500).json({ error: 'Failed to save exam attendance' }); }
+  });
+  app.patch('/api/exam-attendance/lock', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { examId, locked } = req.body;
+      if (!examId) return res.status(400).json({ error: 'examId is required' });
+      const now = new Date().toISOString();
+      await db.run(
+        'UPDATE exam_attendance SET isLocked=?, lockedBy=?, lockedAt=?, updatedAt=? WHERE examId=?',
+        locked ? 1 : 0, locked ? req.user.name : null, locked ? now : null, now, examId
+      );
+      const rows = await db.all('SELECT * FROM exam_attendance WHERE examId = ?', examId);
+      res.json(rows.map((row) => ({ ...row, isLocked: Boolean(row.isLocked) })));
+    } catch (error) { console.error('Lock exam attendance error:', error); res.status(500).json({ error: 'Failed to update exam attendance lock' }); }
+  });
+
+  // --- Classes Endpoints ---
+
+  app.get('/api/classes', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const rows = branchId
+        ? await db.all('SELECT * FROM classes WHERE branchId = ? ORDER BY createdAt DESC', branchId)
+        : await db.all('SELECT * FROM classes ORDER BY createdAt DESC');
+      res.json(rows.map((row) => ({ ...row, daysOfWeek: JSON.parse(row.daysOfWeek || '[]') })));
+    } catch (error) { console.error('List classes error:', error); res.status(500).json({ error: 'Failed to load classes' }); }
+  });
+  app.post('/api/classes', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { className, batchName, course, subject, assignedTeacherId, roomNumber, maxStudents, startDate, endDate, classTiming, daysOfWeek, status } = req.body;
+      if (!className || !String(className).trim()) return res.status(400).json({ error: 'Class name is required.' });
+      if (!assignedTeacherId) return res.status(400).json({ error: 'Assigned teacher is required.' });
+      const branchId = resolveBranchId(req, req.body.branchId);
+      const id = `CLS${Date.now()}`;
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO classes (id, className, batchName, course, subject, assignedTeacherId, branchId, roomNumber, maxStudents, startDate, endDate, classTiming, daysOfWeek, status, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, String(className).trim(), batchName || '', course || '', subject || '', assignedTeacherId, branchId || null,
+        roomNumber || '', Number(maxStudents || 0), startDate || '', endDate || '', classTiming || '', JSON.stringify(daysOfWeek || []),
+        status || 'Active', now
+      );
+      const row = await db.get('SELECT * FROM classes WHERE id = ?', id);
+      res.json({ ...row, daysOfWeek: JSON.parse(row.daysOfWeek || '[]') });
+    } catch (error) { console.error('Create class error:', error); res.status(500).json({ error: 'Failed to create class' }); }
+  });
+
   // --- Inventory Endpoints ---
-  
+
   app.get('/api/inventory-categories', async (req, res) => {
     try {
       const rows = await db.all('SELECT * FROM inventory_categories');

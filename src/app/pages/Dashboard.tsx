@@ -614,12 +614,12 @@ export function Dashboard() {
     setTeacherForm({ fullName: '', gender: 'Female', dob: '', phone: '', email: '', address: '', qualification: '', experience: '', specialization: '', username: '', password: '', confirmPassword: '', employmentType: 'Full Time', status: 'Active', dateOfJoining: '', profilePhoto: '' });
   };
 
-  const handleClassSave = () => {
+  const handleClassSave = async () => {
     if (!user?.branchId) {
       setFeedback('Your branch scope is required to create a class.');
       return;
     }
-    const result = addClass({
+    const result = await addClass({
       ...classForm,
       branchId: user.branchId,
       maxStudents: Number(classForm.maxStudents || 30),

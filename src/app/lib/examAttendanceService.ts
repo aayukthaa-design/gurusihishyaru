@@ -2,6 +2,7 @@ import { PDFTemplateService } from './pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import { createStore, useStoreValue } from './store';
 import { addNotification } from './notificationService';
+import { apiFetch } from './apiClient';
 
 export type ExamAttendanceStatus = 'present' | 'absent';
 
@@ -76,30 +77,26 @@ interface ExamAttendanceFilterState {
   status?: ExamAttendanceStatus | 'all';
 }
 
-const STORAGE_KEY = 'guru-shishyaru-exam-attendance';
+const attendanceStore = createStore<ExamAttendanceRecord[]>([]);
 
-function readStoredRecords(): ExamAttendanceRecord[] {
-  if (typeof window === 'undefined') return [];
+export async function refreshExamAttendance(): Promise<ExamAttendanceRecord[]> {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as ExamAttendanceRecord[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+    const res = await apiFetch('/api/exam-attendance');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        attendanceStore.setState(data);
+        return data;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch exam attendance:', e);
   }
+  return attendanceStore.getState();
 }
 
-function persistRecords(records: ExamAttendanceRecord[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-  } catch {
-    // ignore storage write issues
-  }
-}
-
-const attendanceStore = createStore<ExamAttendanceRecord[]>(readStoredRecords());
+// Initial load
+void refreshExamAttendance();
 
 export function subscribeExamAttendance(listener: (records: ExamAttendanceRecord[]) => void): () => void {
   return attendanceStore.subscribe(listener);
@@ -139,50 +136,20 @@ export function getExamAttendanceSummary(examId: string): ExamAttendanceSummary 
   };
 }
 
-export function submitExamAttendanceRecords(
+export async function submitExamAttendanceRecords(
   submissions: ExamAttendanceSubmission[],
   teacher: { id: string; name: string; branchId?: string; role?: string } | null
-): ExamAttendanceRecord[] {
-  const records = getExamAttendanceRecords();
-  const next: ExamAttendanceRecord[] = [...records];
-  const now = new Date().toISOString();
-  const saved: ExamAttendanceRecord[] = [];
-
-  submissions.forEach((submission) => {
-    const existingIndex = next.findIndex((record) => record.examId === submission.examId && record.studentId === submission.studentId);
-
-    if (existingIndex >= 0) {
-      const existing = next[existingIndex];
-      if (existing.isLocked) {
-        throw new Error('Attendance for this exam has been finalized.');
-      }
-      const updated: ExamAttendanceRecord = {
-        ...existing,
-        ...submission,
-        status: submission.status,
-        updatedAt: now,
-        recordedBy: submission.recordedBy,
-        teacherId: submission.teacherId,
-        teacherName: submission.teacherName,
-      };
-      next[existingIndex] = updated;
-      saved.push(updated);
-      return;
-    }
-
-    const created: ExamAttendanceRecord = {
-      id: `EAT${String(next.length + 1 + saved.length).padStart(3, '0')}`,
-      ...submission,
-      isLocked: false,
-      createdAt: now,
-      updatedAt: now,
-    };
-    next.push(created);
-    saved.push(created);
+): Promise<ExamAttendanceRecord[]> {
+  const res = await apiFetch('/api/exam-attendance/bulk', {
+    method: 'POST',
+    body: { submissions },
   });
-
-  attendanceStore.setState(next);
-  persistRecords(next);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Attendance for this exam has been finalized.');
+  }
+  const saved: ExamAttendanceRecord[] = await res.json();
+  await refreshExamAttendance();
 
   const absentStudents = saved.filter((record) => record.status === 'absent');
   if (absentStudents.length > 0) {
@@ -209,21 +176,15 @@ export function submitExamAttendanceRecords(
   return saved;
 }
 
-export function setExamAttendanceLock(examId: string, nextLocked: boolean, actor?: { id: string; name: string; role?: string; branchId?: string }): void {
-  const records = getExamAttendanceRecords();
-  const now = new Date().toISOString();
-  const updated = records.map((record) => {
-    if (record.examId !== examId) return record;
-    return {
-      ...record,
-      isLocked: nextLocked,
-      lockedBy: nextLocked ? actor?.name : undefined,
-      lockedAt: nextLocked ? now : undefined,
-      updatedAt: now,
-    };
+export async function setExamAttendanceLock(examId: string, nextLocked: boolean, actor?: { id: string; name: string; role?: string; branchId?: string }): Promise<void> {
+  void actor;
+  const res = await apiFetch('/api/exam-attendance/lock', {
+    method: 'PATCH',
+    body: { examId, locked: nextLocked },
   });
-  attendanceStore.setState(updated);
-  persistRecords(updated);
+  if (res.ok) {
+    await refreshExamAttendance();
+  }
 }
 
 export function getVisibleExamAttendanceRecords(filters: ExamAttendanceFilterState = {}, user?: { role?: string; branchId?: string; id?: string } | null): ExamAttendanceRecord[] {

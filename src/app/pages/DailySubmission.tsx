@@ -19,14 +19,14 @@ export function DailySubmission() {
   const teacherId = user?.id || 'unknown_teacher';
   const teacherName = user?.name || 'Unknown';
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!className || !subject) {
       alert('Please provide Class and Subject');
       return;
     }
 
-    const saved = addSubmission({
+    const saved = await addSubmission({
       date,
       className,
       subject,
@@ -34,9 +34,12 @@ export function DailySubmission() {
       homework,
       attendanceStatus,
       notes,
-      teacherId,
-      teacherName,
     });
+
+    if (!saved) {
+      alert('Failed to save daily submission. Please try again.');
+      return;
+    }
 
     // Notify admins and superadmins
     addNotification({ title: 'Daily Submission', message: `${teacherName} submitted report for ${className} (${subject})`, type: 'info', roles: ['admin','super_admin'], classNames: [className] });

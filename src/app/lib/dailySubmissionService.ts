@@ -1,3 +1,4 @@
+import { apiFetch } from './apiClient';
 import { createStore, useStoreValue } from './store';
 
 type Submission = {
@@ -11,17 +12,33 @@ type Submission = {
   notes?: string;
   teacherId: string;
   teacherName: string;
+  branchId?: string;
   createdAt: string; // timestamp
 };
 
 const store = createStore<Submission[]>([]);
 
-function nowISO() {
-  return new Date().toISOString();
+export async function refreshSubmissions(): Promise<Submission[]> {
+  try {
+    const res = await apiFetch('/api/daily-submissions');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        store.setState(data);
+        return data;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch daily submissions:', e);
+  }
+  return store.getState();
 }
 
+// Initial load
+void refreshSubmissions();
+
 export function subscribeSubmissions(cb: (items: Submission[]) => void) {
-  return store.subscribe((state) => cb(state.slice().reverse()));
+  return store.subscribe(cb);
 }
 
 export function useSubmissions(): Submission[] {
@@ -29,14 +46,21 @@ export function useSubmissions(): Submission[] {
 }
 
 export function getSubmissions() {
-  return store.getState().slice().reverse();
+  return store.getState();
 }
 
-export function addSubmission(payload: Omit<Submission, 'id' | 'createdAt'>) {
-  const id = `SUB${Date.now()}`;
-  const item: Submission = { id, createdAt: nowISO(), ...payload } as Submission;
-  store.setState((prev) => [item, ...prev]);
-  return item;
+export async function addSubmission(payload: Omit<Submission, 'id' | 'createdAt' | 'teacherId' | 'teacherName'>): Promise<Submission | null> {
+  try {
+    const res = await apiFetch('/api/daily-submissions', { method: 'POST', body: payload });
+    if (res.ok) {
+      const submission = await res.json();
+      await refreshSubmissions();
+      return submission;
+    }
+  } catch (err) {
+    console.error('addSubmission error:', err);
+  }
+  return null;
 }
 
 export type { Submission };

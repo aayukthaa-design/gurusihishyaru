@@ -1,3 +1,4 @@
+import { apiFetch } from './apiClient';
 import { createStore, useStoreValue } from './store';
 
 export interface ClassRecord {
@@ -34,50 +35,26 @@ interface ClassFormPayload {
   status: 'Active' | 'Inactive';
 }
 
-const STORAGE_KEY = 'guru-shishyaru-classes';
+const classStore = createStore<ClassRecord[]>([]);
 
-const seedClasses: ClassRecord[] = [
-  {
-    id: 'CLS001',
-    className: '10th A',
-    batchName: 'Batch A',
-    course: 'Mathematics',
-    subject: 'Mathematics',
-    assignedTeacherId: 'TCH001',
-    branchId: 'branch_rajajinagar',
-    roomNumber: 'Room 101',
-    maxStudents: 35,
-    startDate: '2026-06-01',
-    endDate: '2026-12-31',
-    classTiming: '08:00-09:00',
-    daysOfWeek: ['Monday', 'Wednesday', 'Friday'],
-    status: 'Active',
-    createdAt: new Date().toISOString(),
-  },
-];
-
-function readClasses(): ClassRecord[] {
-  if (typeof window === 'undefined') return seedClasses;
+export async function refreshClasses(): Promise<ClassRecord[]> {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return seedClasses;
-    const parsed = JSON.parse(raw) as ClassRecord[];
-    return Array.isArray(parsed) && parsed.length ? parsed : seedClasses;
-  } catch {
-    return seedClasses;
+    const res = await apiFetch('/api/classes');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        classStore.setState(data);
+        return data;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch classes:', e);
   }
+  return classStore.getState();
 }
 
-function persistClasses(classes: ClassRecord[]) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(classes));
-  } catch {
-    // ignore
-  }
-}
-
-const classStore = createStore<ClassRecord[]>(readClasses());
+// Initial load
+void refreshClasses();
 
 export function getClasses(): ClassRecord[] {
   return classStore.getState();
@@ -87,30 +64,22 @@ export function useClasses() {
   return useStoreValue(classStore);
 }
 
-export function addClass(input: ClassFormPayload) {
+export async function addClass(input: ClassFormPayload): Promise<{ success: boolean; error?: string; class?: ClassRecord }> {
   if (!input.className.trim()) return { success: false, error: 'Class name is required.' };
   if (!input.assignedTeacherId) return { success: false, error: 'Assigned teacher is required.' };
-  const classRecord: ClassRecord = {
-    id: `CLS${String(classStore.getState().length + 1).padStart(3, '0')}`,
-    className: input.className.trim(),
-    batchName: input.batchName.trim(),
-    course: input.course.trim(),
-    subject: input.subject.trim(),
-    assignedTeacherId: input.assignedTeacherId,
-    branchId: input.branchId,
-    roomNumber: input.roomNumber.trim(),
-    maxStudents: Number(input.maxStudents || 0),
-    startDate: input.startDate,
-    endDate: input.endDate,
-    classTiming: input.classTiming,
-    daysOfWeek: input.daysOfWeek,
-    status: input.status,
-    createdAt: new Date().toISOString(),
-  };
-  const next = [classRecord, ...classStore.getState()];
-  classStore.setState(next);
-  persistClasses(next);
-  return { success: true, class: classRecord };
+  try {
+    const res = await apiFetch('/api/classes', { method: 'POST', body: input });
+    if (res.ok) {
+      const classRecord: ClassRecord = await res.json();
+      await refreshClasses();
+      return { success: true, class: classRecord };
+    }
+    const data = await res.json().catch(() => ({}));
+    return { success: false, error: data.error || 'Unable to create class.' };
+  } catch (err) {
+    console.error('addClass error:', err);
+    return { success: false, error: 'Connection to server failed. Please try again.' };
+  }
 }
 
 export function getClassesForBranch(branchId?: string) {

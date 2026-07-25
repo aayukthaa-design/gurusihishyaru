@@ -1,4 +1,6 @@
 import type { User } from '../auth/types';
+import { apiFetch } from './apiClient';
+import { createStore, useStoreValue } from './store';
 
 export interface Branch {
   id: string;
@@ -16,12 +18,13 @@ export interface Branch {
   createdAt: string;
 }
 
-const BRANCH_STORAGE_KEY = 'guru_branch_state';
 const SELECTED_BRANCH_STORAGE_KEY = 'guru_selected_branch';
 
-// Single real branch. `id` must stay in sync with the 'branch_main' id used
-// server-side (server/server.js seed + branch-scoping default) so Admin
-// accounts and imported students resolve to the same branch record here.
+// Single real branch, seeded server-side as well. `id` must stay in sync with
+// the 'branch_main' id used server-side (server/server.js seed + branch-scoping
+// default) so Admin accounts and imported students resolve to the same branch
+// record here, and so the dropdown has something to show before the initial
+// fetch below resolves.
 const DEFAULT_BRANCHES: Branch[] = [
   {
     id: 'branch_main',
@@ -40,33 +43,7 @@ const DEFAULT_BRANCHES: Branch[] = [
   },
 ];
 
-let branchState: Branch[] = [];
-let selectedBranchId: string | undefined;
-const listeners = new Set<() => void>();
-
-function loadBranches() {
-  if (typeof window === 'undefined') {
-    return DEFAULT_BRANCHES;
-  }
-  try {
-    const stored = window.localStorage.getItem(BRANCH_STORAGE_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored) as Branch[];
-      if (Array.isArray(parsed) && parsed.length) {
-        return parsed;
-      }
-    }
-  } catch {
-    // fall back to defaults
-  }
-  return DEFAULT_BRANCHES;
-}
-
-function persistBranches() {
-  if (typeof window !== 'undefined') {
-    window.localStorage.setItem(BRANCH_STORAGE_KEY, JSON.stringify(branchState));
-  }
-}
+const branchStore = createStore<Branch[]>(DEFAULT_BRANCHES);
 
 function readSelectedBranchId() {
   if (typeof window === 'undefined') {
@@ -76,30 +53,48 @@ function readSelectedBranchId() {
   return stored || undefined;
 }
 
-function persistSelectedBranchId() {
+function persistSelectedBranchId(branchId: string | undefined) {
   if (typeof window !== 'undefined') {
-    if (selectedBranchId) {
-      window.localStorage.setItem(SELECTED_BRANCH_STORAGE_KEY, selectedBranchId);
+    if (branchId) {
+      window.localStorage.setItem(SELECTED_BRANCH_STORAGE_KEY, branchId);
     } else {
       window.localStorage.removeItem(SELECTED_BRANCH_STORAGE_KEY);
     }
   }
 }
 
-function emit() {
-  listeners.forEach((listener) => listener());
+let selectedBranchId: string | undefined = readSelectedBranchId();
+
+export async function refreshBranches(): Promise<Branch[]> {
+  try {
+    const res = await apiFetch('/api/branches');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        branchStore.setState(data as Branch[]);
+        return data;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch branches, using cache:', e);
+  }
+  return branchStore.getState();
 }
 
-branchState = loadBranches();
-selectedBranchId = readSelectedBranchId();
+// Initial load
+void refreshBranches();
 
 export function getBranches(): Branch[] {
-  return branchState;
+  return branchStore.getState();
+}
+
+export function useBranches(): Branch[] {
+  return useStoreValue(branchStore);
 }
 
 export function getBranchById(branchId?: string | null): Branch | undefined {
   if (!branchId) return undefined;
-  return branchState.find((branch) => branch.id === branchId);
+  return branchStore.getState().find((branch) => branch.id === branchId);
 }
 
 export function getBranchName(branchId?: string | null): string {
@@ -113,49 +108,54 @@ export function getSelectedBranchId(): string | undefined {
 
 export function setSelectedBranchId(branchId: string | undefined) {
   selectedBranchId = branchId;
-  persistSelectedBranchId();
-  emit();
+  persistSelectedBranchId(branchId);
 }
 
-export function addBranch(data: Omit<Branch, 'id' | 'createdAt'>): Branch {
-  const newBranch: Branch = {
-    ...data,
-    id: `branch_${Date.now()}`,
-    createdAt: new Date().toISOString(),
-  };
-  branchState = [newBranch, ...branchState];
-  persistBranches();
-  emit();
-  return newBranch;
-}
-
-export function updateBranch(branchId: string, updates: Partial<Branch>) {
-  branchState = branchState.map((branch) => (branch.id === branchId ? { ...branch, ...updates } : branch));
-  persistBranches();
-  emit();
-}
-
-export function toggleBranchStatus(branchId: string) {
-  branchState = branchState.map((branch) =>
-    branch.id === branchId ? { ...branch, status: branch.status === 'Active' ? 'Inactive' : 'Active' } : branch
-  );
-  persistBranches();
-  emit();
-}
-
-export function deleteBranch(branchId: string) {
-  branchState = branchState.filter((branch) => branch.id !== branchId);
-  if (selectedBranchId === branchId) {
-    selectedBranchId = undefined;
-    persistSelectedBranchId();
+export async function addBranch(data: Omit<Branch, 'id' | 'createdAt'>): Promise<Branch | null> {
+  try {
+    const res = await apiFetch('/api/branches', { method: 'POST', body: data });
+    if (res.ok) {
+      const branch = await res.json();
+      await refreshBranches();
+      return branch;
+    }
+  } catch (err) {
+    console.error('addBranch error:', err);
   }
-  persistBranches();
-  emit();
+  return null;
 }
 
-export function subscribe(listener: () => void) {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+export async function updateBranch(branchId: string, updates: Partial<Branch>): Promise<Branch | null> {
+  try {
+    const res = await apiFetch(`/api/branches/${branchId}`, { method: 'PUT', body: updates });
+    if (res.ok) {
+      const branch = await res.json();
+      await refreshBranches();
+      return branch;
+    }
+  } catch (err) {
+    console.error('updateBranch error:', err);
+  }
+  return null;
+}
+
+export async function toggleBranchStatus(branchId: string): Promise<Branch | null> {
+  const branch = getBranchById(branchId);
+  if (!branch) return null;
+  return updateBranch(branchId, { status: branch.status === 'Active' ? 'Inactive' : 'Active' });
+}
+
+export async function deleteBranch(branchId: string): Promise<boolean> {
+  try {
+    const res = await apiFetch(`/api/branches/${branchId}`, { method: 'DELETE' });
+    if (res.ok) {
+      await refreshBranches();
+      return true;
+    }
+  } catch (err) {
+    console.error('deleteBranch error:', err);
+  }
+  return false;
 }
 
 export function getBranchScope(user: User | null, branchSelection?: string) {

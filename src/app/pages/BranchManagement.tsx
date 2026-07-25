@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { Building2, Plus, Search, Edit2, ToggleLeft, ToggleRight, Trash2, CheckCircle2, XCircle } from 'lucide-react';
-import { addBranch, deleteBranch, getBranches, toggleBranchStatus, updateBranch } from '../lib/branchService';
+import { addBranch, deleteBranch, toggleBranchStatus, updateBranch, useBranches } from '../lib/branchService';
 import { useAuth } from '../auth/AuthContext';
 
 interface BranchFormState {
@@ -34,36 +34,33 @@ const EMPTY_FORM: BranchFormState = {
 
 export function BranchManagement() {
   const { user } = useAuth();
-  const [branches, setBranches] = useState(getBranches());
+  const branches = useBranches();
   const [search, setSearch] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<BranchFormState>(EMPTY_FORM);
   const [message, setMessage] = useState<string>('');
-
-  const refreshBranches = () => setBranches(getBranches());
 
   const filteredBranches = useMemo(() => branches.filter((branch) => {
     const query = search.toLowerCase();
     return [branch.name, branch.code, branch.city, branch.email, branch.branchHead].join(' ').toLowerCase().includes(query);
   }), [branches, search]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.name || !form.code || !form.address || !form.city || !form.state || !form.pincode || !form.contactNumber || !form.email || !form.branchHead || !form.openingDate) {
       setMessage('Please fill all required branch details.');
       return;
     }
 
     if (editingId) {
-      updateBranch(editingId, { ...form });
-      setMessage('Branch updated successfully.');
+      const result = await updateBranch(editingId, { ...form });
+      setMessage(result ? 'Branch updated successfully.' : 'Failed to update branch. Please try again.');
     } else {
-      addBranch({ ...form });
-      setMessage('Branch created successfully.');
+      const result = await addBranch({ ...form });
+      setMessage(result ? 'Branch created successfully.' : 'Failed to create branch. Please try again.');
     }
 
     setForm(EMPTY_FORM);
     setEditingId(null);
-    refreshBranches();
   };
 
   const startEdit = (branchId: string) => {
@@ -85,14 +82,15 @@ export function BranchManagement() {
     });
   };
 
-  const handleToggleStatus = (branchId: string) => {
-    toggleBranchStatus(branchId);
-    refreshBranches();
+  const handleToggleStatus = async (branchId: string) => {
+    await toggleBranchStatus(branchId);
   };
 
-  const handleDelete = (branchId: string) => {
-    deleteBranch(branchId);
-    refreshBranches();
+  const handleDelete = async (branchId: string) => {
+    const deleted = await deleteBranch(branchId);
+    if (!deleted) {
+      setMessage('Failed to delete branch. Please try again.');
+    }
   };
 
   if (user?.role !== 'super_admin') {

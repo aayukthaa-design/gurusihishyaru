@@ -157,7 +157,7 @@ export function TeacherCreateExam() {
     navigate('/exams');
   }
 
-  function handleAttendanceSubmit() {
+  async function handleAttendanceSubmit() {
     if (!pendingExam || !user) return;
     const submissions = attendanceStudents.map((student) => ({
       examId: String(pendingExam.id),
@@ -179,7 +179,12 @@ export function TeacherCreateExam() {
       recordedBy: user.name,
     }));
 
-    submitExamAttendanceRecords(submissions, user);
+    try {
+      await submitExamAttendanceRecords(submissions, user);
+    } catch (err) {
+      setAttendanceMessage(err instanceof Error ? err.message : 'Failed to submit exam attendance.');
+      return;
+    }
     updateExamStatus(String(pendingExam.id), 'attendance_completed');
     addNotification({
       title: 'Exam Attendance Submitted',
