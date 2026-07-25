@@ -1,8 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { Building2, Plus, Search, Edit2, ToggleLeft, ToggleRight, Trash2, CheckCircle2, XCircle } from 'lucide-react';
 import { addBranch, deleteBranch, toggleBranchStatus, updateBranch, useBranches } from '../lib/branchService';
 import { useAuth } from '../auth/AuthContext';
+import { apiJson } from '../lib/apiClient';
+
+interface AdminOption {
+  id: string;
+  name: string;
+  email: string | null;
+}
 
 interface BranchFormState {
   name: string;
@@ -39,6 +46,20 @@ export function BranchManagement() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<BranchFormState>(EMPTY_FORM);
   const [message, setMessage] = useState<string>('');
+  const [admins, setAdmins] = useState<AdminOption[]>([]);
+
+  useEffect(() => {
+    if (user?.role !== 'super_admin') return;
+    apiJson<Array<{ id: string; name: string; email: string | null; roles: string[]; status: string }>>('/api/users')
+      .then((users) => {
+        setAdmins(
+          users
+            .filter((u) => u.roles.includes('admin') && u.status === 'Active')
+            .map((u) => ({ id: u.id, name: u.name, email: u.email }))
+        );
+      })
+      .catch((err) => console.error('Failed to load admins:', err));
+  }, [user?.role]);
 
   const filteredBranches = useMemo(() => branches.filter((branch) => {
     const query = search.toLowerCase();
@@ -171,7 +192,6 @@ export function BranchManagement() {
                 ['pincode', 'Pincode'],
                 ['contactNumber', 'Contact Number'],
                 ['email', 'Email'],
-                ['branchHead', 'Branch Head'],
                 ['openingDate', 'Opening Date'],
               ].map(([key, label]) => (
                 <div key={key}>
@@ -179,6 +199,18 @@ export function BranchManagement() {
                   <input type={key === 'openingDate' ? 'date' : 'text'} value={form[key as keyof BranchFormState]} onChange={(e) => setForm((prev) => ({ ...prev, [key]: e.target.value }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm" />
                 </div>
               ))}
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Branch Head</label>
+                <select value={form.branchHead} onChange={(e) => setForm((prev) => ({ ...prev, branchHead: e.target.value }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm">
+                  <option value="">Select admin…</option>
+                  {form.branchHead && !admins.some((admin) => admin.name === form.branchHead) && (
+                    <option value={form.branchHead}>{form.branchHead}</option>
+                  )}
+                  {admins.map((admin) => (
+                    <option key={admin.id} value={admin.name}>{admin.name}{admin.email ? ` (${admin.email})` : ''}</option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Status</label>
                 <select value={form.status} onChange={(e) => setForm((prev) => ({ ...prev, status: e.target.value as 'Active' | 'Inactive' }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm">
