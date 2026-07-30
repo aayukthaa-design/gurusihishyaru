@@ -4,7 +4,7 @@ import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import {
   BookOpen, Plus, Search, Eye, Edit2, ChevronRight, X,
-  Phone, Mail, Award, GraduationCap,
+  Phone, Mail, Award, GraduationCap, Cake,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 import { createStore, useStoreValue } from '../lib/store';
@@ -18,6 +18,7 @@ export interface Teacher {
   lastName: string;
   mobile: string;
   email: string;
+  dob?: string;
   qualification: string;
   experience: string;
   subjects: string;
@@ -65,7 +66,7 @@ export function useTeacherProfiles(): Teacher[] {
 
 const EMPTY: Omit<Teacher, 'id'> = {
   branchId: '',
-  firstName: '', lastName: '', mobile: '', email: '',
+  firstName: '', lastName: '', mobile: '', email: '', dob: '',
   qualification: '', experience: '', subjects: '', department: '', salaryType: 'Monthly Fixed', salaryAmount: 0, monthlySalary: 0, salaryPerClass: 0, status: 'Active',
 };
 
@@ -121,6 +122,10 @@ function TeacherForm({
         <div>
           <label className="field-label">Email Address <span className="text-destructive">*</span></label>
           <input type="email" value={form.email} onChange={(e) => set('email', e.target.value)} placeholder="e.g. teacher@tutorials.com" className="field" />
+        </div>
+        <div>
+          <label className="field-label">Date of Birth</label>
+          <input type="date" value={form.dob || ''} onChange={(e) => set('dob', e.target.value)} className="field" />
         </div>
         <div>
           <label className="field-label">Qualification <span className="text-destructive">*</span></label>
@@ -226,6 +231,7 @@ function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () =>
         {[
           { icon: Phone,        label: 'Mobile',        value: teacher.mobile },
           { icon: Mail,         label: 'Email',         value: teacher.email },
+          { icon: Cake,         label: 'Date of Birth', value: teacher.dob },
           { icon: GraduationCap,label: 'Qualification', value: teacher.qualification },
           { icon: Award,        label: 'Experience',    value: teacher.experience },
           { icon: BookOpen,     label: 'Subjects',      value: teacher.subjects },

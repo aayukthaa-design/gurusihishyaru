@@ -1,6 +1,7 @@
-import { StudentRecord } from './studentService';
-import { TeacherRecord } from './teacherService';
+import { StudentRecord, getStudentById } from './studentService';
+import { TeacherRecord, getTeachers } from './teacherService';
 import { AppNotification, addNotification, getNotifications } from './notificationService';
+import { openWhatsAppChat } from './whatsapp';
 
 export interface BirthdayEntry {
   id: string;
@@ -109,4 +110,50 @@ export function notifyBirthday(entry: BirthdayEntry) {
     recipient: 'Admin',
     priority: 'low',
   } as any);
+}
+
+// wa.me click-to-chat requires the full international number (91 + 10 digits),
+// not a bare local number — mirrors the same normalization Attendance.tsx
+// already uses for the "student absent" WhatsApp messages.
+function toIndiaWhatsAppNumber(mobile?: string | null): string | null {
+  if (!mobile) return null;
+  const digits = mobile.replace(/\D/g, '');
+  if (digits.length === 10) return `91${digits}`;
+  if (digits.length === 12 && digits.startsWith('91')) return digits;
+  return null;
+}
+
+/**
+ * Opens a prefilled WhatsApp birthday wish — to the parent's number for a
+ * student, or directly to the teacher's own number. Never sends automatically;
+ * the user still has to press Send inside WhatsApp.
+ */
+export function sendBirthdayWhatsAppWish(role: 'student' | 'teacher', id: string): { success: boolean; error?: string } {
+  if (role === 'student') {
+    const student = getStudentById(id);
+    if (!student) return { success: false, error: 'Student not found.' };
+    const phone = toIndiaWhatsAppNumber(student.primaryParentMobile);
+    if (!phone) return { success: false, error: `No valid parent mobile number on file for ${student.fullName}.` };
+    const message =
+      `🎂 *Guru Shishyaru Tutorials*\n\n` +
+      `Dear Parent,\n\n` +
+      `Wishing your child *${student.fullName}* a very Happy Birthday! 🎉\n\n` +
+      `We hope this year brings them joy, success, and wonderful memories.\n\n` +
+      `Warm wishes,\n*Guru Shishyaru Tutorials*`;
+    openWhatsAppChat(phone, message);
+    return { success: true };
+  }
+
+  const teacher = getTeachers().find((t) => t.id === id);
+  if (!teacher) return { success: false, error: 'Teacher not found.' };
+  const phone = toIndiaWhatsAppNumber(teacher.phone);
+  if (!phone) return { success: false, error: `No valid mobile number on file for ${teacher.fullName}.` };
+  const message =
+    `🎉 *Guru Shishyaru Tutorials*\n\n` +
+    `Dear *${teacher.fullName}*,\n\n` +
+    `Wishing you a very Happy Birthday! 🎂\n\n` +
+    `Thank you for all your dedication and hard work. Have a wonderful day!\n\n` +
+    `Warm wishes,\n*Guru Shishyaru Tutorials*`;
+  openWhatsAppChat(phone, message);
+  return { success: true };
 }

@@ -1,4 +1,4 @@
-import { Bell, Check, Clock3, FileDown, Info, MailOpen, Search, Trash2, Plus, Send } from 'lucide-react';
+import { Bell, Check, Clock3, FileDown, Info, MailOpen, MessageCircle, Search, Trash2, Plus, Send } from 'lucide-react';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
@@ -24,6 +24,7 @@ import { useAuth } from '../auth/AuthContext';
 import { getBranches, getBranchName } from '../lib/branchService';
 import { getTeachersForBranch } from '../lib/teacherService';
 import { getClassesForBranch } from '../lib/classService';
+import { sendBirthdayWhatsAppWish } from '../lib/birthdayService';
 
 function formatDateTime(value?: string | null) {
   if (!value) return '—';
@@ -113,6 +114,17 @@ export function NotificationsPage() {
     const detail = await fetchNotificationReads(id);
     setReadsDetail(detail);
     setLoadingReads(false);
+  };
+
+  const handleSendBirthdayWish = (notification: { studentIds?: string[]; teacherIds?: string[] }) => {
+    const studentId = notification.studentIds?.[0];
+    const teacherId = notification.teacherIds?.[0];
+    const result = studentId
+      ? sendBirthdayWhatsAppWish('student', studentId)
+      : teacherId
+        ? sendBirthdayWhatsAppWish('teacher', teacherId)
+        : { success: false, error: 'No student or teacher linked to this notification.' };
+    if (!result.success) alert(result.error);
   };
 
   const activeNotifications = visibleNotifications.filter((notification) => isUnreadForMe(notification) || notification.status === 'scheduled');
@@ -309,6 +321,17 @@ export function NotificationsPage() {
                     >
                       <Plus className="mr-1 h-3.5 w-3.5" />
                       Allocate Inventory
+                    </Button>
+                  )}
+                  {notification.notificationType === 'Birthday' && (notification.studentIds?.length || notification.teacherIds?.length) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-[#25D366] text-[#128C4A] hover:bg-[#25D366]/10 dark:text-[#25D366]"
+                      onClick={() => handleSendBirthdayWish(notification)}
+                    >
+                      <MessageCircle className="mr-1 h-3.5 w-3.5" />
+                      Send Wishes
                     </Button>
                   )}
                   {isUnreadForMe(notification) && notification.status !== 'scheduled' && (
