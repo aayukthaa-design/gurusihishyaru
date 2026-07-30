@@ -27,6 +27,8 @@ export interface FeeRecord {
   paidAmount: number;
   dueDate: string;
   status: FeeStatus;
+  /** Set only for recurring monthly fee records, e.g. '2026-07'. */
+  month?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -131,6 +133,66 @@ export async function generateFeeRecordsAPI(structureId: number, user: any): Pro
   const result = await res.json();
   await refreshFeeRecords(user);
   return result;
+}
+
+export interface MonthlyFeeGenerationInput {
+  className: string;
+  feeType: string;
+  amount: number;
+  academicYear: string;
+  startMonth: string; // 'YYYY-MM'
+  months: number;
+  dueDay: number;
+  branchId?: string;
+}
+
+export async function generateMonthlyFeeRecordsAPI(
+  input: MonthlyFeeGenerationInput,
+  user: any
+): Promise<{ createdCount: number; skippedCount: number; studentCount: number }> {
+  const res = await apiFetch('/api/fees/records/generate-monthly', { method: 'POST', body: input });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to generate monthly fee records');
+  }
+  const result = await res.json();
+  await refreshFeeRecords(user);
+  return result;
+}
+
+export interface SingleFeeRecordInput {
+  studentId: string;
+  feeType: string;
+  totalAmount: number;
+  dueDate: string;
+  academicYear?: string;
+  month?: string;
+}
+
+export async function createSingleFeeRecordAPI(input: SingleFeeRecordInput, user: any): Promise<FeeRecord> {
+  const res = await apiFetch('/api/fees/records', { method: 'POST', body: input });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to create fee record');
+  }
+  const created = await res.json();
+  await refreshFeeRecords(user);
+  return created;
+}
+
+export async function updateFeeRecordAPI(
+  recordId: number,
+  updates: { totalAmount?: number; dueDate?: string },
+  user: any
+): Promise<FeeRecord> {
+  const res = await apiFetch(`/api/fees/records/${recordId}`, { method: 'PUT', body: updates });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to update fee record');
+  }
+  const updated = await res.json();
+  await refreshFeeRecords(user);
+  return updated;
 }
 
 export async function recordFeePaymentAPI(

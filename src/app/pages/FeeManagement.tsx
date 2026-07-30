@@ -11,13 +11,28 @@ import {
   refreshFeeStructures,
   createFeeStructureAPI,
   generateFeeRecordsAPI,
+  generateMonthlyFeeRecordsAPI,
+  createSingleFeeRecordAPI,
+  updateFeeRecordAPI,
   recordFeePaymentAPI,
   fetchFeeStats,
   FeeStats,
   FeeRecord,
 } from '../lib/feeService';
-import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus } from 'lucide-react';
+import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus, Pencil, CalendarClock } from 'lucide-react';
 import { GRADES } from '../lib/classConstants';
+
+function formatMonthLabel(month?: string | null): string {
+  if (!month) return '';
+  const [year, mon] = month.split('-').map(Number);
+  if (!year || !mon) return month;
+  return new Date(year, mon - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+}
+
+function nextMonthValue(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
 
 const STATUS_CONFIG = {
   Paid:            { icon: CheckCircle2, color: 'text-green-600 dark:text-green-400',  bg: 'bg-green-100 dark:bg-green-900/40' },
@@ -58,6 +73,23 @@ export function FeeManagement() {
   const [structureForm, setStructureForm] = useState({ className: CLASS_OPTIONS[0], feeType: FEE_TYPES[0], amount: '', dueDate: '', academicYear: '' });
   const [isCreatingStructure, setIsCreatingStructure] = useState(false);
   const [isGenerating, setIsGenerating] = useState<number | null>(null);
+
+  const [showMonthly, setShowMonthly] = useState(false);
+  const [monthlyForm, setMonthlyForm] = useState({
+    className: CLASS_OPTIONS[0], feeType: 'Tuition', amount: '', academicYear: '',
+    startMonth: nextMonthValue(), months: '12', dueDay: '5',
+  });
+  const [isGeneratingMonthly, setIsGeneratingMonthly] = useState(false);
+
+  const [showIndividual, setShowIndividual] = useState(false);
+  const [individualSearch, setIndividualSearch] = useState('');
+  const [individualForm, setIndividualForm] = useState({ studentId: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', month: '' });
+  const [isAddingIndividual, setIsAddingIndividual] = useState(false);
+
+  const [editingRecord, setEditingRecord] = useState<FeeRecord | null>(null);
+  const [editAmount, setEditAmount] = useState('');
+  const [editDueDate, setEditDueDate] = useState('');
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   function loadAll() {
     setIsLoading(true);
@@ -135,6 +167,103 @@ export function FeeManagement() {
       setError(err.message || 'Failed to generate fee records.');
     } finally {
       setIsGenerating(null);
+    }
+  }
+
+  async function handleGenerateMonthly(e: React.FormEvent) {
+    e.preventDefault();
+    if (!monthlyForm.amount || !monthlyForm.startMonth) {
+      setError('Monthly amount and start month are required.');
+      return;
+    }
+    setIsGeneratingMonthly(true);
+    setError(null);
+    try {
+      const result = await generateMonthlyFeeRecordsAPI({
+        className: monthlyForm.className,
+        feeType: monthlyForm.feeType,
+        amount: Number(monthlyForm.amount),
+        academicYear: monthlyForm.academicYear || new Date().getFullYear().toString(),
+        startMonth: monthlyForm.startMonth,
+        months: Number(monthlyForm.months) || 12,
+        dueDay: Number(monthlyForm.dueDay) || 5,
+      }, user);
+      setSuccess(`Created ${result.createdCount} monthly fee record(s) for ${result.studentCount} student(s)${result.skippedCount ? `, skipped ${result.skippedCount} already existing` : ''}.`);
+      const statsResult = await fetchFeeStats(user);
+      setStats(statsResult);
+    } catch (err: any) {
+      setError(err.message || 'Failed to generate monthly fee records.');
+    } finally {
+      setIsGeneratingMonthly(false);
+    }
+  }
+
+  const individualStudentMatches = useMemo(() => {
+    if (!individualSearch.trim()) return [];
+    const query = individualSearch.toLowerCase();
+    return students
+      .filter((s) => s.status === 'Active' && (s.fullName.toLowerCase().includes(query) || s.id.toLowerCase().includes(query)))
+      .slice(0, 20);
+  }, [students, individualSearch]);
+
+  async function handleAddIndividualFee(e: React.FormEvent) {
+    e.preventDefault();
+    if (!individualForm.studentId || !individualForm.amount || !individualForm.dueDate) {
+      setError('Student, amount and due date are required.');
+      return;
+    }
+    setIsAddingIndividual(true);
+    setError(null);
+    try {
+      await createSingleFeeRecordAPI({
+        studentId: individualForm.studentId,
+        feeType: individualForm.feeType,
+        totalAmount: Number(individualForm.amount),
+        dueDate: individualForm.dueDate,
+        academicYear: new Date().getFullYear().toString(),
+        month: individualForm.month || undefined,
+      }, user);
+      setSuccess('Individual fee record created.');
+      setIndividualForm({ studentId: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', month: '' });
+      setIndividualSearch('');
+      const statsResult = await fetchFeeStats(user);
+      setStats(statsResult);
+    } catch (err: any) {
+      setError(err.message || 'Failed to create fee record.');
+    } finally {
+      setIsAddingIndividual(false);
+    }
+  }
+
+  function startEditRecord(record: FeeRecord) {
+    setEditingRecord(record);
+    setEditAmount(String(record.totalAmount));
+    setEditDueDate(record.dueDate);
+  }
+
+  async function handleSaveEdit() {
+    if (!editingRecord) return;
+    const amount = Number(editAmount);
+    if (!amount || amount <= 0) {
+      setError('Enter a valid fee amount.');
+      return;
+    }
+    if (amount < editingRecord.paidAmount) {
+      setError(`Amount can't be less than the ${formatIndianCurrency(editingRecord.paidAmount)} already paid.`);
+      return;
+    }
+    setIsSavingEdit(true);
+    setError(null);
+    try {
+      await updateFeeRecordAPI(editingRecord.id, { totalAmount: amount, dueDate: editDueDate }, user);
+      setSuccess(`Fee updated for ${editingRecord.studentName}.`);
+      const statsResult = await fetchFeeStats(user);
+      setStats(statsResult);
+      setEditingRecord(null);
+    } catch (err: any) {
+      setError(err.message || 'Failed to update fee.');
+    } finally {
+      setIsSavingEdit(false);
     }
   }
 
@@ -261,6 +390,135 @@ export function FeeManagement() {
           </div>
         )}
 
+        {isAccountantOrAdmin && (
+          <div className="rounded-2xl border border-border bg-card shadow-sm">
+            <button onClick={() => setShowMonthly((v) => !v)} className="flex w-full items-center justify-between px-6 py-4">
+              <div className="flex items-center gap-2">
+                <CalendarClock className="h-4 w-4 text-muted-foreground" />
+                <span className="font-semibold text-foreground">Generate Monthly Fees</span>
+              </div>
+              <ChevronRight className={`h-4 w-4 text-muted-foreground transition-transform ${showMonthly ? 'rotate-90' : ''}`} />
+            </button>
+            {showMonthly && (
+              <div className="border-t border-border p-6 space-y-4">
+                <p className="text-xs text-muted-foreground">
+                  Creates one fee record per month for every active student in the class, so each month can be tracked and paid separately. You can edit any individual student's amount afterwards.
+                </p>
+                <form onSubmit={handleGenerateMonthly} className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Class</span>
+                    <select value={monthlyForm.className} onChange={(e) => setMonthlyForm((f) => ({ ...f, className: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
+                      {CLASS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Fee Type</span>
+                    <input value={monthlyForm.feeType} onChange={(e) => setMonthlyForm((f) => ({ ...f, feeType: e.target.value }))} placeholder="e.g. Tuition"
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Monthly Amount (₹)</span>
+                    <input type="number" min={0} value={monthlyForm.amount} onChange={(e) => setMonthlyForm((f) => ({ ...f, amount: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Start Month</span>
+                    <input type="month" value={monthlyForm.startMonth} onChange={(e) => setMonthlyForm((f) => ({ ...f, startMonth: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Number of Months</span>
+                    <input type="number" min={1} max={24} value={monthlyForm.months} onChange={(e) => setMonthlyForm((f) => ({ ...f, months: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Due Day of Month</span>
+                    <input type="number" min={1} max={28} value={monthlyForm.dueDay} onChange={(e) => setMonthlyForm((f) => ({ ...f, dueDay: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <button type="submit" disabled={isGeneratingMonthly} className="flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50 sm:col-span-2 lg:col-span-1">
+                    {isGeneratingMonthly ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                    Generate Monthly Fees
+                  </button>
+                </form>
+              </div>
+            )}
+          </div>
+        )}
+
+        {isAccountantOrAdmin && (
+          <div className="rounded-2xl border border-border bg-card shadow-sm">
+            <button onClick={() => setShowIndividual((v) => !v)} className="flex w-full items-center justify-between px-6 py-4">
+              <div className="flex items-center gap-2">
+                <UserPlus className="h-4 w-4 text-muted-foreground" />
+                <span className="font-semibold text-foreground">Add Individual Student Fee</span>
+              </div>
+              <ChevronRight className={`h-4 w-4 text-muted-foreground transition-transform ${showIndividual ? 'rotate-90' : ''}`} />
+            </button>
+            {showIndividual && (
+              <div className="border-t border-border p-6 space-y-4">
+                <p className="text-xs text-muted-foreground">
+                  For a single student whose fee doesn't match their class — a scholarship, a custom plan, or a one-off charge.
+                </p>
+                <form onSubmit={handleAddIndividualFee} className="space-y-4">
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Student</span>
+                    <input
+                      value={individualForm.studentId ? (students.find((s) => s.id === individualForm.studentId)?.fullName ?? '') : individualSearch}
+                      onChange={(e) => { setIndividualSearch(e.target.value); setIndividualForm((f) => ({ ...f, studentId: '' })); }}
+                      placeholder="Search student by name or ID…"
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                    />
+                    {individualSearch && !individualForm.studentId && individualStudentMatches.length > 0 && (
+                      <div className="max-h-40 overflow-y-auto rounded-xl border border-border bg-card divide-y divide-border">
+                        {individualStudentMatches.map((s) => (
+                          <button
+                            type="button"
+                            key={s.id}
+                            onClick={() => { setIndividualForm((f) => ({ ...f, studentId: s.id })); setIndividualSearch(''); }}
+                            className="block w-full px-3 py-2 text-left text-sm hover:bg-secondary"
+                          >
+                            {s.fullName} <span className="text-xs text-muted-foreground">· {s.className} · {s.id}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </label>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 items-end">
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Fee Type</span>
+                      <select value={individualForm.feeType} onChange={(e) => setIndividualForm((f) => ({ ...f, feeType: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
+                        {FEE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Amount (₹)</span>
+                      <input type="number" min={0} value={individualForm.amount} onChange={(e) => setIndividualForm((f) => ({ ...f, amount: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Due Date</span>
+                      <input type="date" value={individualForm.dueDate} onChange={(e) => setIndividualForm((f) => ({ ...f, dueDate: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Month (optional)</span>
+                      <input type="month" value={individualForm.month} onChange={(e) => setIndividualForm((f) => ({ ...f, month: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                    </label>
+                  </div>
+                  <button type="submit" disabled={isAddingIndividual || !individualForm.studentId} className="flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">
+                    {isAddingIndividual ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                    Add Fee for Student
+                  </button>
+                </form>
+              </div>
+            )}
+          </div>
+        )}
+
         {isAccountantOrAdmin && studentsWithoutFees.length > 0 && (
           <div className="rounded-2xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 p-5">
             <div className="flex items-start gap-3">
@@ -378,6 +636,55 @@ export function FeeManagement() {
           </div>
         )}
 
+        {editingRecord && (
+          <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-foreground">
+                Edit Fee — {editingRecord.studentName}
+                {editingRecord.month && <span className="ml-2 text-sm font-normal text-muted-foreground">({formatMonthLabel(editingRecord.month)})</span>}
+              </h2>
+              <button onClick={() => setEditingRecord(null)} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
+            </div>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Fee Amount (₹)</label>
+                <input
+                  type="number"
+                  min={editingRecord.paidAmount}
+                  value={editAmount}
+                  onChange={(e) => setEditAmount(e.target.value)}
+                  className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+                {editingRecord.paidAmount > 0 && (
+                  <p className="mt-1 text-xs text-muted-foreground">{formatIndianCurrency(editingRecord.paidAmount)} already paid — amount can't go below this.</p>
+                )}
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Due Date</label>
+                <input
+                  type="date"
+                  value={editDueDate}
+                  onChange={(e) => setEditDueDate(e.target.value)}
+                  className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+            </div>
+            <div className="mt-4 flex gap-3">
+              <button
+                onClick={handleSaveEdit}
+                disabled={isSavingEdit}
+                className="flex items-center gap-2 rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 disabled:opacity-50"
+              >
+                {isSavingEdit && <Loader2 className="h-4 w-4 animate-spin" />}
+                Save Changes
+              </button>
+              <button onClick={() => setEditingRecord(null)} className="rounded-xl border border-border px-6 py-2.5 text-sm font-medium transition-colors hover:bg-secondary">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="rounded-2xl border border-border bg-card shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-border">
             <h2 className="font-semibold text-foreground">
@@ -403,7 +710,7 @@ export function FeeManagement() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-foreground">{r.studentName}</p>
-                      <p className="text-xs text-muted-foreground">{r.feeType} · {r.className}</p>
+                      <p className="text-xs text-muted-foreground">{r.feeType}{r.month ? ` · ${formatMonthLabel(r.month)}` : ''} · {r.className}</p>
                     </div>
                     <div className="hidden sm:block text-right mr-4">
                       <p className="text-sm font-semibold text-foreground">{formatIndianCurrency(r.totalAmount)}</p>
@@ -413,6 +720,15 @@ export function FeeManagement() {
                       <StatusIcon className="h-3 w-3" />
                       {r.status}
                     </span>
+                    {isAccountantOrAdmin && (
+                      <button
+                        onClick={() => startEditRecord(r)}
+                        title="Edit this student's fee"
+                        className="flex items-center gap-1 rounded-xl border border-border px-2.5 py-2 text-xs font-medium text-muted-foreground transition-all hover:bg-secondary hover:text-foreground"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                     {isAccountantOrAdmin && r.status !== 'Paid' && (
                       <button
                         onClick={() => { setCollecting(r); setPaymentAmount(String(r.totalAmount - r.paidAmount)); }}

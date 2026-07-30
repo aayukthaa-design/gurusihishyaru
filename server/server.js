@@ -1296,6 +1296,9 @@ async function initDb() {
   try { await db.exec("ALTER TABLE parents ADD COLUMN address TEXT;"); } catch (e) {}
   try { await db.exec("ALTER TABLE users ADD COLUMN failedLoginAttempts INTEGER DEFAULT 0;"); } catch (e) {}
   try { await db.exec("ALTER TABLE users ADD COLUMN lockedUntil TEXT;"); } catch (e) {}
+  // Populated only for recurring monthly fee records (e.g. '2026-07'), so each
+  // month stays its own trackable/payable fee_records row instead of one lump sum.
+  try { await db.exec("ALTER TABLE fee_records ADD COLUMN month TEXT;"); } catch (e) {}
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS otp_codes (
@@ -5657,11 +5660,87 @@ async function main() {
       const now = new Date().toISOString();
       const status = feeRecordStatus(Number(body.totalAmount), 0, body.dueDate);
       const result = await db.run(`
-        INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt)
-        VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
-      `, student.id, student.fullName, student.className, branchId, body.feeType, body.academicYear || '', Number(body.totalAmount), body.dueDate || '', status, now, now);
+        INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt)
+        VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)
+      `, student.id, student.fullName, student.className, branchId, body.feeType, body.academicYear || '', Number(body.totalAmount), body.dueDate || '', status, body.month || null, now, now);
       const created = await db.get('SELECT * FROM fee_records WHERE id = ?', result.lastID);
       res.status(201).json(created);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Edit a single student's fee record — an individual student's fee (or one month
+  // of a recurring monthly fee) is very often not the same as the rest of their
+  // class, so this lets staff override just totalAmount/dueDate for that one record
+  // without touching the class-wide fee_structures template everyone else uses.
+  app.put('/api/fees/records/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Fee record not found' });
+      const body = req.body || {};
+      const totalAmount = body.totalAmount !== undefined ? Number(body.totalAmount) : existing.totalAmount;
+      if (totalAmount < existing.paidAmount) {
+        return res.status(400).json({ error: `Amount can't be less than the ${existing.paidAmount} already paid.` });
+      }
+      const dueDate = body.dueDate ?? existing.dueDate;
+      const feeType = body.feeType ?? existing.feeType;
+      const now = new Date().toISOString();
+      const status = feeRecordStatus(totalAmount, existing.paidAmount, dueDate);
+      await db.run(
+        'UPDATE fee_records SET totalAmount=?, dueDate=?, feeType=?, status=?, updatedAt=? WHERE id=?',
+        totalAmount, dueDate, feeType, status, now, req.params.id
+      );
+      const updated = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
+      res.json(updated);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Bulk-generate one fee record per month (independently trackable/payable) for
+  // every active student in a class — the monthly-tuition equivalent of the
+  // one-time "generate for class" flow below, skipping months a student already
+  // has a record for.
+  app.post('/api/fees/records/generate-monthly', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const body = req.body || {};
+      const { className, feeType, academicYear, startMonth } = body;
+      const amount = Number(body.amount);
+      const months = Math.max(1, Math.min(24, Number(body.months) || 12));
+      const dueDay = Math.max(1, Math.min(28, Number(body.dueDay) || 5));
+      if (!className || !feeType || !amount || !startMonth || !/^\d{4}-\d{2}$/.test(startMonth)) {
+        return res.status(400).json({ error: 'className, feeType, amount and startMonth (YYYY-MM) are required' });
+      }
+      const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || null;
+      const students = branchId
+        ? await db.all('SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?', className, branchId, 'Active')
+        : await db.all('SELECT * FROM students WHERE className = ? AND status = ?', className, 'Active');
+
+      const [startYear, startMon] = startMonth.split('-').map(Number);
+      const now = new Date().toISOString();
+      const createdIds = [];
+      let skipped = 0;
+      for (const student of students) {
+        for (let i = 0; i < months; i++) {
+          const totalMonthIndex = (startMon - 1) + i;
+          const year = startYear + Math.floor(totalMonthIndex / 12);
+          const mon = (totalMonthIndex % 12) + 1;
+          const month = `${year}-${String(mon).padStart(2, '0')}`;
+          const existing = await db.get(
+            'SELECT id FROM fee_records WHERE studentId = ? AND feeType = ? AND month = ?',
+            student.id, feeType, month
+          );
+          if (existing) { skipped++; continue; }
+          const dueDate = `${month}-${String(dueDay).padStart(2, '0')}`;
+          const status = feeRecordStatus(amount, 0, dueDate);
+          const result = await db.run(`
+            INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt)
+            VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)
+          `, student.id, student.fullName, student.className, student.branchId || branchId, feeType, academicYear || '', amount, dueDate, status, month, now, now);
+          createdIds.push(result.lastID);
+        }
+      }
+      const rows = createdIds.length ? await db.all(`SELECT * FROM fee_records WHERE id IN (${createdIds.map(() => '?').join(',')})`, ...createdIds) : [];
+      res.status(201).json({ createdCount: rows.length, skippedCount: skipped, studentCount: students.length, records: rows });
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });
 
