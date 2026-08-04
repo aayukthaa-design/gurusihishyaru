@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches } from '../lib/branchService';
+import { useBranches } from '../lib/branchService';
 import { Edit2, Trash2, Plus } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
@@ -20,6 +20,7 @@ export interface Allocation {
   class: string;
   subject: string;
   batch: string;
+  batchName: string;
   students: number;
   weeklyHours: number;
   status: 'Assigned' | 'Pending' | 'Removed';
@@ -29,11 +30,12 @@ const CLASSES = GRADES;
 const BATCHES = BOARDS;
 const ALL_SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];
 
-const EMPTY_FORM = { teacherId: '', teacherName: '', class: CLASSES[0], subject: ALL_SUBJECTS[0], batch: BATCHES[0], students: 0, weeklyHours: 0 };
+const EMPTY_FORM = { teacherId: '', teacherName: '', class: CLASSES[0], subject: ALL_SUBJECTS[0], batch: BATCHES[0], batchName: '', students: 0, weeklyHours: 0 };
 
 export function ClassAllocation() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const isSuperAdmin = user?.role === 'super_admin';
+  const branches = useBranches();
   const teachers = useTeacherProfiles();
   const [allocations, setAllocations] = useState<Allocation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,7 +82,7 @@ export function ClassAllocation() {
     try {
       const res = await apiFetch(`/api/allocations/${selected.id}`, {
         method: 'PUT',
-        body: { teacherId: selected.teacherId, class: selected.class, subject: selected.subject, batch: selected.batch, students: selected.students, weeklyHours: selected.weeklyHours },
+        body: { teacherId: selected.teacherId, class: selected.class, subject: selected.subject, batch: selected.batch, batchName: selected.batchName, students: selected.students, weeklyHours: selected.weeklyHours },
       });
       if (res.ok) {
         await loadAllocations();
@@ -126,6 +128,7 @@ export function ClassAllocation() {
           class: addForm.class,
           subject: addForm.subject,
           batch: addForm.batch,
+          batchName: addForm.batchName,
           students: addForm.students,
           weeklyHours: addForm.weeklyHours,
           branchId: user?.role === 'super_admin' ? (branchFilter || undefined) : user?.branchId,
@@ -165,7 +168,7 @@ export function ClassAllocation() {
             {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
           </select>
         ) : <div />}
-        <Button onClick={() => setAddOpen(true)}><Plus className="mr-2 h-4 w-4" />New Allocation</Button>
+        <Button onClick={() => setAddOpen(true)}><Plus className="mr-2 h-4 w-4" />New Allocation / Batch</Button>
       </div>
 
       <div className="rounded-2xl border border-border bg-card shadow-sm overflow-hidden">
@@ -179,7 +182,7 @@ export function ClassAllocation() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-border bg-secondary/40">
-                {['Teacher', 'Class', 'Subject', 'Board', 'Students', 'Hours', 'Status', ''].map((h) => (
+                {['Teacher', 'Class', 'Subject', 'Board', 'Batch', 'Students', 'Hours', 'Status', ''].map((h) => (
                   <th key={h} className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">{h}</th>
                 ))}
               </tr>
@@ -199,6 +202,7 @@ export function ClassAllocation() {
                   <td className="px-5 py-4 text-sm text-muted-foreground">{a.class}</td>
                   <td className="px-5 py-4 text-sm text-foreground">{a.subject}</td>
                   <td className="px-5 py-4 text-sm text-muted-foreground">{a.batch}</td>
+                  <td className="px-5 py-4 text-sm text-muted-foreground">{a.batchName || '—'}</td>
                   <td className="px-5 py-4 text-sm text-muted-foreground">{a.students}</td>
                   <td className="px-5 py-4 text-sm text-muted-foreground">{a.weeklyHours}</td>
                   <td className="px-5 py-4">
@@ -209,14 +213,16 @@ export function ClassAllocation() {
                     }`}>{a.status}</span>
                   </td>
                   <td className="px-5 py-4">
-                    <div className="flex items-center gap-1">
-                      <button onClick={() => openEdit(a)} className="rounded-lg p-1.5 hover:bg-secondary" title="Edit">
-                        <Edit2 className="h-4 w-4 text-muted-foreground" />
-                      </button>
-                      <button onClick={() => removeAllocation(a.id)} className="rounded-lg p-1.5 hover:bg-secondary" title="Remove">
-                        <Trash2 className="h-4 w-4 text-muted-foreground" />
-                      </button>
-                    </div>
+                    {isSuperAdmin ? (
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => openEdit(a)} className="rounded-lg p-1.5 hover:bg-secondary" title="Edit">
+                          <Edit2 className="h-4 w-4 text-muted-foreground" />
+                        </button>
+                        <button onClick={() => removeAllocation(a.id)} className="rounded-lg p-1.5 hover:bg-secondary" title="Remove">
+                          <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        </button>
+                      </div>
+                    ) : null}
                   </td>
                 </tr>
               ))}
@@ -277,6 +283,11 @@ export function ClassAllocation() {
                 </select>
               </div>
 
+              <div>
+                <label className="block text-sm font-medium">Batch</label>
+                <input type="text" placeholder="e.g. Batch A, Morning" className="w-full border rounded px-2 py-1" value={selected.batchName} onChange={(e) => handleChange('batchName', e.target.value)} />
+              </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium">Students</label>
@@ -335,6 +346,11 @@ export function ClassAllocation() {
               <select className="w-full border rounded px-2 py-1" value={addForm.batch} onChange={(e) => setAddForm((p) => ({ ...p, batch: e.target.value }))}>
                 {BATCHES.map((b) => <option key={b} value={b}>{b}</option>)}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium">Batch</label>
+              <input type="text" placeholder="e.g. Batch A, Morning" className="w-full border rounded px-2 py-1" value={addForm.batchName} onChange={(e) => setAddForm((p) => ({ ...p, batchName: e.target.value }))} />
             </div>
 
             <div className="grid grid-cols-2 gap-4">

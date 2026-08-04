@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
+import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import {
   BookOpen, Plus, Search, Eye, Edit2, ChevronRight, X,
   Phone, Mail, Award, GraduationCap, Cake,
@@ -270,7 +270,7 @@ function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () =>
 
 export function TeacherManagement() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const teachers = useTeacherProfiles();
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');

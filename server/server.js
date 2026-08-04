@@ -970,6 +970,19 @@ async function initDb() {
   try { await db.exec("ALTER TABLE allocations ADD COLUMN teacherName TEXT;"); } catch(e) {}
   try { await db.exec("ALTER TABLE allocations ADD COLUMN createdAt TEXT;"); } catch(e) {}
   try { await db.exec("ALTER TABLE allocations ADD COLUMN updatedAt TEXT;"); } catch(e) {}
+  try { await db.exec("ALTER TABLE allocations ADD COLUMN batchName TEXT;"); } catch(e) {}
+
+  // Duplicate attendance entries: on a database whose `attendance` table was
+  // created before the UNIQUE constraint existed in the schema below,
+  // `CREATE TABLE IF NOT EXISTS` is a no-op and the constraint never gets applied,
+  // so the same student+date can silently get more than one row instead of the
+  // upsert in POST /api/attendance updating one. Collapse any existing duplicates
+  // (keep the most recent row) then backfill the constraint via a unique index —
+  // harmless if the inline UNIQUE already covers it.
+  try {
+    await db.exec(`DELETE FROM attendance WHERE id NOT IN (SELECT MAX(id) FROM attendance GROUP BY className, date, studentId);`);
+    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique ON attendance(className, date, studentId);`);
+  } catch (e) { console.error('attendance de-dup migration failed:', e); }
   try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN gender TEXT;"); } catch(e) {}
   try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN dob TEXT;"); } catch(e) {}
   try { await db.exec("ALTER TABLE teacher_profiles ADD COLUMN address TEXT;"); } catch(e) {}
@@ -1435,6 +1448,14 @@ async function initDb() {
       timestamp TEXT
     );
   `);
+
+  // Duplicate teacher-attendance entries: same reasoning as the `attendance`
+  // de-dup above — guard against a pre-existing table created without the
+  // UNIQUE(teacherId, date) constraint.
+  try {
+    await db.exec(`DELETE FROM teacher_attendance WHERE id NOT IN (SELECT MAX(id) FROM teacher_attendance GROUP BY teacherId, date);`);
+    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_attendance_unique ON teacher_attendance(teacherId, date);`);
+  } catch (e) { console.error('teacher_attendance de-dup migration failed:', e); }
 
   return db;
 }
@@ -2179,6 +2200,7 @@ async function main() {
         class: r.className,
         subject: r.subject,
         batch: r.batch,
+        batchName: r.batchName || '',
         branchId: r.branchId,
         students: r.students || 0,
         weeklyHours: r.weeklyHours || 0,
@@ -2201,15 +2223,15 @@ async function main() {
       const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
       const now = new Date().toISOString();
       const result = await db.run(
-        `INSERT INTO allocations (teacherId, teacherName, className, subject, batch, branchId, students, weeklyHours, status, createdAt, updatedAt)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-        body.teacherId, teacher?.name || '', body.class, body.subject, body.batch || '', branchId,
+        `INSERT INTO allocations (teacherId, teacherName, className, subject, batch, batchName, branchId, students, weeklyHours, status, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        body.teacherId, teacher?.name || '', body.class, body.subject, body.batch || '', body.batchName || '', branchId,
         Number(body.students || 0), Number(body.weeklyHours || 0), body.status || 'Assigned', now, now
       );
       const row = await db.get('SELECT * FROM allocations WHERE id = ?', result.lastID);
       res.status(201).json({
         id: String(row.id), teacherId: row.teacherId, teacherName: row.teacherName,
-        class: row.className, subject: row.subject, batch: row.batch, branchId: row.branchId,
+        class: row.className, subject: row.subject, batch: row.batch, batchName: row.batchName || '', branchId: row.branchId,
         students: row.students || 0, weeklyHours: row.weeklyHours || 0, status: row.status,
       });
     } catch (err) {
@@ -2219,7 +2241,9 @@ async function main() {
   });
 
   app.put('/api/allocations/:id', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    // Branch admins may only create new allocations (batch + assign); editing
+    // an existing allocation is reserved for super_admin.
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
       const existing = await db.get('SELECT * FROM allocations WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'Allocation not found' });
@@ -2228,9 +2252,10 @@ async function main() {
       const teacher = teacherId !== existing.teacherId ? await db.get('SELECT name FROM users WHERE id = ?', teacherId) : null;
       const now = new Date().toISOString();
       await db.run(
-        `UPDATE allocations SET teacherId=?, teacherName=?, className=?, subject=?, batch=?, students=?, weeklyHours=?, status=?, updatedAt=? WHERE id=?`,
+        `UPDATE allocations SET teacherId=?, teacherName=?, className=?, subject=?, batch=?, batchName=?, students=?, weeklyHours=?, status=?, updatedAt=? WHERE id=?`,
         teacherId, teacher ? teacher.name : (body.teacherName ?? existing.teacherName),
         body.class ?? existing.className, body.subject ?? existing.subject, body.batch ?? existing.batch,
+        body.batchName ?? existing.batchName,
         body.students !== undefined ? Number(body.students) : existing.students,
         body.weeklyHours !== undefined ? Number(body.weeklyHours) : existing.weeklyHours,
         body.status ?? existing.status, now, req.params.id
@@ -2238,7 +2263,7 @@ async function main() {
       const row = await db.get('SELECT * FROM allocations WHERE id = ?', req.params.id);
       res.json({
         id: String(row.id), teacherId: row.teacherId, teacherName: row.teacherName,
-        class: row.className, subject: row.subject, batch: row.batch, branchId: row.branchId,
+        class: row.className, subject: row.subject, batch: row.batch, batchName: row.batchName || '', branchId: row.branchId,
         students: row.students || 0, weeklyHours: row.weeklyHours || 0, status: row.status,
       });
     } catch (err) {
@@ -2248,7 +2273,8 @@ async function main() {
   });
 
   app.delete('/api/allocations/:id', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    // Same restriction as PUT above: removing an allocation is a super_admin action.
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
       await db.run(`UPDATE allocations SET status='Removed', updatedAt=? WHERE id=?`, new Date().toISOString(), req.params.id);
       res.json({ success: true });
@@ -2302,6 +2328,26 @@ async function main() {
     } catch (err) {
       console.error('Create admission error:', err);
       res.status(500).json({ error: 'Failed to create admission' });
+    }
+  });
+
+  app.put('/api/admissions/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM admissions WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Admission not found' });
+      const body = req.body || {};
+      if (!body.applicantName) return res.status(400).json({ error: 'Applicant name is required' });
+      await db.run(
+        `UPDATE admissions SET applicantName=?, grade=?, appliedDate=?, contactNumber=?, email=?, updatedAt=? WHERE id=?`,
+        body.applicantName, body.grade ?? existing.grade, body.appliedDate ?? existing.appliedDate,
+        body.contactNumber ?? existing.contactNumber, body.email ?? existing.email, new Date().toISOString(), req.params.id
+      );
+      const row = await db.get('SELECT * FROM admissions WHERE id = ?', req.params.id);
+      res.json(row);
+    } catch (err) {
+      console.error('Update admission error:', err);
+      res.status(500).json({ error: 'Failed to update admission' });
     }
   });
 
@@ -2363,22 +2409,50 @@ async function main() {
     }
   });
 
+  // Task completion is a 3-stage sign-off: the assigned teacher marks their
+  // work done (-> awaiting_admin_review), an admin reviews and confirms
+  // (-> awaiting_super_admin_review), and a super_admin gives the final
+  // confirmation (-> completed). Each role can only push the status forward
+  // one stage — nobody can jump straight to "completed".
   app.put('/api/teacher-tasks/:id', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const roles = req.user.roles || [];
+    const isAdmin = roles.some((r) => ['admin', 'super_admin'].includes(r));
+    const existing = await db.get('SELECT * FROM teacher_tasks WHERE id = ?', req.params.id).catch(() => null);
+    if (!existing) return res.status(404).json({ error: 'Task not found' });
+    const isOwnTask = roles.includes('teacher') && existing.teacherId === req.user.sub;
+    if (!isAdmin && !isOwnTask) return res.status(403).json({ error: 'Forbidden' });
+
     try {
-      const existing = await db.get('SELECT * FROM teacher_tasks WHERE id = ?', req.params.id);
-      if (!existing) return res.status(404).json({ error: 'Task not found' });
       const body = req.body || {};
-      const progress = body.progress !== undefined ? Number(body.progress) : existing.progress;
-      const status = body.status ?? (progress >= 100 ? 'completed' : progress > 0 ? 'in-progress' : existing.status);
       const now = new Date().toISOString();
-      await db.run(
-        `UPDATE teacher_tasks SET title=?, description=?, teacherId=?, teacherName=?, priority=?, dueDate=?, dueTime=?, relatedClass=?, relatedSubject=?, attachmentUrl=?, status=?, progress=?, completionRemarks=?, updatedAt=? WHERE id=?`,
-        body.title ?? existing.title, body.description ?? existing.description, body.teacherId ?? existing.teacherId, body.teacherName ?? existing.teacherName,
-        body.priority ?? existing.priority, body.dueDate ?? existing.dueDate, body.dueTime ?? existing.dueTime,
-        body.relatedClass ?? existing.relatedClass, body.relatedSubject ?? existing.relatedSubject, body.attachmentUrl ?? existing.attachmentUrl,
-        status, progress, body.completionRemarks ?? existing.completionRemarks, now, req.params.id
-      );
+
+      if (!isAdmin) {
+        // Teacher, own task: only progress + remarks. Reaching 100% hands the
+        // task off for admin review instead of marking it complete outright.
+        const progress = body.progress !== undefined ? Math.max(0, Math.min(100, Number(body.progress))) : existing.progress;
+        const status = progress >= 100 ? 'awaiting_admin_review' : progress > 0 ? 'in-progress' : 'pending';
+        await db.run(
+          `UPDATE teacher_tasks SET status=?, progress=?, completionRemarks=?, updatedAt=? WHERE id=?`,
+          status, progress, body.completionRemarks ?? existing.completionRemarks, now, req.params.id
+        );
+      } else if (body.status === 'awaiting_super_admin_review' && existing.status === 'awaiting_admin_review') {
+        // Admin sign-off step.
+        await db.run(`UPDATE teacher_tasks SET status=?, updatedAt=? WHERE id=?`, 'awaiting_super_admin_review', now, req.params.id);
+      } else if (body.status === 'completed' && existing.status === 'awaiting_super_admin_review' && roles.includes('super_admin')) {
+        // Super admin final sign-off step.
+        await db.run(`UPDATE teacher_tasks SET status=?, updatedAt=? WHERE id=?`, 'completed', now, req.params.id);
+      } else {
+        // Regular admin/super_admin edit of task details (not a sign-off action).
+        const progress = body.progress !== undefined ? Number(body.progress) : existing.progress;
+        const status = body.status ?? existing.status;
+        await db.run(
+          `UPDATE teacher_tasks SET title=?, description=?, teacherId=?, teacherName=?, priority=?, dueDate=?, dueTime=?, relatedClass=?, relatedSubject=?, attachmentUrl=?, status=?, progress=?, completionRemarks=?, updatedAt=? WHERE id=?`,
+          body.title ?? existing.title, body.description ?? existing.description, body.teacherId ?? existing.teacherId, body.teacherName ?? existing.teacherName,
+          body.priority ?? existing.priority, body.dueDate ?? existing.dueDate, body.dueTime ?? existing.dueTime,
+          body.relatedClass ?? existing.relatedClass, body.relatedSubject ?? existing.relatedSubject, body.attachmentUrl ?? existing.attachmentUrl,
+          status, progress, body.completionRemarks ?? existing.completionRemarks, now, req.params.id
+        );
+      }
       const row = await db.get('SELECT * FROM teacher_tasks WHERE id = ?', req.params.id);
       res.json(row);
     } catch (err) {
@@ -2474,8 +2548,15 @@ async function main() {
       const nextAttachmentName = attachment ? attachment.originalname : (body.attachmentName ?? existing.attachmentName ?? null);
       const nextAttachmentSize = attachment ? attachment.size : (body.attachmentSize ?? existing.attachmentSize ?? null);
       const status = computeSchoolExamStatus(body.startDate || existing.startDate, body.endDate || existing.endDate);
+      // Teachers may only update the timetable file and its start/end dates on an
+      // existing schedule — every other field (student, school, exam name, etc.)
+      // stays whatever it already was, regardless of what the request body sends.
+      const isTeacherOnly = req.user.roles.includes('teacher') && !req.user.roles.some((r) => ['admin', 'super_admin'].includes(r));
+      const nextFields = isTeacherOnly
+        ? { studentId: existing.studentId, studentName: existing.studentName, branchId: existing.branchId, schoolName: existing.schoolName, schoolClass: existing.schoolClass, examName: existing.examName, subject: existing.subject, description: existing.description }
+        : { studentId: body.studentId || existing.studentId, studentName: body.studentName || existing.studentName, branchId: body.branchId || existing.branchId, schoolName: body.schoolName || existing.schoolName, schoolClass: body.schoolClass || existing.schoolClass, examName: body.examName || existing.examName, subject: body.subject || existing.subject, description: body.description || existing.description };
       const stmt = await db.prepare(`UPDATE school_exam_schedules SET studentId=?, studentName=?, branchId=?, schoolName=?, schoolClass=?, examName=?, startDate=?, endDate=?, subject=?, description=?, attachmentPath=?, attachmentName=?, attachmentSize=?, status=?, createdBy=?, updatedAt=?, teacherId=?, teacherName=? WHERE id=?`);
-      await stmt.run(body.studentId || existing.studentId, body.studentName || existing.studentName, body.branchId || existing.branchId, body.schoolName || existing.schoolName, body.schoolClass || existing.schoolClass, body.examName || existing.examName, body.startDate || existing.startDate, body.endDate || existing.endDate, body.subject || existing.subject, body.description || existing.description, nextAttachmentPath, nextAttachmentName, nextAttachmentSize, status, body.createdBy || existing.createdBy, new Date().toISOString(), body.teacherId || existing.teacherId, body.teacherName || existing.teacherName, req.params.id);
+      await stmt.run(nextFields.studentId, nextFields.studentName, nextFields.branchId, nextFields.schoolName, nextFields.schoolClass, nextFields.examName, body.startDate || existing.startDate, body.endDate || existing.endDate, nextFields.subject, nextFields.description, nextAttachmentPath, nextAttachmentName, nextAttachmentSize, status, body.createdBy || existing.createdBy, new Date().toISOString(), body.teacherId || existing.teacherId, body.teacherName || existing.teacherName, req.params.id);
       await stmt.finalize();
       const row = await db.get('SELECT * FROM school_exam_schedules WHERE id = ?', req.params.id);
       await upsertSchoolExamReminderNotifications(db, row);
@@ -4810,6 +4891,32 @@ async function main() {
       await stmt.finalize();
 
       const saved = await db.get('SELECT * FROM ledger_transactions WHERE id = ?', result.lastID);
+      res.json(saved);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.put('/api/ledger/:id', upload.single('attachment'), async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM ledger_transactions WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Transaction not found' });
+      const { date, type, category, description, amount, paymentMode, referenceNumber } = req.body;
+      if (!date || !type || !category || !description || !amount || !paymentMode) {
+        return res.status(400).json({ error: 'Date, type, category, description, amount, and paymentMode are required.' });
+      }
+      const file = req.file;
+      await db.run(
+        `UPDATE ledger_transactions SET date=?, type=?, category=?, description=?, amount=?, paymentMode=?, referenceNumber=?, attachmentPath=?, attachmentName=?, attachmentSize=? WHERE id=?`,
+        date, type, category, description, Number(amount), paymentMode, referenceNumber || '',
+        file ? `/uploads/${file.filename}` : existing.attachmentPath,
+        file ? file.originalname : existing.attachmentName,
+        file ? file.size : existing.attachmentSize,
+        req.params.id
+      );
+      const saved = await db.get('SELECT * FROM ledger_transactions WHERE id = ?', req.params.id);
       res.json(saved);
     } catch (err) {
       console.error(err);

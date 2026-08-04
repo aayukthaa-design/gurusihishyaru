@@ -13,3 +13,15 @@ export const GRADES = [
 // not a session-time grouping (the old "Batch A"/"Morning"/"Evening" values
 // had near-zero real usage — see the class-restructuring plan).
 export const BOARDS = ['CBSE', 'State', 'ICSE'];
+
+// Times are stored/edited as 24-hour "HH:MM" (native <input type="time"> value),
+// but should always be displayed to users in 12-hour AM/PM form.
+export function formatTime12h(value?: string): string {
+  if (!value) return value || '';
+  const [hStr, mStr] = value.split(':');
+  const h = Number(hStr);
+  if (Number.isNaN(h)) return value;
+  const period = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${mStr} ${period}`;
+}

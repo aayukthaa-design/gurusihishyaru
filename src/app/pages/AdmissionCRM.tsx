@@ -3,10 +3,11 @@ import { Header } from '../components/Header';
 import { StatsCard } from '../components/StatsCard';
 import { DataTable } from '../components/DataTable';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName } from '../lib/branchService';
+import { useBranches, getBranchName } from '../lib/branchService';
 import {
   applyAdmissionWorkflowAction,
   createAdmission,
+  updateAdmission,
   getAdmissionStats,
   getAdmissionStatusColor,
   getAdmissionWorkflowActions,
@@ -16,7 +17,7 @@ import {
   subscribeAdmissions,
   type AdmissionRecord,
 } from '../lib/admissionService';
-import { UserPlus, Users, CheckCircle, Clock, ArrowRight, XCircle, FileCheck2, Plus } from 'lucide-react';
+import { UserPlus, Users, CheckCircle, Clock, ArrowRight, XCircle, FileCheck2, Plus, Edit2 } from 'lucide-react';
 import { WhatsAppButton } from '../components/WhatsAppButton';
 import { composeWhatsAppMessage, getWhatsAppBusinessName } from '../lib/whatsapp';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
@@ -26,11 +27,13 @@ const EMPTY_ENQUIRY = { applicantName: '', grade: '10th', contactNumber: '', ema
 
 export function AdmissionCRM() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const [admissions, setAdmissions] = useState<AdmissionRecord[]>(getAdmissions());
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState(EMPTY_ENQUIRY);
+  const [editId, setEditId] = useState<string | null>(null);
+  const canEdit = user?.role === 'admin' || user?.role === 'super_admin';
 
   useEffect(() => {
     const unsubscribe = subscribeAdmissions(() => setAdmissions(getAdmissions()));
@@ -46,20 +49,35 @@ export function AdmissionCRM() {
       alert('Applicant name is required.');
       return;
     }
-    const created = await createAdmission({
+    const payload = {
       applicantName: addForm.applicantName.trim(),
       grade: addForm.grade,
       contactNumber: addForm.contactNumber,
       email: addForm.email,
       appliedDate: addForm.appliedDate,
-      branchId: user?.role === 'super_admin' ? (branchFilter || undefined) : user?.branchId,
-    });
-    if (created) {
+    };
+    const result = editId
+      ? await updateAdmission(editId, payload)
+      : await createAdmission({ ...payload, branchId: user?.role === 'super_admin' ? (branchFilter || undefined) : user?.branchId });
+    if (result) {
       setAddOpen(false);
+      setEditId(null);
       setAddForm(EMPTY_ENQUIRY);
     } else {
-      alert('Failed to create enquiry.');
+      alert(editId ? 'Failed to update enquiry.' : 'Failed to create enquiry.');
     }
+  }
+
+  function openEditEnquiry(admission: AdmissionRecord) {
+    setEditId(admission.id);
+    setAddForm({
+      applicantName: admission.applicantName,
+      grade: admission.grade,
+      contactNumber: admission.contactNumber,
+      email: admission.email,
+      appliedDate: admission.appliedDate,
+    });
+    setAddOpen(true);
   }
 
   const filteredAdmissions = useMemo(() => getFilteredAdmissions(admissions, user, branchFilter), [admissions, branchFilter, user]);
@@ -104,6 +122,20 @@ export function AdmissionCRM() {
         />
       ),
     },
+    ...(canEdit ? [{
+      header: '',
+      accessor: (admission: AdmissionRecord) => (
+        <button
+          type="button"
+          onClick={() => openEditEnquiry(admission)}
+          className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
+          title="Edit applicant details"
+        >
+          <Edit2 className="h-3.5 w-3.5" />
+          Edit
+        </button>
+      ),
+    }] : []),
     {
       header: 'Workflow',
       accessor: (admission: AdmissionRecord) => (
@@ -154,7 +186,7 @@ export function AdmissionCRM() {
                 ))}
               </select>
             )}
-            <Button onClick={() => setAddOpen(true)}><Plus className="mr-2 h-4 w-4" />New Enquiry</Button>
+            <Button onClick={() => { setEditId(null); setAddForm(EMPTY_ENQUIRY); setAddOpen(true); }}><Plus className="mr-2 h-4 w-4" />New Enquiry</Button>
           </div>
         </div>
 
@@ -168,10 +200,10 @@ export function AdmissionCRM() {
         <DataTable columns={columns} data={filteredAdmissions} />
       </div>
 
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setEditId(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>New Admission Enquiry</DialogTitle>
+            <DialogTitle>{editId ? 'Edit Admission Enquiry' : 'New Admission Enquiry'}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 mt-2">
             <div>
@@ -197,8 +229,8 @@ export function AdmissionCRM() {
           </div>
           <DialogFooter>
             <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setAddOpen(false)}>Cancel</Button>
-              <Button onClick={handleCreateEnquiry}>Create Enquiry</Button>
+              <Button variant="ghost" onClick={() => { setAddOpen(false); setEditId(null); }}>Cancel</Button>
+              <Button onClick={handleCreateEnquiry}>{editId ? 'Save Changes' : 'Create Enquiry'}</Button>
             </div>
           </DialogFooter>
         </DialogContent>

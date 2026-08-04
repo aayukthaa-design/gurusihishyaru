@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
+import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { Users, Plus, Search, Eye, Edit2, ChevronRight, X, Phone, Mail, UserCheck } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 
@@ -85,7 +85,7 @@ function ParentForm({ initial, isEdit, onSave, onClose }: {
 
 export function ParentManagement() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const [parents,  setParents]  = useState<Parent[]>([]);
   const [search,   setSearch]   = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');

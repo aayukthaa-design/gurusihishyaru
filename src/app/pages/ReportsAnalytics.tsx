@@ -3,7 +3,7 @@ import { Header } from '../components/Header';
 import { BarChart3, TrendingUp, FileSpreadsheet, FileText, Loader2, Mail, MessageSquare, CheckCircle, AlertTriangle, RefreshCw, XCircle, Plus } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName } from '../lib/branchService';
+import { useBranches, getBranchName } from '../lib/branchService';
 import { buildReportExportData, exportReportToExcel, exportReportToPdf } from '../lib/reportExport';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { formatIndianCurrency, formatIndianCurrencyForPdf } from '../lib/currency';
@@ -33,7 +33,7 @@ function getLastMonths(count: number) {
 
 export function ReportsAnalytics() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const [branchFilter, setBranchFilter] = useState(user?.role === 'accountant' ? (user?.branchId || '') : '');
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [isGeneratingExcel, setIsGeneratingExcel] = useState(false);

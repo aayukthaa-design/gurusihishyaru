@@ -3,7 +3,7 @@ import { Header } from '../components/Header';
 import { GreetingBanner } from '../components/GreetingBanner';
 import { DataTable } from '../components/DataTable';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName } from '../lib/branchService';
+import { getBranchName, useBranches } from '../lib/branchService';
 import { subscribeExams } from '../lib/examService';
 import { subscribeMarks } from '../lib/examMarksService';
 import { getStudentsForClass } from '../lib/studentService';
@@ -56,6 +56,7 @@ interface JoinedRecord {
 
 export function StudentPerformanceAnalytics() {
   const { user } = useAuth();
+  const branches = useBranches();
   const [exams, setExams] = useState<any[]>([]);
   const [marks, setMarks] = useState<any[]>([]);
   const [examsVersion, setExamsVersion] = useState(0);
@@ -96,9 +97,9 @@ export function StudentPerformanceAnalytics() {
 
   // Initialize branches to compare
   useEffect(() => {
-    const activeBranches = getBranches().filter((b) => b.status === 'Active');
+    const activeBranches = branches.filter((b) => b.status === 'Active');
     setBranchesToCompare(activeBranches.map((b) => b.id));
-  }, []);
+  }, [branches]);
 
   // Join marks with exams and students
   const joinedRecords = useMemo(() => {
@@ -132,7 +133,6 @@ export function StudentPerformanceAnalytics() {
 
   // Extract filter options dynamically from active records
   const filterOptions = useMemo(() => {
-    const branches = getBranches();
     const classes = Array.from(new Set(joinedRecords.map((r) => r.className)));
     const batches = Array.from(new Set(joinedRecords.map((r) => r.batch)));
     const subjects = Array.from(new Set(joinedRecords.map((r) => r.subject)));
@@ -141,7 +141,7 @@ export function StudentPerformanceAnalytics() {
     ).map((str) => JSON.parse(str));
 
     return { branches, classes, batches, subjects, exams: uniqueExams };
-  }, [joinedRecords]);
+  }, [joinedRecords, branches]);
 
   // Apply filters
   const filteredRecords = useMemo(() => {
@@ -247,8 +247,8 @@ export function StudentPerformanceAnalytics() {
 
   // Chart 1: Branch-wise Average Marks (always shows all active branches, respecting other filters)
   const branchAverageChart = useMemo(() => {
-    const activeBranches = getBranches().filter((b) => b.status === 'Active');
-    
+    const activeBranches = branches.filter((b) => b.status === 'Active');
+
     return activeBranches.map((b) => {
       // Find records that match all filters EXCEPT the branch selection filter
       const recordsForBranch = joinedRecords.filter((r) => {
@@ -271,7 +271,7 @@ export function StudentPerformanceAnalytics() {
 
       return { name: b.code, average: Number(avg.toFixed(1)) };
     });
-  }, [joinedRecords, classSelection, batchSelection, subjectSelection, examSelection, startDate, endDate]);
+  }, [joinedRecords, branches, classSelection, batchSelection, subjectSelection, examSelection, startDate, endDate]);
 
   // Chart 2: Class-wise Average Marks
   const classAverageChart = useMemo(() => {
@@ -317,7 +317,7 @@ export function StudentPerformanceAnalytics() {
     if (rankedRecords.length === 0) return 'No academic performance data matches the selected filter configuration.';
 
     const overallPass = summaryMetrics.passPercentage;
-    const branchSummaries = getBranches()
+    const branchSummaries = branches
       .map((b) => {
         const bRecords = rankedRecords.filter((r) => r.branchId === b.id);
         const avg = bRecords.length ? bRecords.reduce((sum, r) => sum + r.percentage, 0) / bRecords.length : 0;
@@ -344,7 +344,7 @@ export function StudentPerformanceAnalytics() {
     }
 
     return summaryText;
-  }, [rankedRecords, summaryMetrics, classAverageChart, strugglingStudents]);
+  }, [rankedRecords, summaryMetrics, classAverageChart, strugglingStudents, branches]);
 
   // Dynamic Recommendations List
   const recommendations = useMemo(() => {

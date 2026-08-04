@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches } from '../lib/branchService';
+import { useBranches } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
 import { useStudents, refreshStudents } from '../lib/studentService';
 import {
@@ -47,7 +47,7 @@ const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
 
 export function FeeManagement() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const isAccountantOrAdmin = user?.role === 'accountant' || user?.role === 'admin' || user?.role === 'super_admin';
 
   const records = useFeeRecords();

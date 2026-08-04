@@ -8,7 +8,7 @@ import {
 import { useLocation } from 'react-router';
 import { getRoleLabel } from '../auth/rbac';
 import type { Role } from '../auth/types';
-import { getBranches } from '../lib/branchService';
+import { useBranches } from '../lib/branchService';
 import { apiJson } from '../lib/apiClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ interface ModalProps {
 }
 
 function AddUserModal({ defaultRole, onSave, onClose, initialUser }: ModalProps) {
-  const branches = getBranches();
+  const branches = useBranches();
   const initialPwd = generatePassword();
   const [form, setForm] = useState(() => ({
     fullName: initialUser ? initialUser.name : '',

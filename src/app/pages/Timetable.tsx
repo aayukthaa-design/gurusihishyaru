@@ -5,7 +5,7 @@ import { useTeacherProfiles } from './TeacherManagement';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
 import { X } from 'lucide-react';
-import { GRADES } from '../lib/classConstants';
+import { GRADES, formatTime12h } from '../lib/classConstants';
 
 const CLASSES = GRADES;
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
@@ -37,7 +37,7 @@ interface TimetableEntry {
 const EMPTY_FORM = { subject: '', teacherId: '', room: '' };
 
 export function Timetable() {
-  const [selectedClass, setSelectedClass] = useState('10th A');
+  const [selectedClass, setSelectedClass] = useState(CLASSES[0]);
   const [specialClasses, setSpecialClasses] = useState<any[]>([]);
   const [entries, setEntries] = useState<TimetableEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -182,7 +182,7 @@ export function Timetable() {
                           <div key={sc.id} className="rounded-lg border-l-4 border-purple-500 bg-purple-50 dark:bg-purple-950/20 p-2.5 text-xs font-semibold text-purple-700 dark:text-purple-300">
                             <span className="inline-flex rounded-full bg-purple-200 dark:bg-purple-900 px-1.5 py-0.5 text-[9px] uppercase font-extrabold mr-1">Special Class</span>
                             <p className="font-bold line-clamp-1">{sc.title}</p>
-                            <p className="text-[10px] text-muted-foreground">{sc.startTime} - {sc.endTime} ({sc.venue})</p>
+                            <p className="text-[10px] text-muted-foreground">{formatTime12h(sc.startTime)} - {formatTime12h(sc.endTime)} ({sc.venue})</p>
                           </div>
                         ))}
                       </td>

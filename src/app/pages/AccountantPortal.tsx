@@ -6,13 +6,13 @@ import { fetchSalaryRecords, fetchTeacherAttendance, markSalaryRecordPaid, summa
 import { Header } from '../components/Header';
 import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName } from '../lib/branchService';
+import { useBranches, getBranchName } from '../lib/branchService';
 import { useStudents, refreshStudents } from '../lib/studentService';
 import { addNotification } from '../lib/notificationService';
 import { formatIndianCurrency } from '../lib/currency';
 import { 
-  ChevronRight, TrendingUp, TrendingDown, Plus, Search, Trash2, 
-  Download, Eye, BookOpen, Box, DollarSign, SlidersHorizontal, 
+  ChevronRight, TrendingUp, TrendingDown, Plus, Search,
+  Download, Eye, Edit2, BookOpen, Box, DollarSign, SlidersHorizontal,
   Upload, Lock, Unlock, FileText, CheckCircle, Package, AlertTriangle, RefreshCw, Wallet, CreditCard, ClipboardCheck, Boxes, FileSpreadsheet, Users
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
@@ -100,7 +100,7 @@ interface MonthlyReport {
 export function AccountantPortal() {
   const { user } = useAuth();
   const location = useLocation();
-  const branches = getBranches();
+  const branches = useBranches();
   const students = useStudents();
   
   const isSuperAdmin = user?.role === 'super_admin';
@@ -137,6 +137,8 @@ export function AccountantPortal() {
 
   // Form Modals / Input fields
   const [showAddLedgerModal, setShowAddLedgerModal] = useState(false);
+  const [editingLedgerId, setEditingLedgerId] = useState<number | null>(null);
+  const [viewingLedgerRow, setViewingLedgerRow] = useState<LedgerEntry | null>(null);
   const [ledgerForm, setLedgerForm] = useState({
     date: new Date().toISOString().split('T')[0],
     type: 'Income' as 'Income' | 'Expense',
@@ -511,7 +513,7 @@ export function AccountantPortal() {
     });
   }, [inventory, invSearch, invCategoryFilter]);
 
-  // Handle Add transaction
+  // Handle Add/Edit transaction
   const handleAddTransactionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!ledgerForm.description || !ledgerForm.amount || Number(ledgerForm.amount) <= 0) {
@@ -534,22 +536,11 @@ export function AccountantPortal() {
     }
 
     try {
-      const res = await apiFetch('/api/ledger', {
-        method: 'POST',
-        body: formData
-      });
+      const res = editingLedgerId
+        ? await apiFetch(`/api/ledger/${editingLedgerId}`, { method: 'PUT', body: formData })
+        : await apiFetch('/api/ledger', { method: 'POST', body: formData });
       if (res.ok) {
-        setShowAddLedgerModal(false);
-        setLedgerForm({
-          date: new Date().toISOString().split('T')[0],
-          type: 'Income',
-          category: 'Tuition Fee',
-          description: '',
-          amount: '',
-          paymentMode: 'UPI',
-          referenceNumber: '',
-          attachment: null
-        });
+        closeLedgerModal();
         await fetchLedger();
       } else {
         const errorData = await res.json();
@@ -559,6 +550,36 @@ export function AccountantPortal() {
       console.error(e);
       alert('Connection error');
     }
+  };
+
+  const closeLedgerModal = () => {
+    setShowAddLedgerModal(false);
+    setEditingLedgerId(null);
+    setLedgerForm({
+      date: new Date().toISOString().split('T')[0],
+      type: 'Income',
+      category: 'Tuition Fee',
+      description: '',
+      amount: '',
+      paymentMode: 'UPI',
+      referenceNumber: '',
+      attachment: null
+    });
+  };
+
+  const openEditLedger = (row: LedgerEntry) => {
+    setEditingLedgerId(row.id);
+    setLedgerForm({
+      date: row.date,
+      type: row.type,
+      category: row.category,
+      description: row.description,
+      amount: String(row.amount),
+      paymentMode: row.paymentMode,
+      referenceNumber: row.referenceNumber || '',
+      attachment: null
+    });
+    setShowAddLedgerModal(true);
   };
 
   // Handle Add/Edit Inventory item
@@ -929,6 +950,7 @@ export function AccountantPortal() {
                     {/* 1. Add Income */}
                     <div
                       onClick={() => {
+                        setEditingLedgerId(null);
                         setLedgerForm({
                           date: new Date().toISOString().split('T')[0],
                           type: 'Income',
@@ -952,6 +974,7 @@ export function AccountantPortal() {
                     {/* 2. Add Expense */}
                     <div
                       onClick={() => {
+                        setEditingLedgerId(null);
                         setLedgerForm({
                           date: new Date().toISOString().split('T')[0],
                           type: 'Expense',
@@ -1218,7 +1241,7 @@ export function AccountantPortal() {
                   </div>
 
                   <button
-                    onClick={() => setShowAddLedgerModal(true)}
+                    onClick={() => { setEditingLedgerId(null); setShowAddLedgerModal(true); }}
                     className="flex items-center justify-center gap-2 px-4 py-2 bg-primary text-primary-foreground font-semibold rounded-xl text-sm transition-all hover:opacity-90 active:scale-95 shadow-sm"
                   >
                     <Plus className="h-4 w-4" /> Add Voucher Transaction
@@ -1278,15 +1301,22 @@ export function AccountantPortal() {
                             )}
                           </td>
                           <td className="px-4 py-3">
-                            {row.attachmentPath && (
+                            <div className="flex items-center gap-1">
                               <button
-                                onClick={() => handleDeleteAttachment(row.id)}
-                                className="text-red-500 hover:text-red-700 p-1 transition-colors"
-                                title="Delete attachment file"
+                                onClick={() => setViewingLedgerRow(row)}
+                                className="text-primary hover:text-primary/70 p-1 transition-colors"
+                                title="View entry"
                               >
-                                <Trash2 className="h-4 w-4" />
+                                <Eye className="h-4 w-4" />
                               </button>
-                            )}
+                              <button
+                                onClick={() => openEditLedger(row)}
+                                className="text-muted-foreground hover:text-foreground p-1 transition-colors"
+                                title="Edit entry"
+                              >
+                                <Edit2 className="h-4 w-4" />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1845,8 +1875,8 @@ export function AccountantPortal() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
           <form onSubmit={handleAddTransactionSubmit} className="bg-card border border-border rounded-2xl w-full max-w-lg p-6 shadow-xl space-y-4">
             <div className="flex justify-between items-center border-b border-border pb-3">
-              <h3 className="font-bold text-foreground">Record Voucher Transaction</h3>
-              <button type="button" onClick={() => setShowAddLedgerModal(false)} className="text-sm text-muted-foreground hover:text-foreground">âœ•</button>
+              <h3 className="font-bold text-foreground">{editingLedgerId ? 'Edit Voucher Transaction' : 'Record Voucher Transaction'}</h3>
+              <button type="button" onClick={closeLedgerModal} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1906,8 +1936,8 @@ export function AccountantPortal() {
               <div>
                 <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Payment Mode</label>
                 <select
-                  value={ledgerForm.mode}
-                  onChange={(e) => setLedgerForm(prev => ({ ...prev, mode: e.target.value as any }))}
+                  value={ledgerForm.paymentMode}
+                  onChange={(e) => setLedgerForm(prev => ({ ...prev, paymentMode: e.target.value }))}
                   className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
                 >
                   <option value="Cash">Cash</option>
@@ -1929,11 +1959,63 @@ export function AccountantPortal() {
               />
             </div>
 
+            <div>
+              <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Bill / Receipt Attachment (optional)</label>
+              <input
+                type="file"
+                onChange={(e) => setLedgerForm(prev => ({ ...prev, attachment: e.target.files?.[0] || null }))}
+                className="w-full text-sm"
+              />
+              {editingLedgerId && (
+                (() => {
+                  const current = ledger.find((row) => row.id === editingLedgerId);
+                  return current?.attachmentPath ? (
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      Current: {current.attachmentName || 'attached file'} —{' '}
+                      <button type="button" onClick={() => handleDeleteAttachment(editingLedgerId)} className="text-red-500 hover:underline">remove</button>
+                    </p>
+                  ) : null;
+                })()
+              )}
+            </div>
+
             <div className="flex justify-end gap-3 pt-3">
-              <button type="button" onClick={() => setShowAddLedgerModal(false)} className="rounded-xl border border-border px-5 py-2 text-sm font-medium hover:bg-secondary">Cancel</button>
-              <button type="submit" className="rounded-xl bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">Confirm Entry</button>
+              <button type="button" onClick={closeLedgerModal} className="rounded-xl border border-border px-5 py-2 text-sm font-medium hover:bg-secondary">Cancel</button>
+              <button type="submit" className="rounded-xl bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">{editingLedgerId ? 'Save Changes' : 'Confirm Entry'}</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {viewingLedgerRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
+          <div className="bg-card border border-border rounded-2xl w-full max-w-lg p-6 shadow-xl space-y-4">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <h3 className="font-bold text-foreground">Voucher {viewingLedgerRow.voucherNumber}</h3>
+              <button type="button" onClick={() => setViewingLedgerRow(null)} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div><p className="text-xs uppercase text-muted-foreground">Date</p><p className="font-semibold text-foreground">{viewingLedgerRow.date}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Type</p><p className="font-semibold text-foreground">{viewingLedgerRow.type}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Category</p><p className="font-semibold text-foreground">{viewingLedgerRow.category}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Amount</p><p className="font-semibold text-foreground">{formatIndianCurrency(viewingLedgerRow.amount)}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Payment Mode</p><p className="font-semibold text-foreground">{viewingLedgerRow.paymentMode}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Reference No.</p><p className="font-semibold text-foreground">{viewingLedgerRow.referenceNumber || '—'}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Entered By</p><p className="font-semibold text-foreground">{viewingLedgerRow.enteredBy}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Running Balance</p><p className="font-semibold text-foreground">{formatIndianCurrency(viewingLedgerRow.runningBalance)}</p></div>
+              <div className="col-span-2"><p className="text-xs uppercase text-muted-foreground">Description</p><p className="font-semibold text-foreground">{viewingLedgerRow.description}</p></div>
+              {viewingLedgerRow.attachmentPath && (
+                <div className="col-span-2">
+                  <p className="text-xs uppercase text-muted-foreground">Attachment</p>
+                  <a href={viewingLedgerRow.attachmentPath} target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">{viewingLedgerRow.attachmentName || 'View Bill'}</a>
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-3 pt-3 border-t border-border">
+              <button type="button" onClick={() => setViewingLedgerRow(null)} className="rounded-xl border border-border px-5 py-2 text-sm font-medium hover:bg-secondary">Close</button>
+              <button type="button" onClick={() => { const row = viewingLedgerRow; setViewingLedgerRow(null); openEditLedger(row); }} className="rounded-xl bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">Edit</button>
+            </div>
+          </div>
         </div>
       )}
 

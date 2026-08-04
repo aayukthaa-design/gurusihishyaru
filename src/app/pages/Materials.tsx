@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { DataTable } from '../components/DataTable';
 import { useAuth } from '../auth/AuthContext';
-import { apiFetch } from '../lib/apiClient';
 import {
   useMaterials,
   refreshMaterials,
@@ -24,11 +23,6 @@ export function Materials() {
   const isAdmin = user?.role === 'admin' || user?.role === 'super_admin';
   const isParent = user?.role === 'parent';
 
-  const [teacherAllocations, setTeacherAllocations] = useState<{
-    classes: string[];
-    allocations: Record<string, { subjects: string[]; batches: string[] }>;
-  } | null>(null);
-
   const [selectedClass, setSelectedClass] = useState('');
   const [subject, setSubject] = useState('');
   const [batch, setBatch] = useState(BATCH_OPTIONS[0]);
@@ -46,31 +40,6 @@ export function Materials() {
     setIsLoading(true);
     refreshMaterials(user).finally(() => setIsLoading(false));
   }, [user]);
-
-  useEffect(() => {
-    if (isTeacher && user) {
-      apiFetch(`/api/allocations?teacherId=${user.id}`)
-        .then((res) => res.json())
-        .then((data) => {
-          if (data?.classes?.length > 0) {
-            setTeacherAllocations(data);
-            const defaultClass = data.classes[0];
-            setSelectedClass(defaultClass);
-            const alloc = data.allocations[defaultClass];
-            if (alloc?.subjects?.length > 0) setSubject(alloc.subjects[0]);
-            if (alloc?.batches?.length > 0) setBatch(alloc.batches[0]);
-          }
-        })
-        .catch((err) => console.error('Failed to fetch allocations', err));
-    }
-  }, [isTeacher, user]);
-
-  function handleClassChange(className: string) {
-    setSelectedClass(className);
-    const alloc = teacherAllocations?.allocations[className];
-    if (alloc?.subjects?.length > 0) setSubject(alloc.subjects[0]);
-    if (alloc?.batches?.length > 0) setBatch(alloc.batches[0]);
-  }
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
@@ -166,28 +135,24 @@ export function Materials() {
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm">
                   <span className="font-medium text-foreground">Class</span>
-                  <select
+                  <input
+                    type="text"
                     value={selectedClass}
-                    onChange={(e) => handleClassChange(e.target.value)}
+                    onChange={(e) => setSelectedClass(e.target.value)}
+                    placeholder="e.g. 10th"
                     className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
                     required
-                  >
-                    {(teacherAllocations?.classes || []).map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
+                  />
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm">
                   <span className="font-medium text-foreground">Subject</span>
-                  <select
+                  <input
+                    type="text"
                     value={subject}
                     onChange={(e) => setSubject(e.target.value)}
+                    placeholder="e.g. Mathematics"
                     className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
-                  >
-                    {(teacherAllocations?.allocations[selectedClass]?.subjects || []).map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
+                  />
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm">
                   <span className="font-medium text-foreground">Board</span>
@@ -196,7 +161,7 @@ export function Materials() {
                     onChange={(e) => setBatch(e.target.value)}
                     className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
                   >
-                    {(teacherAllocations?.allocations[selectedClass]?.batches || BATCH_OPTIONS).map((b) => (
+                    {BATCH_OPTIONS.map((b) => (
                       <option key={b} value={b}>{b}</option>
                     ))}
                   </select>

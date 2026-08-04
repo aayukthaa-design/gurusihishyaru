@@ -3,7 +3,7 @@ import { Header } from '../components/Header';
 import { StatsCard } from '../components/StatsCard';
 import { DataTable } from '../components/DataTable';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches } from '../lib/branchService';
+import { useBranches } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { Receipt, TrendingDown, DollarSign, CreditCard, Search, Plus, Loader2 } from 'lucide-react';
@@ -27,7 +27,7 @@ const EMPTY_FORM = { category: EXPENSE_CATEGORIES[0], description: '', amount: '
 
 export function ExpenseManagement() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const canManage = user?.role === 'accountant' || user?.role === 'admin' || user?.role === 'super_admin';
 
   const [expenses, setExpenses] = useState<LedgerExpense[]>([]);

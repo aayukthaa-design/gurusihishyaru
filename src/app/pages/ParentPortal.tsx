@@ -20,7 +20,7 @@ import { useNotifications, getVisibleNotificationsForUser } from '../lib/notific
 import { refreshHomework } from '../lib/homeworkService';
 import { subscribeMarks, MarkRecord } from '../lib/examMarksService';
 import { subscribeExams, Exam } from '../lib/examService';
-import { useSchoolExamSchedules, getAttachmentUrl } from '../lib/schoolExamScheduleService';
+import { useSchoolExamSchedules, refreshSchoolExamSchedules, getAttachmentUrl } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { useFeeRecords, refreshFeeRecords } from '../lib/feeService';
@@ -97,6 +97,9 @@ export function ParentPortal() {
   }, [user, selectedStudent]);
 
   const schoolExamSchedules = useSchoolExamSchedules();
+  useEffect(() => {
+    if (selectedStudent?.id) void refreshSchoolExamSchedules({ studentId: selectedStudent.id });
+  }, [selectedStudent?.id]);
   const [specialClasses, setSpecialClasses] = useState<any[]>([]);
 
   useEffect(() => {

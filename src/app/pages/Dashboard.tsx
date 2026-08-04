@@ -5,7 +5,7 @@ import BirthdayWidget from '../components/BirthdayWidget';
 import BirthdayChecker from '../components/BirthdayChecker';
 import { useAuth } from '../auth/AuthContext';
 import { getRoleLabel } from '../auth/rbac';
-import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
+import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { Link, useNavigate } from 'react-router';
 import {
   Users, CreditCard, ClipboardCheck, CalendarDays,
@@ -98,7 +98,7 @@ function getAdminConfig(): { actions: QuickAction[] } {
 export function Dashboard() {
   const { user } = useAuth();
   const navigate  = useNavigate();
-  const branches = getBranches();
+  const branches = useBranches();
   const [branchFilter, setBranchFilter] = React.useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const role      = user?.role as Role | undefined;
   const roleLabel = getRoleLabel(role);

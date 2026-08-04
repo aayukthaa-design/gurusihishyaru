@@ -17,7 +17,7 @@ export interface TaskRecord {
   relatedClass?: string;
   relatedSubject?: string;
   attachmentUrl?: string;
-  status: 'pending' | 'in-progress' | 'completed';
+  status: 'pending' | 'in-progress' | 'awaiting_admin_review' | 'awaiting_super_admin_review' | 'completed';
   progress?: number; // 0-100
   completionRemarks?: string;
   createdAt: string;
@@ -118,6 +118,7 @@ export function getTaskStats(tasks?: TaskRecord[]) {
     total: list.length,
     pending: list.filter((t) => t.status === 'pending').length,
     inProgress: list.filter((t) => t.status === 'in-progress').length,
+    awaitingReview: list.filter((t) => t.status === 'awaiting_admin_review' || t.status === 'awaiting_super_admin_review').length,
     completed: list.filter((t) => t.status === 'completed').length,
   };
 }
@@ -138,16 +139,51 @@ export function assignTask(taskId: string, teacherId?: string, teacherName?: str
   });
 }
 
+// Reaching 100% hands the task to admin for review rather than marking it
+// complete outright — the server enforces this regardless of what's sent here.
 export function setTaskProgress(taskId: string, progress: number, remarks?: string) {
-  const status = progress >= 100 ? 'completed' : progress > 0 ? 'in-progress' : 'pending';
+  const status = progress >= 100 ? 'awaiting_admin_review' : progress > 0 ? 'in-progress' : 'pending';
   void updateTask(taskId, { progress, status, completionRemarks: remarks }).then(() => {
     const task = taskState.find((t) => t.id === taskId);
-    if (task && status === 'completed') {
+    if (task && status === 'awaiting_admin_review') {
+      addNotification({
+        title: 'Task Awaiting Review',
+        message: `${task.title} was marked done by ${task.teacherName ?? 'teacher'} — awaiting admin review`,
+        type: 'info',
+        roles: ['admin', 'super_admin'],
+        branchId: task.branchId ?? null,
+      });
+    }
+  });
+}
+
+// Admin sign-off: hands the task to super_admin for final confirmation.
+export function approveTaskAsAdmin(taskId: string) {
+  void updateTask(taskId, { status: 'awaiting_super_admin_review' }).then(() => {
+    const task = taskState.find((t) => t.id === taskId);
+    if (task) {
+      addNotification({
+        title: 'Task Approved by Admin',
+        message: `${task.title} was reviewed by an admin — awaiting super admin confirmation`,
+        type: 'info',
+        roles: ['super_admin'],
+        branchId: task.branchId ?? null,
+      });
+    }
+  });
+}
+
+// Super admin sign-off: final confirmation, task is now fully completed.
+export function confirmTaskCompletion(taskId: string) {
+  void updateTask(taskId, { status: 'completed' }).then(() => {
+    const task = taskState.find((t) => t.id === taskId);
+    if (task && task.teacherId) {
       addNotification({
         title: 'Task Completed',
-        message: `${task.title} marked completed by ${task.teacherName ?? 'teacher'}`,
+        message: `${task.title} was confirmed complete by a super admin`,
         type: 'success',
-        roles: ['admin', 'super_admin'],
+        teacherIds: [task.teacherId],
+        roles: ['teacher'],
         branchId: task.branchId ?? null,
       });
     }
@@ -180,5 +216,7 @@ export default {
   getTaskStats,
   assignTask,
   setTaskProgress,
+  approveTaskAsAdmin,
+  confirmTaskCompletion,
   exportTasksCSV,
 };

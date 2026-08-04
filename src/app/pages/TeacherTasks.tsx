@@ -6,14 +6,22 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Textarea } from '../components/ui/textarea';
-import { getBranches } from '../lib/branchService';
+import { useBranches } from '../lib/branchService';
 import { useAuth } from '../auth/AuthContext';
 import { getTeachersForBranch } from '../lib/teacherService';
-import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, refreshTasks, TaskRecord } from '../lib/taskService';
+import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, approveTaskAsAdmin, confirmTaskCompletion, refreshTasks, TaskRecord } from '../lib/taskService';
+
+const STATUS_LABELS: Record<TaskRecord['status'], string> = {
+  pending: 'Pending',
+  'in-progress': 'In Progress',
+  awaiting_admin_review: 'Awaiting Admin Review',
+  awaiting_super_admin_review: 'Awaiting Super Admin Review',
+  completed: 'Completed',
+};
 
 export function TeacherTasks() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const [tasks, setTasks] = React.useState<TaskRecord[]>(taskService.getTasks());
   const [createOpen, setCreateOpen] = React.useState(false);
   const [form, setForm] = React.useState({
@@ -81,9 +89,10 @@ export function TeacherTasks() {
       
       <div className="p-6 space-y-6">
         <div className="flex items-center justify-between">
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4 w-full">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-5 w-full">
             <StatsCard title="Total Tasks" value={String(visibleStats.total)} icon={ListTodo} iconColor="bg-primary" />
             <StatsCard title="Completed" value={String(visibleStats.completed)} change="Live" changeType="positive" icon={CheckCircle2} iconColor="bg-chart-3" />
+            <StatsCard title="Awaiting Review" value={String(visibleStats.awaitingReview)} icon={AlertCircle} iconColor="bg-amber-500" />
             <StatsCard title="In Progress" value={String(visibleStats.inProgress)} icon={Clock} iconColor="bg-chart-4" />
             <StatsCard title="Pending" value={String(visibleStats.pending)} change="Live" changeType="negative" icon={AlertCircle} iconColor="bg-destructive" />
           </div>
@@ -114,14 +123,27 @@ export function TeacherTasks() {
                 <span className={`rounded-full px-3 py-1 text-xs font-medium ${
                   task.status === 'completed' ? 'bg-chart-3/10 text-chart-3' :
                   task.status === 'in-progress' ? 'bg-primary/10 text-primary' :
+                  task.status === 'awaiting_admin_review' || task.status === 'awaiting_super_admin_review' ? 'bg-amber-500/10 text-amber-600' :
                   'bg-muted text-muted-foreground'
                 }`}>
-                  {task.status}
+                  {STATUS_LABELS[task.status]}
                 </span>
               </div>
               <div className="mt-3 flex items-center gap-3">
-                <input type="range" min={0} max={100} value={task.progress ?? 0} onChange={(e) => updateProgress(task.id, Number(e.target.value))} />
-                <span className="text-xs text-muted-foreground">{task.progress ?? 0}%</span>
+                {user?.role === 'teacher' && task.teacherId === user.id && (task.status === 'pending' || task.status === 'in-progress') ? (
+                  <>
+                    <input type="range" min={0} max={100} value={task.progress ?? 0} onChange={(e) => updateProgress(task.id, Number(e.target.value))} />
+                    <span className="text-xs text-muted-foreground">{task.progress ?? 0}%</span>
+                  </>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{task.progress ?? 0}% complete</span>
+                )}
+                {(user?.role === 'admin' || user?.role === 'super_admin') && task.status === 'awaiting_admin_review' && (
+                  <Button size="sm" onClick={() => approveTaskAsAdmin(task.id)}>Approve</Button>
+                )}
+                {user?.role === 'super_admin' && task.status === 'awaiting_super_admin_review' && (
+                  <Button size="sm" onClick={() => confirmTaskCompletion(task.id)}>Confirm Completion</Button>
+                )}
                 {task.attachmentUrl && <a href={task.attachmentUrl} className="ml-auto inline-flex items-center text-sm text-primary"><Paperclip className="mr-2 h-4 w-4"/>Attachment</a>}
               </div>
             </div>

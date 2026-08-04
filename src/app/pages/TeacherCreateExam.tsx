@@ -33,22 +33,15 @@ export function TeacherCreateExam() {
   const [attendanceMessage, setAttendanceMessage] = React.useState<string | null>(null);
   const [attendanceSuccess, setAttendanceSuccess] = React.useState(false);
 
-  // Fallback subject list used only when no real allocation data exists yet for this
-  // teacher/class — not class-specific, since the real subjects always come from allocMap.
-  const SUBJECT_FALLBACKS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'Computer Science'];
-
   const batchesForClass = allocMap[className]?.batches || BOARDS;
 
-  const subjectsForClass = allocMap[className]?.subjects || SUBJECT_FALLBACKS;
-  
   React.useEffect(() => {
     if (!classesState.includes(className) && classesState.length > 0) setClassName(classesState[0]);
   }, [classesState, className]);
 
   React.useEffect(() => {
-    if (subjectsForClass.length > 0 && !subjectsForClass.includes(subject)) setSubject(subjectsForClass[0]);
     if (batchesForClass.length > 0 && !batchesForClass.includes(batch)) setBatch(batchesForClass[0]);
-  }, [className, subjectsForClass, batchesForClass, subject, batch]);
+  }, [className, batchesForClass, batch]);
 
   // load allocations from API
   React.useEffect(() => {
@@ -239,13 +232,7 @@ export function TeacherCreateExam() {
 
           <div>
             <label className="block text-sm font-medium text-muted-foreground">Subject</label>
-            {subjectsForClass.length > 0 ? (
-              <select value={subject} onChange={(e)=>setSubject(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
-                {subjectsForClass.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            ) : (
-              <input value={subject} onChange={(e) => setSubject(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2" />
-            )}
+            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. Mathematics" className="mt-1 w-full rounded-md border px-3 py-2" />
           </div>
 
           <div>

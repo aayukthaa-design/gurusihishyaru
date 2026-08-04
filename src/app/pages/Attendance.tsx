@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName } from '../lib/branchService';
+import { useBranches, getBranchName } from '../lib/branchService';
 import { getStudentsForClass } from '../lib/studentService';
 import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceService';
 import { saveAttendanceAPI } from '../lib/attendanceService';
@@ -17,7 +17,7 @@ const TODAY_ISO = new Date().toISOString().split('T')[0];
 
 export function Attendance() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const [selectedClass, setSelectedClass] = useState('');
   const [selectedBoard, setSelectedBoard] = useState('');

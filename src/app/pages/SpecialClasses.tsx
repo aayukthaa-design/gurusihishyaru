@@ -7,7 +7,7 @@ import {
   Calendar, Clock, MapPin, FileText, User, Plus, Edit2,
   Trash2, XCircle, CheckCircle2, Download, AlertCircle, RefreshCw, BarChart2
 } from 'lucide-react';
-import { GRADES, BOARDS } from '../lib/classConstants';
+import { GRADES, BOARDS, formatTime12h } from '../lib/classConstants';
 
 interface SpecialClass {
   id: number;
@@ -153,7 +153,7 @@ export function SpecialClasses() {
   // Schedule class
   const handleScheduleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || !date || !startTime || !endTime || !venue) {
+    if (!title || !date || !startTime || !endTime || !venue || (user?.role === 'super_admin' && !branchId)) {
       alert('Please fill out all required fields');
       return;
     }
@@ -317,7 +317,7 @@ export function SpecialClasses() {
       ['Class Title', c.title],
       ['Subject / Purpose', `${c.subject} (${c.purpose})`],
       ['Teacher', c.teacherName],
-      ['Date & Time', `${c.date} (${c.startTime} - ${c.endTime})`],
+      ['Date & Time', `${c.date} (${formatTime12h(c.startTime)} - ${formatTime12h(c.endTime)})`],
       ['Venue', c.venue]
     ];
     pdfService.addTable([['Detail', 'Value']], detailsBody);
@@ -375,7 +375,7 @@ export function SpecialClasses() {
               </select>
             )}
 
-            {(user?.role === 'teacher' || user?.role === 'admin') && (
+            {(user?.role === 'teacher' || user?.role === 'admin' || user?.role === 'super_admin') && (
               <button 
                 onClick={() => { resetForm(); setIsScheduleOpen(true); }}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:opacity-90 shadow-sm"
@@ -451,7 +451,7 @@ export function SpecialClasses() {
                       </div>
                       <div className="flex items-center gap-2">
                         <Clock className="h-3.5 w-3.5 text-primary shrink-0" />
-                        <span>{c.startTime} - {c.endTime}</span>
+                        <span>{formatTime12h(c.startTime)} - {formatTime12h(c.endTime)}</span>
                       </div>
                       <div className="flex items-center gap-2">
                         <MapPin className="h-3.5 w-3.5 text-primary shrink-0" />
@@ -521,12 +521,24 @@ export function SpecialClasses() {
                     )}
 
                     {user?.role === 'super_admin' && (
-                      <button
-                        onClick={() => { openAttendanceModal(c).then(() => exportClassPDF(c)); }}
-                        className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition hover:opacity-90"
-                      >
-                        <Download className="h-3.5 w-3.5" /> Export PDF
-                      </button>
+                      <div className="flex items-center gap-2 w-full justify-between">
+                        <button
+                          onClick={() => { openAttendanceModal(c).then(() => exportClassPDF(c)); }}
+                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition hover:opacity-90"
+                        >
+                          <Download className="h-3.5 w-3.5" /> Export PDF
+                        </button>
+                        {c.status !== 'Cancelled' && (
+                          <div className="flex items-center gap-1.5">
+                            <button onClick={() => handleEditClick(c)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-secondary/40 text-muted-foreground">
+                              <Edit2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button onClick={() => handleCancelClick(c.id)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-red-50 text-red-500">
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {user?.role === 'parent' && (
@@ -594,6 +606,7 @@ export function SpecialClasses() {
                       onChange={(e) => setBranchId(e.target.value)}
                       className="w-full rounded-xl border border-input bg-input-background px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                     >
+                      <option value="">Select branch…</option>
                       {branches.map(b => (
                         <option key={b.id} value={b.id}>{b.name}</option>
                       ))}

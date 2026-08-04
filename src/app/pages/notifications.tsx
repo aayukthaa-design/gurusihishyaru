@@ -21,7 +21,7 @@ import {
   type NotificationReadEntry,
 } from '../lib/notificationService';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName } from '../lib/branchService';
+import { useBranches, getBranchName } from '../lib/branchService';
 import { getTeachersForBranch } from '../lib/teacherService';
 import { getClassesForBranch } from '../lib/classService';
 import { sendBirthdayWhatsAppWish } from '../lib/birthdayService';
@@ -34,7 +34,7 @@ function formatDateTime(value?: string | null) {
 export function NotificationsPage() {
   const notifications = useNotifications();
   const auth = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const [search, setSearch] = React.useState('');
   const [filter, setFilter] = React.useState<'all' | 'unread' | 'deleted'>('all');
   const [composerOpen, setComposerOpen] = React.useState(false);

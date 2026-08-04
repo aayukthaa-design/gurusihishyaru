@@ -72,6 +72,22 @@ export async function createAdmission(data: Omit<AdmissionRecord, 'id' | 'status
   }
 }
 
+export async function updateAdmission(
+  admissionId: string,
+  data: Pick<AdmissionRecord, 'applicantName' | 'grade' | 'contactNumber' | 'email' | 'appliedDate'>
+): Promise<AdmissionRecord | null> {
+  try {
+    const res = await apiFetch(`/api/admissions/${admissionId}`, { method: 'PUT', body: data });
+    if (!res.ok) return null;
+    const record = await res.json();
+    await refreshAdmissions();
+    return record;
+  } catch (err) {
+    console.error('updateAdmission error:', err);
+    return null;
+  }
+}
+
 async function updateStatus(admissionId: string, action: 'submit' | 'verify' | 'schedule' | 'complete' | 'approve' | 'enroll' | 'reject') {
   try {
     const res = await apiFetch(`/api/admissions/${admissionId}/action`, { method: 'PATCH', body: { action } });

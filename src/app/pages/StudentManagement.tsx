@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { useSchoolExamSchedules, getAttachmentUrl, formatScheduleDate } from '../lib/schoolExamScheduleService';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches, getBranchName, filterByBranch } from '../lib/branchService';
+import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { enrollAdmissionByApplicantName } from '../lib/admissionService';
 import { useStudents, addStudentAPI, updateStudentAPI, deleteStudentAPI, refreshStudents } from '../lib/studentService';
 import { GRADES, BOARDS } from '../lib/classConstants';
@@ -357,7 +357,7 @@ function StudentProfile({ student, onClose }: { student: Student; onClose: () =>
 
 export function StudentManagement() {
   const { user } = useAuth();
-  const branches = getBranches();
+  const branches = useBranches();
   const rawStudents = useStudents();
   
   useEffect(() => {

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Header } from '../components/Header';
 import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
-import { getBranches } from '../lib/branchService';
+import { useBranches } from '../lib/branchService';
 import { useStudents } from '../lib/studentService';
 import {
   createSchoolExamSchedule,
@@ -20,7 +20,7 @@ const EXAM_OPTIONS = ['Mid-Term', 'Quarterly', 'Half-Yearly', 'Annual', 'Board E
 export function SchoolExamSchedulesPage() {
   const { user } = useAuth();
   const students = useStudents();
-  const branches = getBranches();
+  const branches = useBranches();
   const schedules = useSchoolExamSchedules();
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [classFilter, setClassFilter] = useState('');
@@ -212,7 +212,14 @@ export function SchoolExamSchedulesPage() {
     setIsDeleting(null);
   };
 
-  const canManage = user?.role === 'teacher';
+  // Matches the backend's permission model for these endpoints (teacher, admin,
+  // and super_admin can all create/update/delete school exam schedules) — the
+  // form used to only render for teachers, so admins had no way to save at all.
+  const canManage = user?.role === 'teacher' || user?.role === 'admin' || user?.role === 'super_admin';
+  // Only teachers are limited to the file + dates when editing an existing
+  // schedule (matches the server-side restriction) — admins/super_admins can
+  // still edit every field.
+  const lockFieldsOnEdit = !!editingId && user?.role === 'teacher';
   const canView = user?.role !== 'accountant';
 
   return (
@@ -228,7 +235,9 @@ export function SchoolExamSchedulesPage() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold text-foreground">{editingId ? 'Update School Exam Schedule' : 'Upload School Exam Schedule'}</h2>
-                <p className="mt-1 text-sm text-muted-foreground">Select a student, fill the examination details, and upload the timetable file.</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {lockFieldsOnEdit ? 'Only the timetable file and start/end dates can be changed here.' : editingId ? 'Update the examination details and upload the timetable file.' : 'Select a student, fill the examination details, and upload the timetable file.'}
+                </p>
               </div>
               <button type="button" onClick={resetForm} className="rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-secondary">Reset</button>
             </div>
@@ -236,7 +245,7 @@ export function SchoolExamSchedulesPage() {
             <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Branch</label>
-                <select value={form.branchId} onChange={(event) => setForm((prev) => ({ ...prev, branchId: event.target.value }))} className="field">
+                <select disabled={lockFieldsOnEdit} value={form.branchId} onChange={(event) => setForm((prev) => ({ ...prev, branchId: event.target.value }))} className="field disabled:opacity-60">
                   <option value="">Select branch</option>
                   {branches.filter((branch) => branch.status === 'Active').map((branch) => (
                     <option key={branch.id} value={branch.id}>{branch.name}</option>
@@ -245,14 +254,14 @@ export function SchoolExamSchedulesPage() {
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Class</label>
-                <select value={form.schoolClass} onChange={(event) => setForm((prev) => ({ ...prev, schoolClass: event.target.value }))} className="field">
+                <select disabled={lockFieldsOnEdit} value={form.schoolClass} onChange={(event) => setForm((prev) => ({ ...prev, schoolClass: event.target.value }))} className="field disabled:opacity-60">
                   <option value="">Select class</option>
                   {classOptions.map((className) => <option key={className} value={className}>{className}</option>)}
                 </select>
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Student</label>
-                <select value={form.studentId} onChange={(event) => handleSelectStudent(event.target.value)} className="field">
+                <select disabled={lockFieldsOnEdit} value={form.studentId} onChange={(event) => handleSelectStudent(event.target.value)} className="field disabled:opacity-60">
                   <option value="">Select student</option>
                   {studentOptions.map((student) => (
                     <option key={student.id} value={student.id}>{student.fullName}</option>
@@ -265,11 +274,11 @@ export function SchoolExamSchedulesPage() {
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">School Name</label>
-                <input value={form.schoolName} onChange={(event) => setForm((prev) => ({ ...prev, schoolName: event.target.value }))} placeholder="e.g. ABC Public School" className="field" />
+                <input disabled={lockFieldsOnEdit} value={form.schoolName} onChange={(event) => setForm((prev) => ({ ...prev, schoolName: event.target.value }))} placeholder="e.g. ABC Public School" className="field disabled:opacity-60" />
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Examination Name</label>
-                <select value={form.examName} onChange={(event) => setForm((prev) => ({ ...prev, examName: event.target.value }))} className="field">
+                <select disabled={lockFieldsOnEdit} value={form.examName} onChange={(event) => setForm((prev) => ({ ...prev, examName: event.target.value }))} className="field disabled:opacity-60">
                   <option value="">Select exam</option>
                   {EXAM_OPTIONS.map((exam) => <option key={exam} value={exam}>{exam}</option>)}
                 </select>
@@ -284,11 +293,11 @@ export function SchoolExamSchedulesPage() {
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Subject (Optional)</label>
-                <input value={form.subject} onChange={(event) => setForm((prev) => ({ ...prev, subject: event.target.value }))} placeholder="Maths / English" className="field" />
+                <input disabled={lockFieldsOnEdit} value={form.subject} onChange={(event) => setForm((prev) => ({ ...prev, subject: event.target.value }))} placeholder="Maths / English" className="field disabled:opacity-60" />
               </div>
               <div className="md:col-span-2 xl:col-span-3">
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Description / Notes</label>
-                <textarea value={form.description} onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))} rows={3} className="field" placeholder="Any extra notes for parents and staff" />
+                <textarea disabled={lockFieldsOnEdit} value={form.description} onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))} rows={3} className="field disabled:opacity-60" placeholder="Any extra notes for parents and staff" />
               </div>
               <div className="md:col-span-2 xl:col-span-3">
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Upload Timetable</label>
