@@ -1,4 +1,5 @@
 import React from 'react';
+import { reportClientError } from '../lib/errorReporter';
 
 interface AppErrorBoundaryProps {
   children: React.ReactNode;
@@ -25,6 +26,7 @@ export class AppErrorBoundary extends React.Component<
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
     console.error('[AppErrorBoundary] Uncaught render error:', error, errorInfo);
+    reportClientError(error.message, error.stack || errorInfo.componentStack || undefined);
   }
 
   private handleReload = (): void => {

@@ -242,26 +242,34 @@ export function FeeManagement() {
   }
 
   async function handleSaveEdit() {
-    if (!editingRecord) return;
-    const amount = Number(editAmount);
-    if (!amount || amount <= 0) {
-      setError('Enter a valid fee amount.');
-      return;
-    }
-    if (amount < editingRecord.paidAmount) {
-      setError(`Amount can't be less than the ${formatIndianCurrency(editingRecord.paidAmount)} already paid.`);
-      return;
-    }
-    setIsSavingEdit(true);
-    setError(null);
+    // The whole body used to run outside any try/catch until after validation,
+    // so a click that reached "nothing happens" (no error, no network request,
+    // per production debugging) is consistent with an uncaught synchronous
+    // throw here — event-handler errors never reach the page's ErrorBoundary
+    // (that only catches render-phase errors), so it would fail completely
+    // silently. Wrapping the whole thing guarantees the user always sees why,
+    // and isSavingEdit can never get stuck true if something throws before
+    // the old try block started.
     try {
+      if (!editingRecord) return;
+      const amount = Number(editAmount);
+      if (!amount || amount <= 0) {
+        setError('Enter a valid fee amount.');
+        return;
+      }
+      if (amount < editingRecord.paidAmount) {
+        setError(`Amount can't be less than the ${formatIndianCurrency(editingRecord.paidAmount)} already paid.`);
+        return;
+      }
+      setIsSavingEdit(true);
+      setError(null);
       await updateFeeRecordAPI(editingRecord.id, { totalAmount: amount, dueDate: editDueDate }, user);
       setSuccess(`Fee updated for ${editingRecord.studentName}.`);
       const statsResult = await fetchFeeStats(user);
       setStats(statsResult);
       setEditingRecord(null);
     } catch (err: any) {
-      setError(err.message || 'Failed to update fee.');
+      setError(err?.message || 'Failed to update fee.');
     } finally {
       setIsSavingEdit(false);
     }

@@ -1637,11 +1637,32 @@ async function main() {
     }
   }
 
-  // Applied to every route registered below except /api/auth/* (/uploads/* has its
-  // own dedicated authMiddleware attached directly to that mount, above).
+  // Applied to every route registered below except /api/auth/* and
+  // /api/client-errors (/uploads/* has its own dedicated authMiddleware
+  // attached directly to that mount, above) — a client error can happen
+  // before login (e.g. on the login page itself), so this can't require auth.
   app.use((req, res, next) => {
-    if (req.path.startsWith('/api/auth/')) return next();
+    if (req.path.startsWith('/api/auth/') || req.path === '/api/client-errors') return next();
     return authMiddleware(req, res, next);
+  });
+
+  // Browser-side JS errors and unhandled promise rejections land here so a
+  // "the button does nothing" report can be diagnosed from server logs
+  // instead of needing the reporter's DevTools console — several bugs this
+  // session (a click that silently never fired a request) had no other trace.
+  app.post('/api/client-errors', async (req, res) => {
+    try {
+      const { message, stack, url, userId } = req.body || {};
+      console.error('[client-error]', JSON.stringify({
+        message: String(message || '').slice(0, 500),
+        stack: String(stack || '').slice(0, 2000),
+        url: String(url || '').slice(0, 300),
+        userId: userId ? String(userId).slice(0, 100) : undefined,
+      }));
+    } catch (err) {
+      console.error('Failed to log client error:', err);
+    }
+    res.json({ success: true });
   });
 
   // Non-super_admin requests are pinned to their own branch: query/body branchId
