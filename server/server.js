@@ -2538,20 +2538,29 @@ async function main() {
   });
 
   app.put('/api/school-exam-schedules/:id', upload.single('attachment'), async (req, res) => {
-    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin', 'parent'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       const attachment = req.file;
       const existing = await db.get('SELECT * FROM school_exam_schedules WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'not found' });
+
+      // Parents may only touch their own child's schedule — verified via
+      // parent_student, never trusted from the client.
+      if (req.user.roles.includes('parent') && !req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) {
+        const link = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, existing.studentId);
+        if (!link) return res.status(403).json({ error: 'Forbidden' });
+      }
+
       const nextAttachmentPath = attachment ? `/uploads/${attachment.filename}` : (body.attachmentPath ?? existing.attachmentPath ?? null);
       const nextAttachmentName = attachment ? attachment.originalname : (body.attachmentName ?? existing.attachmentName ?? null);
       const nextAttachmentSize = attachment ? attachment.size : (body.attachmentSize ?? existing.attachmentSize ?? null);
       const status = computeSchoolExamStatus(body.startDate || existing.startDate, body.endDate || existing.endDate);
-      // Teachers may only update the timetable file and its start/end dates on an
-      // existing schedule — every other field (student, school, exam name, etc.)
-      // stays whatever it already was, regardless of what the request body sends.
-      const isTeacherOnly = req.user.roles.includes('teacher') && !req.user.roles.some((r) => ['admin', 'super_admin'].includes(r));
+      // Teachers and parents may only update the timetable file and its start/end
+      // dates on an existing schedule — every other field (student, school, exam
+      // name, etc.) stays whatever it already was, regardless of what the request
+      // body sends. Admins/super_admins can still edit every field.
+      const isTeacherOnly = !req.user.roles.some((r) => ['admin', 'super_admin'].includes(r));
       const nextFields = isTeacherOnly
         ? { studentId: existing.studentId, studentName: existing.studentName, branchId: existing.branchId, schoolName: existing.schoolName, schoolClass: existing.schoolClass, examName: existing.examName, subject: existing.subject, description: existing.description }
         : { studentId: body.studentId || existing.studentId, studentName: body.studentName || existing.studentName, branchId: body.branchId || existing.branchId, schoolName: body.schoolName || existing.schoolName, schoolClass: body.schoolClass || existing.schoolClass, examName: body.examName || existing.examName, subject: body.subject || existing.subject, description: body.description || existing.description };

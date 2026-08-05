@@ -91,8 +91,11 @@ export function Attendance() {
     apiFetch(url)
       .then((res) => res.json())
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const mapped = data.map((s: any) => ({
+        // Server returns students regardless of status; attendance is only taken for active enrollments
+        // (also drops soft-deleted duplicate records, which otherwise show up as an extra row here).
+        const activeData = Array.isArray(data) ? data.filter((s: any) => s.status !== 'Inactive') : data;
+        if (Array.isArray(activeData) && activeData.length > 0) {
+          const mapped = activeData.map((s: any) => ({
             id: s.id,
             name: `${s.firstName} ${s.lastName}`,
             branchId: s.branchId,
@@ -121,7 +124,7 @@ export function Attendance() {
           setSaved(false);
         } else {
           // Fallback to in-memory students when API returns no data
-          const local = getStudentsForClass(selectedClass, branchFilter, selectedBoard);
+          const local = getStudentsForClass(selectedClass, branchFilter, selectedBoard).filter((s: any) => s.status !== 'Inactive');
           const mapped = local.map((s) => ({
             id: s.id,
             name: `${s.firstName} ${s.lastName}`,

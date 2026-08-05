@@ -83,7 +83,15 @@ function StudentForm({
   defaultBranchId?: string;
 }) {
   const [form, setForm] = useState(initial);
+  const [saving, setSaving] = useState(false);
   const set = (k: keyof typeof form, v: string) => setForm((p) => ({ ...p, [k]: v }));
+
+  const handleSaveClick = async () => {
+    if (saving) return;
+    setSaving(true);
+    await onSave(form);
+    setSaving(false);
+  };
 
   return (
     <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
@@ -260,8 +268,8 @@ function StudentForm({
       </div>
 
       <div className="mt-5 flex gap-3">
-        <button onClick={() => onSave(form)} className="rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-95">
-          {isEdit ? 'Save Changes' : 'Add Student'}
+        <button onClick={handleSaveClick} disabled={saving} className="rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed">
+          {saving ? 'Saving...' : isEdit ? 'Save Changes' : 'Add Student'}
         </button>
         <button onClick={onClose} className="rounded-xl border border-border px-6 py-2.5 text-sm font-medium transition-colors hover:bg-secondary">
           Cancel

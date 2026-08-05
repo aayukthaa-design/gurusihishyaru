@@ -9,7 +9,8 @@ import {
   MapPin,
   User as UserIcon,
   Download,
-  Info
+  Info,
+  Upload
 } from 'lucide-react';
 import { Link } from 'react-router';
 import { Header } from '../components/Header';
@@ -20,7 +21,7 @@ import { useNotifications, getVisibleNotificationsForUser } from '../lib/notific
 import { refreshHomework } from '../lib/homeworkService';
 import { subscribeMarks, MarkRecord } from '../lib/examMarksService';
 import { subscribeExams, Exam } from '../lib/examService';
-import { useSchoolExamSchedules, refreshSchoolExamSchedules, getAttachmentUrl } from '../lib/schoolExamScheduleService';
+import { useSchoolExamSchedules, refreshSchoolExamSchedules, getAttachmentUrl, updateSchoolExamSchedule } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { useFeeRecords, refreshFeeRecords } from '../lib/feeService';
@@ -100,6 +101,25 @@ export function ParentPortal() {
   useEffect(() => {
     if (selectedStudent?.id) void refreshSchoolExamSchedules({ studentId: selectedStudent.id });
   }, [selectedStudent?.id]);
+  const [editingExamId, setEditingExamId] = useState<string | null>(null);
+  const [examEditForm, setExamEditForm] = useState<{ startDate: string; endDate: string; attachment: File | null }>({ startDate: '', endDate: '', attachment: null });
+  const [examEditSubmitting, setExamEditSubmitting] = useState(false);
+
+  const startEditExam = (exam: { id: string; startDate: string; endDate: string }) => {
+    setEditingExamId(exam.id);
+    setExamEditForm({ startDate: exam.startDate, endDate: exam.endDate, attachment: null });
+  };
+
+  const submitExamEdit = async (id: string) => {
+    setExamEditSubmitting(true);
+    const fd = new FormData();
+    fd.append('startDate', examEditForm.startDate);
+    fd.append('endDate', examEditForm.endDate);
+    if (examEditForm.attachment) fd.append('attachment', examEditForm.attachment);
+    const result = await updateSchoolExamSchedule(id, fd);
+    setExamEditSubmitting(false);
+    if (result) setEditingExamId(null);
+  };
   const [specialClasses, setSpecialClasses] = useState<any[]>([]);
 
   useEffect(() => {
@@ -345,7 +365,7 @@ export function ParentPortal() {
             <div className="rounded-[28px] border border-border bg-card p-6 shadow-sm">
               <div>
                 <p className="text-base font-semibold text-foreground">School Examination Schedule</p>
-                <p className="mt-1 text-sm text-muted-foreground">View-only access to your child’s school exam timetables and attachments.</p>
+                <p className="mt-1 text-sm text-muted-foreground">You can update the timetable file and exam dates if the school revises them.</p>
               </div>
 
               <div className="mt-5 space-y-4">
@@ -357,16 +377,46 @@ export function ParentPortal() {
                       <span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary">{exam.examName}</span>
                       <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${exam.status === 'Completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400' : exam.status === 'Ongoing' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400' : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-400'}`}>{exam.status}</span>
                     </div>
-                    <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
-                      <div><span className="font-medium text-foreground">School:</span> {exam.schoolName}</div>
-                      <div><span className="font-medium text-foreground">Start:</span> {exam.startDate}</div>
-                      <div><span className="font-medium text-foreground">End:</span> {exam.endDate}</div>
-                      {exam.attachmentPath && (
-                        <a href={getAttachmentUrl(exam.attachmentPath)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-primary hover:underline">
-                          <Download className="h-4 w-4" /> View / Download Timetable
-                        </a>
-                      )}
-                    </div>
+
+                    {editingExamId === exam.id ? (
+                      <div className="mt-3 space-y-3">
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-muted-foreground">Start Date</label>
+                            <input type="date" value={examEditForm.startDate} onChange={(event) => setExamEditForm((prev) => ({ ...prev, startDate: event.target.value }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-medium text-muted-foreground">End Date</label>
+                            <input type="date" value={examEditForm.endDate} onChange={(event) => setExamEditForm((prev) => ({ ...prev, endDate: event.target.value }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                          </div>
+                        </div>
+                        <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-border bg-secondary/30 px-3 py-2.5 text-sm text-muted-foreground">
+                          <Upload className="h-4 w-4 shrink-0" />
+                          <span className="truncate">{examEditForm.attachment ? examEditForm.attachment.name : 'Choose replacement PDF / image (optional)'}</span>
+                          <input type="file" accept=".pdf,.png,.jpg,.jpeg" className="hidden" onChange={(event) => setExamEditForm((prev) => ({ ...prev, attachment: event.target.files?.[0] ?? null }))} />
+                        </label>
+                        <div className="flex gap-2">
+                          <button type="button" disabled={examEditSubmitting} onClick={() => void submitExamEdit(exam.id)} className="rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60">
+                            {examEditSubmitting ? 'Saving...' : 'Save Changes'}
+                          </button>
+                          <button type="button" onClick={() => setEditingExamId(null)} className="rounded-xl border border-border px-4 py-2 text-sm text-foreground hover:bg-secondary">Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
+                        <div><span className="font-medium text-foreground">School:</span> {exam.schoolName}</div>
+                        <div><span className="font-medium text-foreground">Start:</span> {exam.startDate}</div>
+                        <div><span className="font-medium text-foreground">End:</span> {exam.endDate}</div>
+                        {exam.attachmentPath && (
+                          <a href={getAttachmentUrl(exam.attachmentPath)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-primary hover:underline">
+                            <Download className="h-4 w-4" /> View / Download Timetable
+                          </a>
+                        )}
+                        <button type="button" onClick={() => startEditExam(exam)} className="inline-flex w-fit items-center gap-2 text-sm font-semibold text-primary hover:underline">
+                          <Upload className="h-4 w-4" /> Update Timetable
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
