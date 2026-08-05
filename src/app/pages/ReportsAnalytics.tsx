@@ -8,7 +8,7 @@ import { buildReportExportData, exportReportToExcel, exportReportToPdf } from '.
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { formatIndianCurrency, formatIndianCurrencyForPdf } from '../lib/currency';
 import { utils, writeFile } from 'xlsx';
-import { apiFetch } from '../lib/apiClient';
+import { apiFetch, getFileUrl } from '../lib/apiClient';
 import { fetchAttendance } from '../lib/attendanceService';
 import { fetchFeeStats, type FeeStats } from '../lib/feeService';
 import { useExams } from '../lib/examService';
@@ -707,7 +707,7 @@ export function ReportsAnalytics() {
                         <td className="px-6 py-3 text-right font-bold text-green-600">{formatIndianCurrency(t.amount)}</td>
                         <td className="px-6 py-3">
                           {t.attachmentPath ? (
-                            <a href={`${t.attachmentPath}`} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
+                            <a href={getFileUrl(t.attachmentPath)} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
                               {t.attachmentName || 'View Bill'}
                             </a>
                           ) : (
@@ -749,7 +749,7 @@ export function ReportsAnalytics() {
                         <td className="px-6 py-3 text-right font-bold text-red-500">{formatIndianCurrency(t.amount)}</td>
                         <td className="px-6 py-3">
                           {t.attachmentPath ? (
-                            <a href={`${t.attachmentPath}`} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
+                            <a href={getFileUrl(t.attachmentPath)} target="_blank" rel="noopener noreferrer" className="text-xs text-primary font-semibold hover:underline">
                               {t.attachmentName || 'View Bill'}
                             </a>
                           ) : (

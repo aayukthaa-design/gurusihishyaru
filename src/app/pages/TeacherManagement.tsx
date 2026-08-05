@@ -27,7 +27,7 @@ export interface Teacher {
   salaryAmount: number;
   monthlySalary?: number;
   salaryPerClass?: number;
-  status: 'Active' | 'Inactive';
+  status: 'Active' | 'Inactive' | 'Pending Approval';
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -84,11 +84,19 @@ function TeacherForm({
 }) {
   const { user } = useAuth();
   const [form, setForm] = useState(initial);
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     setForm(initial);
   }, [initial]);
 
   const set = <K extends keyof typeof form>(k: K, v: typeof form[K]) => setForm((p) => ({ ...p, [k]: v }));
+
+  const handleSaveClick = async () => {
+    if (saving) return;
+    setSaving(true);
+    await onSave(form);
+    setSaving(false);
+  };
 
   const isSalaryEditable = (user?.role === 'admin' || user?.role === 'super_admin');
 
@@ -191,8 +199,8 @@ function TeacherForm({
       </div>
 
       <div className="mt-5 flex gap-3">
-        <button onClick={() => onSave(form)} className="rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-95">
-          {isEdit ? 'Save Changes' : 'Add Teacher'}
+        <button onClick={handleSaveClick} disabled={saving} className="rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed">
+          {saving ? 'Saving...' : isEdit ? 'Save Changes' : 'Add Teacher'}
         </button>
         <button onClick={onClose} className="rounded-xl border border-border px-6 py-2.5 text-sm font-medium transition-colors hover:bg-secondary">
           Cancel
@@ -258,6 +266,8 @@ function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () =>
           <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
             teacher.status === 'Active'
               ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+              : teacher.status === 'Pending Approval'
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400'
               : 'bg-secondary text-muted-foreground'
           }`}>{teacher.status}</span>
         </div>
@@ -319,6 +329,13 @@ export function TeacherManagement() {
     setFormError(null);
     await refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
     setPanel('none');
+  };
+
+  const handleApprove = async (id: string) => {
+    const res = await apiFetch(`/api/teachers/${id}`, { method: 'PUT', body: { status: 'Active' } });
+    if (res.ok) {
+      await refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+    }
   };
 
   const editTeacher = panel !== 'none' && typeof panel === 'object' && panel.type === 'edit'
@@ -425,11 +442,18 @@ export function TeacherManagement() {
                       <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
                         t.status === 'Active'
                           ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+                          : t.status === 'Pending Approval'
+                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400'
                           : 'bg-secondary text-muted-foreground'
                       }`}>{t.status}</span>
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-1">
+                        {t.status === 'Pending Approval' && user?.role === 'super_admin' && (
+                          <button onClick={() => handleApprove(t.id)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-green-700 bg-green-100 hover:bg-green-200 dark:bg-green-900/40 dark:text-green-400" title="Approve teacher">
+                            Approve
+                          </button>
+                        )}
                         <button onClick={() => setPanel({ type: 'view', id: t.id })} className="rounded-lg p-1.5 hover:bg-secondary" title="View">
                           <Eye className="h-4 w-4 text-primary" />
                         </button>

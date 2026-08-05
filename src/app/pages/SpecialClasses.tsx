@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
-import { apiFetch } from '../lib/apiClient';
+import { apiFetch, getFileUrl } from '../lib/apiClient';
 import {
   Calendar, Clock, MapPin, FileText, User, Plus, Edit2,
   Trash2, XCircle, CheckCircle2, Download, AlertCircle, RefreshCw, BarChart2
@@ -250,7 +250,7 @@ export function SpecialClasses() {
     setIsAttendanceOpen(true);
     
     // Fetch students of this class
-    const classStudents = students.filter(s => s.className === c.className && s.branchId === c.branchId);
+    const classStudents = students.filter(s => s.className === c.className && s.branchId === c.branchId && s.status !== 'Inactive');
     
     // Fetch existing attendance
     try {
@@ -297,7 +297,7 @@ export function SpecialClasses() {
 
   // Export PDF Report for a specific class
   const exportClassPDF = async (c: SpecialClass) => {
-    const classStudents = students.filter(s => s.className === c.className && s.branchId === c.branchId);
+    const classStudents = students.filter(s => s.className === c.className && s.branchId === c.branchId && s.status !== 'Inactive');
     
     // Calculate attendance summary
     let presentCount = 0;
@@ -470,8 +470,8 @@ export function SpecialClasses() {
                     )}
 
                     {c.attachmentPath && (
-                      <a 
-                        href={c.attachmentPath} 
+                      <a
+                        href={getFileUrl(c.attachmentPath)}
                         download
                         className="inline-flex items-center gap-1.5 text-xs text-primary font-medium hover:underline"
                       >
@@ -770,7 +770,7 @@ export function SpecialClasses() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/60">
-                  {students.filter(s => s.className === selectedClass.className && s.branchId === selectedClass.branchId).map(student => (
+                  {students.filter(s => s.className === selectedClass.className && s.branchId === selectedClass.branchId && s.status !== 'Inactive').map(student => (
                     <tr key={student.id} className="hover:bg-secondary/10">
                       <td className="p-3 font-semibold text-foreground">{student.fullName}</td>
                       <td className="p-3 text-muted-foreground">{student.id}</td>

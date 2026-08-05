@@ -53,10 +53,14 @@ function ExamsList() {
                 <p className="text-xs text-muted-foreground">Date: {exam.date} · {exam.className}</p>
               </div>
               <div className="flex gap-2">
-                <span className="text-xs text-muted-foreground">{exam.status === 'attendance_completed' || exam.status === 'marks_entry_open' || exam.status === 'results_published' ? 'Attendance complete' : 'Complete Attendance first'}</span>
-                <Link to={`/exams/${exam.id}/marks`} className={`text-xs ${exam.status === 'attendance_completed' || exam.status === 'marks_entry_open' || exam.status === 'results_published' ? 'text-primary' : 'pointer-events-none text-muted-foreground'}`}>
-                  {exam.status === 'attendance_completed' || exam.status === 'marks_entry_open' || exam.status === 'results_published' ? 'Enter Marks' : 'Enter Marks'}
-                </Link>
+                {exam.status === 'attendance_completed' || exam.status === 'marks_entry_open' || exam.status === 'results_published' ? (
+                  <>
+                    <span className="text-xs text-muted-foreground">Attendance complete</span>
+                    <Link to={`/exams/${exam.id}/marks`} className="text-xs text-primary">Enter Marks</Link>
+                  </>
+                ) : (
+                  <Link to={`/exams/${exam.id}/attendance`} className="text-xs text-primary">Complete Attendance first</Link>
+                )}
               </div>
             </div>
           ))}

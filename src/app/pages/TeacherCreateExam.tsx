@@ -33,6 +33,21 @@ export function TeacherCreateExam() {
   const [attendanceMessage, setAttendanceMessage] = React.useState<string | null>(null);
   const [attendanceSuccess, setAttendanceSuccess] = React.useState(false);
 
+  // Referenced by the attendance modal below but previously never computed —
+  // that left `attendanceSummary`/`canSubmitAttendance` undefined, so the
+  // modal threw a ReferenceError the instant it rendered. Since the exam's
+  // status only advances to 'attendance_completed' after this step succeeds,
+  // that crash silently blocked every exam from ever reaching Enter Marks.
+  const attendanceSummary = React.useMemo(() => {
+    const total = attendanceStudents.length;
+    const present = attendanceStudents.filter((student) => attendanceStatuses[student.id] === 'present').length;
+    const absent = attendanceStudents.filter((student) => attendanceStatuses[student.id] === 'absent').length;
+    const remaining = total - present - absent;
+    const percentage = total > 0 ? Math.round((present / total) * 100) : 0;
+    return { total, present, absent, remaining, percentage };
+  }, [attendanceStudents, attendanceStatuses]);
+  const canSubmitAttendance = attendanceSummary.total > 0 && attendanceSummary.remaining === 0;
+
   const batchesForClass = allocMap[className]?.batches || BOARDS;
 
   React.useEffect(() => {

@@ -16,7 +16,7 @@ import {
   Upload, Lock, Unlock, FileText, CheckCircle, Package, AlertTriangle, RefreshCw, Wallet, CreditCard, ClipboardCheck, Boxes, FileSpreadsheet, Users
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { apiFetch } from '../lib/apiClient';
+import { apiFetch, getFileUrl } from '../lib/apiClient';
 
 interface LedgerEntry {
   id: number;
@@ -1287,7 +1287,7 @@ export function AccountantPortal() {
                             {row.attachmentPath ? (
                               <div className="flex items-center gap-1">
                                 <a
-                                  href={`${row.attachmentPath}`}
+                                  href={getFileUrl(row.attachmentPath)}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-xs text-primary font-semibold hover:underline truncate max-w-[100px]"
@@ -2007,7 +2007,7 @@ export function AccountantPortal() {
               {viewingLedgerRow.attachmentPath && (
                 <div className="col-span-2">
                   <p className="text-xs uppercase text-muted-foreground">Attachment</p>
-                  <a href={viewingLedgerRow.attachmentPath} target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">{viewingLedgerRow.attachmentName || 'View Bill'}</a>
+                  <a href={getFileUrl(viewingLedgerRow.attachmentPath)} target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">{viewingLedgerRow.attachmentName || 'View Bill'}</a>
                 </div>
               )}
             </div>

@@ -1,5 +1,5 @@
 import { createStore, useStoreValue } from './store';
-import { apiFetch } from './apiClient';
+import { apiFetch, getFileUrl } from './apiClient';
 
 export interface SchoolExamSchedule {
   id: string;
@@ -110,9 +110,7 @@ export async function deleteSchoolExamSchedule(id: string): Promise<boolean> {
 }
 
 export function getAttachmentUrl(path?: string | null) {
-  if (!path) return '';
-  if (/^https?:\/\//i.test(path)) return path;
-  return `${API_BASE}${path}`;
+  return getFileUrl(path);
 }
 
 export function formatScheduleDate(value?: string) {

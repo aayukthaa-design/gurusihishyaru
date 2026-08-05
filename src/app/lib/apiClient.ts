@@ -58,6 +58,21 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
   return response;
 }
 
+/**
+ * Builds a directly-linkable URL (for <a href>, window.open, img src) to an
+ * uploaded file, carrying the session token as a query param — plain links
+ * and new-tab navigation can't attach the Authorization header apiFetch uses,
+ * and /uploads/* requires auth, so without this every download 401s.
+ */
+export function getFileUrl(path?: string | null): string {
+  if (!path) return '';
+  if (/^https?:\/\//i.test(path)) return path;
+  const url = path.startsWith('/') ? `${API_BASE}${path}` : `${API_BASE}/${path}`;
+  const token = getToken();
+  if (!token) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+}
+
 /** Convenience helper: apiFetch + throws on non-OK + parses JSON. */
 export async function apiJson<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const response = await apiFetch(path, options);

@@ -477,7 +477,7 @@ export function ParentPortal() {
 
                       {c.attachmentPath && (
                         <a
-                          href={c.attachmentPath}
+                          href={getAttachmentUrl(c.attachmentPath)}
                           download
                           className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition hover:bg-secondary/40 self-start sm:self-center"
                         >

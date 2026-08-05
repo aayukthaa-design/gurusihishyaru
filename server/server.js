@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import cors from 'cors';
@@ -88,6 +89,14 @@ function parseArrayParam(value) {
 
 function serializeList(value) {
   return Array.isArray(value) ? JSON.stringify(value) : JSON.stringify([]);
+}
+
+// `NOTIF-${Date.now()}-${random 0-999}` collides constantly when a single
+// action fans out to many recipients in a tight loop (same millisecond,
+// 1-in-1000 tiebreaker) — that was the cause of the recurring
+// "UNIQUE constraint failed: notifications.id" 500s. UUIDs can't collide.
+function newNotificationId() {
+  return `NOTIF-${crypto.randomUUID()}`;
 }
 
 function computeSchoolExamStatus(startDate, endDate, referenceDate = new Date()) {
@@ -1501,7 +1510,17 @@ async function main() {
 
   // Uploaded files require authentication — direct URL access without a valid
   // session token is no longer permitted (previously served with zero auth).
-  app.use('/uploads', authMiddleware, express.static(UPLOAD_DIR));
+  // Every download link in the app is a plain <a href>/window.open, though,
+  // and browsers don't attach custom headers to those — only fetch() calls
+  // can send the Authorization bearer header. So this accepts the same JWT
+  // as a ?token= query param too, which is the only thing a plain link can
+  // carry; without it every attachment download in the app 401s.
+  app.use('/uploads', (req, res, next) => {
+    if (!req.headers.authorization && typeof req.query.token === 'string') {
+      req.headers.authorization = `Bearer ${req.query.token}`;
+    }
+    next();
+  }, authMiddleware, express.static(UPLOAD_DIR));
 
   // ─── Auth helpers ───────────────────────────────────────────────────────────
 
@@ -1910,10 +1929,14 @@ async function main() {
       const passwordHash = await bcrypt.hash(initialPassword, BCRYPT_ROUNDS);
       const now = new Date().toISOString();
       const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
+      // A teacher added by a branch admin needs super_admin sign-off before the
+      // account can log in — only super_admin can create one pre-approved.
+      const isSuperAdminCreator = req.user.roles.includes('super_admin');
+      const status = isSuperAdminCreator ? (body.status || 'Active') : 'Pending Approval';
       await db.run(
         `INSERT INTO users (id, name, email, mobile, passwordHash, roles, branchId, status, mustChangePassword, createdAt, updatedAt)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-        id, name, body.email || null, mobile, passwordHash, JSON.stringify(['teacher']), branchId, body.status || 'Active', now, now
+        id, name, body.email || null, mobile, passwordHash, JSON.stringify(['teacher']), branchId, status, now, now
       );
       await db.run(
         `INSERT INTO teacher_profiles (id, qualification, experience, subjects, department, salaryType, salaryAmount, monthlySalary, salaryPerClass, gender, dob, address, employmentType, profilePhoto, dateOfJoining, createdAt, updatedAt)
@@ -1925,6 +1948,17 @@ async function main() {
         body.gender || '', body.dob || '', body.address || '', body.employmentType || '', body.profilePhoto || '', body.dateOfJoining || '',
         now, now
       );
+      if (!isSuperAdminCreator) {
+        await db.run(
+          `INSERT INTO notifications (id, title, message, type, priority, roles, branchId, status, createdAt)
+           VALUES (?, ?, ?, 'info', 'high', '["super_admin"]', ?, 'unread', ?)`,
+          newNotificationId(),
+          'New teacher awaiting approval',
+          `${req.user.name || 'An admin'} added ${name} as a teacher. Approve their account before they can log in.`,
+          branchId,
+          now
+        );
+      }
       const row = await db.get(`${TEACHER_JOIN_SELECT} WHERE u.id = ?`, id);
       res.status(201).json(mapTeacherRow(row));
     } catch (err) {
@@ -2794,7 +2828,11 @@ async function main() {
       const now = new Date().toISOString();
       const payload = req.body || {};
       const notification = {
-        id: payload.id || `N${Date.now()}`,
+        // Never trust a client-supplied id as the primary key — the composer's
+        // locally-incrementing counter isn't synced across browsers/sessions
+        // and routinely collided with ids other users had already saved,
+        // which silently failed every "Compose Notification" send.
+        id: newNotificationId(),
         title: payload.title || 'Notification',
         message: payload.message || '',
         description: payload.description || '',
@@ -3691,7 +3729,7 @@ async function main() {
       // Notify accountants (and admins) so a newly admitted student's uniform/
       // materials allocation doesn't get missed — surfaces in their Notifications
       // and in the Accountant Portal's pending-allocations list.
-      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const notifId = newNotificationId();
       await db.run(`
         INSERT INTO notifications (id, title, message, description, type, priority, roles, branchId, status, createdAt)
         VALUES (?, ?, ?, ?, 'info', 'medium', '["accountant","admin","super_admin"]', ?, 'unread', ?)
@@ -4574,7 +4612,7 @@ async function main() {
       `, finalStatus, failureReason, attempt - 1, logId);
 
       // Create internal notification
-      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const notifId = newNotificationId();
       const isSuccessStatus = finalStatus === 'Delivered' || finalStatus === 'Sent' || finalStatus === 'Simulated Sent';
       const notifTitle = isSuccessStatus ? 'Attendance WhatsApp Sent' : 'Attendance WhatsApp Failed';
       const notifMessage = isSuccessStatus
@@ -4646,7 +4684,7 @@ async function main() {
       const classId = result.lastID;
 
       // Send real-time internal notifications
-      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const notifId = newNotificationId();
       const notifTitle = `📢 Special Class Announcement`;
       const notifMsg = `${title}\nDate: ${date}\nTime: ${startTime} – ${endTime}\nTeacher: ${teacherName}\nVenue: ${venue}`;
 
@@ -4706,7 +4744,7 @@ async function main() {
       await db.run(query, ...params);
 
       // Trigger update notification
-      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const notifId = newNotificationId();
       const notifTitle = `🔄 Special Class ${status || 'Rescheduled'}`;
       const notifMsg = `${subject} Class has been updated.\nNew Date: ${date}\nNew Time: ${startTime} – ${endTime}\nVenue: ${venue}`;
 
@@ -4732,7 +4770,7 @@ async function main() {
       await db.run("UPDATE special_classes SET status = 'Cancelled' WHERE id = ?", id);
 
       const now = new Date().toISOString();
-      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const notifId = newNotificationId();
       const notifTitle = `❌ Special Class Cancelled`;
       const notifMsg = `The ${cls.subject} Extra Class scheduled for ${cls.date} has been CANCELLED.`;
 
@@ -5322,7 +5360,7 @@ async function main() {
 
       // Low Stock Notification Trigger
       if (newAvailable <= item.minStock) {
-        const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const notifId = newNotificationId();
         const notifTitle = `Low Stock Alert: ${item.itemName}`;
         const notifMessage = `${item.itemName} (Code: ${item.itemCode}) is below minimum stock level. Current available: ${newAvailable}, Min required: ${item.minStock}`;
         const notifDesc = `Inventory threshold alert for branch ${branchId || 'main'}`;
@@ -5448,7 +5486,7 @@ async function main() {
       const updated = await db.get('SELECT * FROM monthly_reports WHERE id = ?', id);
 
       // Trigger status notification to Accountant
-      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const notifId = newNotificationId();
       const notifTitle = `Monthly Report Status Updated: ${status}`;
       const notifMessage = `Your Monthly Financial Report for ${report.month} has been ${status === 'Approved' ? 'Approved' : 'Returned for Correction'} by Super Admin.`;
       await db.run(`
@@ -5978,7 +6016,7 @@ async function main() {
       `, body.title, body.description || '', body.eventType || 'Other', body.date, body.time || '', body.venue || '', Number(body.expectedAttendees || 0), branchId, req.user.sub, req.user.name || '', now, now);
       const created = await db.get('SELECT * FROM events WHERE id = ?', result.lastID);
 
-      const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const notifId = newNotificationId();
       await db.run(`
         INSERT INTO notifications (id, title, message, type, priority, roles, branchId, status, createdAt)
         VALUES (?, ?, ?, 'info', 'medium', '["parent","teacher"]', ?, 'unread', ?)

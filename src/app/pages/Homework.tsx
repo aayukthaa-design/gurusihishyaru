@@ -23,7 +23,7 @@ import {
   HomeworkSubmission,
   HomeworkAttachment
 } from '../lib/homeworkService';
-import { apiFetch } from '../lib/apiClient';
+import { apiFetch, getFileUrl } from '../lib/apiClient';
 import { GRADES, BOARDS } from '../lib/classConstants';
 
 const CLASS_OPTIONS = GRADES;
@@ -618,7 +618,7 @@ export function Homework() {
                           <span className="truncate font-medium text-foreground">{file.originalname}</span>
                           <div className="flex gap-2">
                             <a
-                              href={`${API_BASE}${file.path}`}
+                              href={getFileUrl(file.path)}
                               target="_blank"
                               rel="noreferrer"
                               className="p-1 hover:bg-secondary text-primary rounded-lg"
@@ -728,7 +728,7 @@ export function Homework() {
                             {hw.attachments.map((file, idx) => (
                               <a
                                 key={idx}
-                                href={`${API_BASE}${file.path}`}
+                                href={getFileUrl(file.path)}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="inline-flex items-center gap-1 bg-secondary hover:bg-secondary/80 text-[11px] font-medium text-foreground rounded-lg px-2.5 py-1 border transition"
@@ -880,7 +880,7 @@ export function Homework() {
                             {sub ? (
                               <div className="flex gap-1.5">
                                 <a
-                                  href={`${API_BASE}${sub.filePath}`}
+                                  href={getFileUrl(sub.filePath)}
                                   target="_blank"
                                   rel="noreferrer"
                                   className="p-2 hover:bg-secondary text-primary rounded-lg border"
@@ -960,7 +960,7 @@ export function Homework() {
                             </span>
                           </p>
                           <a
-                            href={`${API_BASE}${sub.filePath}`}
+                            href={getFileUrl(sub.filePath)}
                             target="_blank"
                             rel="noreferrer"
                             className="inline-flex items-center gap-1 text-primary hover:underline font-bold"
@@ -1094,7 +1094,7 @@ export function Homework() {
                                 {hw.attachments.map((file, idx) => (
                                   <a
                                     key={idx}
-                                    href={`${API_BASE}${file.path}`}
+                                    href={getFileUrl(file.path)}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="inline-flex items-center gap-1.5 bg-card hover:bg-secondary text-xs font-semibold text-foreground rounded-lg px-3 py-1.5 border transition"
@@ -1119,7 +1119,7 @@ export function Homework() {
                                 </div>
                                 <div className="flex gap-2">
                                   <a
-                                    href={`${API_BASE}${submission.filePath}`}
+                                    href={getFileUrl(submission.filePath)}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="p-1.5 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 rounded-lg"

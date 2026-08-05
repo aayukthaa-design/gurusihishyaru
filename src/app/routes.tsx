@@ -20,6 +20,7 @@ import { TeacherTasks } from './pages/TeacherTasks';
 import { Timetable } from './pages/Timetable';
 import { AdmissionCRM } from './pages/AdmissionCRM';
 import { TeacherEnterMarks } from './pages/TeacherEnterMarks';
+import { TeacherExamAttendance } from './pages/TeacherExamAttendance';
 import { ExpenseManagement } from './pages/ExpenseManagement';
 import { EventManagement } from './pages/EventManagement';
 import { NotificationsPage as Notifications } from './pages/notifications';
@@ -165,6 +166,14 @@ export const router = createBrowserRouter([
         element: (
           <Protected module="exam_marks">
             <TeacherEnterMarks />
+          </Protected>
+        ),
+      },
+      {
+        path: 'exams/:examId/attendance',
+        element: (
+          <Protected module="exam_marks">
+            <TeacherExamAttendance />
           </Protected>
         ),
       },
