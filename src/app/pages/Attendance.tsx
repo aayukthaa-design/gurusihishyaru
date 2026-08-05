@@ -1,13 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { useBranches, getBranchName } from '../lib/branchService';
 import { getStudentsForClass } from '../lib/studentService';
 import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceService';
 import { saveAttendanceAPI } from '../lib/attendanceService';
-import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare } from 'lucide-react';
+import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, CalendarOff, PlaneTakeoff, Trash2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 import { GRADES, BOARDS } from '../lib/classConstants';
+import { useHolidays, refreshHolidays, isHoliday, useStudentLeaves, refreshStudentLeaves, createStudentLeave, deleteStudentLeave, isOnLeave } from '../lib/holidayService';
 
 
 const CLASSES = GRADES;
@@ -22,12 +23,33 @@ export function Attendance() {
   const [selectedClass, setSelectedClass] = useState('');
   const [selectedBoard, setSelectedBoard] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
-  const [attendance, setAttendance] = useState<Record<string, 'present' | 'absent'>>({});
+  const [attendance, setAttendance] = useState<Record<string, 'present' | 'absent' | 'leave'>>({});
   const [saved, setSaved] = useState(false);
   const [students, setStudents] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [recentRecords, setRecentRecords] = useState<any[]>([]);
   const [showAllRecent, setShowAllRecent] = useState(false);
+
+  // Holidays + per-student leave
+  const holidays = useHolidays();
+  const leaves = useStudentLeaves();
+  const [showLeaveForm, setShowLeaveForm] = useState(false);
+  const [leaveStudentId, setLeaveStudentId] = useState('');
+  const [leaveStart, setLeaveStart] = useState(TODAY_ISO);
+  const [leaveEnd, setLeaveEnd] = useState(TODAY_ISO);
+  const [leaveReason, setLeaveReason] = useState('');
+  const [isSavingLeave, setIsSavingLeave] = useState(false);
+
+  useEffect(() => {
+    void refreshHolidays({ branchId: branchFilter || undefined });
+  }, [branchFilter]);
+
+  useEffect(() => {
+    if (selectedClass) void refreshStudentLeaves({ branchId: branchFilter || undefined, date: TODAY_ISO });
+  }, [selectedClass, branchFilter]);
+
+  const todaysHoliday = useMemo(() => isHoliday(holidays, TODAY_ISO, branchFilter || user?.branchId), [holidays, branchFilter, user?.branchId]);
+  const activeLeaves = useMemo(() => leaves.filter((l) => isOnLeave([l], l.studentId, TODAY_ISO)), [leaves]);
 
   // WhatsApp Specific States
   const [whatsappStatus, setWhatsappStatus] = useState<Record<string, 'idle' | 'sending' | 'success' | 'failed'>>({});
@@ -59,6 +81,7 @@ export function Attendance() {
       : records;
     const groups = new Map<string, { class: string; date: string; present: number; total: number; sortKey: string }>();
     for (const r of scoped) {
+      if (r.status === 'leave') continue; // approved leave doesn't count against attendance %
       const key = `${r.className}__${r.date}`;
       const g = groups.get(key) || { class: r.className, date: r.date, present: 0, total: 0, sortKey: r.date };
       g.total += 1;
@@ -107,18 +130,13 @@ export function Attendance() {
 
           // Try to load existing attendance records (falls back to seeded attendance)
           void fetchAttendanceRecords(selectedClass, TODAY_ISO).then((records) => {
-            if (Array.isArray(records) && records.length > 0) {
-              const map: Record<string, 'present' | 'absent'> = {};
-              mapped.forEach((s: any) => {
-                const r = records.find((rec) => rec.studentId === s.id);
-                map[s.id] = r ? r.status : 'present';
-              });
-              setAttendance(map);
-            } else {
-              const initialAttendance: Record<string, 'present' | 'absent'> = {};
-              mapped.forEach((s: any) => { initialAttendance[s.id] = 'present'; });
-              setAttendance(initialAttendance);
-            }
+            const map: Record<string, 'present' | 'absent' | 'leave'> = {};
+            mapped.forEach((s: any) => {
+              const r = Array.isArray(records) ? records.find((rec) => rec.studentId === s.id) : undefined;
+              if (r) { map[s.id] = r.status; return; }
+              map[s.id] = isOnLeave(leaves, s.id, TODAY_ISO) ? 'leave' : 'present';
+            });
+            setAttendance(map);
           });
           setWhatsappStatus({}); // Clear WhatsApp tracking status
           setSaved(false);
@@ -175,19 +193,38 @@ export function Attendance() {
   }, [selectedClass, selectedBoard, branchFilter]);
 
 
-  const toggle = (id: string) => {
-    setAttendance((prev) => ({
-      ...prev,
-      [id]: prev[id] === 'present' ? 'absent' : 'present',
-    }));
-    setSaved(false);
-  };
-
   const markAll = (status: 'present' | 'absent') => {
-    const all: Record<string, 'present' | 'absent'> = {};
+    const all: Record<string, 'present' | 'absent' | 'leave'> = {};
     students.forEach((s) => { all[s.id] = status; });
     setAttendance(all);
     setSaved(false);
+  };
+
+  const handleMarkLeave = async () => {
+    if (!leaveStudentId || !leaveStart || !leaveEnd) return;
+    setIsSavingLeave(true);
+    const student = students.find((s) => s.id === leaveStudentId);
+    const created = await createStudentLeave({
+      studentId: leaveStudentId,
+      studentName: student?.name,
+      startDate: leaveStart,
+      endDate: leaveEnd,
+      reason: leaveReason,
+      branchId: branchFilter || user?.branchId,
+    });
+    setIsSavingLeave(false);
+    if (created) {
+      if (leaveStart <= TODAY_ISO && leaveEnd >= TODAY_ISO) {
+        setAttendance((prev) => ({ ...prev, [leaveStudentId]: 'leave' }));
+      }
+      setShowLeaveForm(false);
+      setLeaveStudentId('');
+      setLeaveReason('');
+    }
+  };
+
+  const handleCancelLeave = async (id: number) => {
+    await deleteStudentLeave(id);
   };
 
   const handleSave = async () => {
@@ -307,6 +344,7 @@ export function Attendance() {
 
   const presentCount = Object.values(attendance).filter((v) => v === 'present').length;
   const absentCount  = Object.values(attendance).filter((v) => v === 'absent').length;
+  const leaveCount   = Object.values(attendance).filter((v) => v === 'leave').length;
   const unmarked     = students.filter((s) => !attendance[s.id]).length;
 
   // Count absent students that have not successfully sent WhatsApp yet
@@ -325,6 +363,15 @@ export function Attendance() {
           <p className="text-sm font-medium text-muted-foreground">Today</p>
           <p className="mt-1 text-lg font-bold text-foreground">{TODAY}</p>
         </div>
+
+        {todaysHoliday && (
+          <div className="flex items-center gap-3 rounded-2xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 p-4">
+            <CalendarOff className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+              Today is a holiday — <span className="font-semibold">{todaysHoliday.title}</span>. Attendance isn't required, but you can still mark it below if this is a makeup class.
+            </p>
+          </div>
+        )}
 
         {/* ── Step 1: Select Class ── */}
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
@@ -404,8 +451,52 @@ export function Attendance() {
                 >
                   All Absent
                 </button>
+                <button
+                  onClick={() => setShowLeaveForm((v) => !v)}
+                  className="flex items-center gap-1 rounded-lg bg-amber-100 dark:bg-amber-900/40 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-400 transition-colors hover:bg-amber-200"
+                >
+                  <PlaneTakeoff className="h-3.5 w-3.5" /> Mark Leave
+                </button>
               </div>
             </div>
+
+            {showLeaveForm && (
+              <div className="mb-4 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50/60 dark:bg-amber-950/20 p-4 space-y-3">
+                <p className="text-sm font-semibold text-foreground">Mark a student on leave</p>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                  <select value={leaveStudentId} onChange={(e) => setLeaveStudentId(e.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none sm:col-span-1">
+                    <option value="">Select student</option>
+                    {students.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                  <input type="date" value={leaveStart} onChange={(e) => setLeaveStart(e.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                  <input type="date" value={leaveEnd} onChange={(e) => setLeaveEnd(e.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                  <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="Reason (optional)" className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleMarkLeave}
+                    disabled={!leaveStudentId || isSavingLeave}
+                    className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
+                  >
+                    {isSavingLeave ? 'Saving...' : 'Save Leave'}
+                  </button>
+                  <button onClick={() => setShowLeaveForm(false)} className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-foreground hover:bg-secondary">Cancel</button>
+                </div>
+                {activeLeaves.length > 0 && (
+                  <div className="pt-2 border-t border-amber-200 dark:border-amber-900 space-y-1.5">
+                    <p className="text-xs font-semibold text-muted-foreground uppercase">On leave today</p>
+                    {activeLeaves.map((l) => (
+                      <div key={l.id} className="flex items-center justify-between text-xs text-foreground">
+                        <span>{l.studentName || l.studentId} — {l.startDate} to {l.endDate}{l.reason ? ` (${l.reason})` : ''}</span>
+                        <button onClick={() => handleCancelLeave(l.id)} className="text-muted-foreground hover:text-red-500" title="Cancel leave">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {loading ? (
               <div className="text-center py-6 text-sm text-muted-foreground">Loading class student profiles...</div>
@@ -423,6 +514,8 @@ export function Attendance() {
                           ? 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/30'
                           : status === 'absent'
                           ? 'border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30'
+                          : status === 'leave'
+                          ? 'border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30'
                           : 'border-border bg-secondary/40'
                       }`}
                     >
@@ -468,6 +561,17 @@ export function Attendance() {
                           >
                             <XCircle className="h-3.5 w-3.5" />
                             Absent
+                          </button>
+                          <button
+                            onClick={() => setAttendance((p) => ({ ...p, [s.id]: 'leave' }))}
+                            className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
+                              status === 'leave'
+                                ? 'bg-amber-500 text-white'
+                                : 'border border-border bg-card text-muted-foreground hover:bg-secondary'
+                            }`}
+                          >
+                            <PlaneTakeoff className="h-3.5 w-3.5" />
+                            Leave
                           </button>
                         </div>
 
@@ -519,6 +623,7 @@ export function Attendance() {
                 <div className="flex gap-4 text-sm">
                   <span className="font-semibold text-green-600 dark:text-green-400">✓ Present: {presentCount}</span>
                   <span className="font-semibold text-red-500">✗ Absent: {absentCount}</span>
+                  {leaveCount > 0 && <span className="font-semibold text-amber-600 dark:text-amber-400">✈ Leave: {leaveCount}</span>}
                   {unmarked > 0 && <span className="text-muted-foreground">○ Unmarked: {unmarked}</span>}
                 </div>
                 

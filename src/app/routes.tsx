@@ -18,6 +18,7 @@ import { TeacherScoreboard } from './pages/TeacherScoreboard';
 import { Inventory } from './pages/Inventory';
 import { TeacherTasks } from './pages/TeacherTasks';
 import { Timetable } from './pages/Timetable';
+import { HolidayCalendarPage } from './pages/HolidayCalendar';
 import { AdmissionCRM } from './pages/AdmissionCRM';
 import { TeacherEnterMarks } from './pages/TeacherEnterMarks';
 import { TeacherExamAttendance } from './pages/TeacherExamAttendance';
@@ -182,6 +183,14 @@ export const router = createBrowserRouter([
         element: (
           <Protected module="timetable">
             <Timetable />
+          </Protected>
+        ),
+      },
+      {
+        path: 'holidays',
+        element: (
+          <Protected module="holiday_calendar">
+            <HolidayCalendarPage />
           </Protected>
         ),
       },

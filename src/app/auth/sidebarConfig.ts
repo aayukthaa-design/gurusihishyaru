@@ -25,6 +25,7 @@ import {
   FileText,
   Library,
   NotebookPen,
+  CalendarOff,
   type LucideIcon,
 } from 'lucide-react';
 import type { Role, Module } from './types';
@@ -62,6 +63,7 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
   { name: 'Study Materials',  href: '/materials',        icon: Library,         module: 'materials' },
   { name: 'Lesson Plans',     href: '/lesson-plan',      icon: NotebookPen,     module: 'lesson_plan' },
   { name: 'Timetable',        href: '/timetable',        icon: Calendar,        module: 'timetable' },
+  { name: 'Holidays',         href: '/holidays',         icon: CalendarOff,     module: 'holiday_calendar' },
   { name: 'Admissions',       href: '/admissions',       icon: UserPlus,        module: 'admission_crm' },
   { name: 'Teacher Tasks',    href: '/tasks',            icon: ListTodo,        module: 'teacher_tasks' },
 
@@ -104,7 +106,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
   if (role === 'super_admin') {
     return [
       { label: 'Overview',          items: allowed.filter((i) => i.module === 'dashboard') },
-      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'branch_management', 'role_management', 'special_classes', 'materials', 'lesson_plan'] as Module[]).includes(i.module)) },
+      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'branch_management', 'role_management', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar'] as Module[]).includes(i.module)) },
       { label: 'Finance & Reports', items: allowed.filter((i) => (['expense_management', 'accountant_portal', 'reports_analytics', 'student_performance_analytics'] as Module[]).includes(i.module)) },
       { label: 'System',            items: allowed.filter((i) => (['notification_center', 'system_settings', 'backup_restore', 'theme_settings'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);
@@ -114,7 +116,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
     return [
       { label: 'Overview',  items: allowed.filter((i) => i.module === 'dashboard') },
       { label: 'People',    items: allowed.filter((i) => (['student_management', 'teacher_management', 'parent_management', 'class_allocation'] as Module[]).includes(i.module)) },
-      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes', 'materials', 'lesson_plan'] as Module[]).includes(i.module)) },
+      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar'] as Module[]).includes(i.module)) },
       { label: 'Finance',   items: allowed.filter((i) => (['fee_management', 'expense_management', 'inventory'] as Module[]).includes(i.module)) },
       { label: 'More',      items: allowed.filter((i) => (['event_management', 'notification_center', 'reports_analytics'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);

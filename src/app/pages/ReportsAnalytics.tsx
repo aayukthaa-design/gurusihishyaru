@@ -307,6 +307,7 @@ export function ReportsAnalytics() {
     const byMonth = new Map<string, { present: number; total: number }>();
     attendanceRecords.forEach((r: any) => {
       if (!r.date) return;
+      if (r.status === 'leave') return; // approved leave doesn't count against attendance %
       const key = r.date.slice(0, 7);
       const bucket = byMonth.get(key) || { present: 0, total: 0 };
       bucket.total += 1;

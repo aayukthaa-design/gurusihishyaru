@@ -29,6 +29,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'special_classes',
       'materials',
       'lesson_plan',
+      'holiday_calendar',
     ],
     permissions: [
       'create',
@@ -66,6 +67,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'special_classes',
       'materials',               // oversight of all teachers' uploaded materials
       'lesson_plan',              // oversight of all teachers' lesson plans
+      'holiday_calendar',
     ],
     permissions: ['create', 'read', 'update', 'delete', 'export'],
   },
@@ -161,6 +163,7 @@ export const MODULE_ROUTES: Record<Module, string[]> = {
   school_exam_schedules: ['/school-exam-schedules'],
   materials:           ['/materials'],
   lesson_plan:         ['/lesson-plan'],
+  holiday_calendar:    ['/holidays'],
 };
 
 // ─── RBAC helpers ─────────────────────────────────────────────────────────────

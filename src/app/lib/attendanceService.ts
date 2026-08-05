@@ -7,7 +7,7 @@ export interface AttendanceRecord {
   className: string;
   date: string;
   studentId: string;
-  status: 'present' | 'absent';
+  status: 'present' | 'absent' | 'leave';
   markedBy?: string;
   createdAt?: string;
 }
@@ -71,7 +71,7 @@ export async function fetchAttendance(className?: string, date?: string): Promis
 export async function saveAttendanceAPI(
   className: string,
   date: string,
-  attendanceRecords: Record<string, 'present' | 'absent'>,
+  attendanceRecords: Record<string, 'present' | 'absent' | 'leave'>,
   markedBy?: string
 ): Promise<boolean> {
   try {

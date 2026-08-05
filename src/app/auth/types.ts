@@ -50,7 +50,8 @@ export type Module =
   | 'special_classes'
   | 'school_exam_schedules'
   | 'materials'
-  | 'lesson_plan';
+  | 'lesson_plan'
+  | 'holiday_calendar';
 
 // ─── User Types ───────────────────────────────────────────────────────────────
 

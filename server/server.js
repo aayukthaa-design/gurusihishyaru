@@ -589,6 +589,36 @@ async function initDb() {
     );
   `);
 
+  // branchId NULL = applies to every branch (e.g. a national holiday); set =
+  // applies only to that branch.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS holidays (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      title TEXT NOT NULL,
+      branchId TEXT,
+      createdBy TEXT,
+      createdAt TEXT
+    );
+  `);
+
+  // A date-range leave for one student — distinct from a daily attendance
+  // mark: set once, it should keep applying every day it covers without the
+  // teacher having to remember to re-mark it.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS student_leaves (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      studentId TEXT NOT NULL,
+      studentName TEXT,
+      startDate TEXT NOT NULL,
+      endDate TEXT NOT NULL,
+      reason TEXT,
+      branchId TEXT,
+      createdBy TEXT,
+      createdAt TEXT
+    );
+  `);
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS sms_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3903,6 +3933,120 @@ async function main() {
       }
 
       res.json({ success: true, results });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Holiday Calendar ---
+  app.get('/api/holidays', async (req, res) => {
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const conditions = [];
+      const params = [];
+      // A branch-scoped viewer sees their branch's holidays plus every
+      // institute-wide one (branchId IS NULL); super_admin with no branch
+      // filter sees everything.
+      if (branchId) {
+        conditions.push('(branchId = ? OR branchId IS NULL)');
+        params.push(branchId);
+      }
+      if (req.query.from) { conditions.push('date >= ?'); params.push(req.query.from); }
+      if (req.query.to) { conditions.push('date <= ?'); params.push(req.query.to); }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await db.all(`SELECT * FROM holidays ${where} ORDER BY date ASC`, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/holidays', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { date, title } = req.body || {};
+      if (!date || !title) return res.status(400).json({ error: 'date and title are required' });
+      // Only super_admin may declare an institute-wide (branchId NULL) holiday;
+      // an admin's holiday is always pinned to their own branch.
+      const branchId = req.user.roles.includes('super_admin')
+        ? (req.body.branchId || null)
+        : (req.user.branchId || null);
+      const now = new Date().toISOString();
+      const result = await db.run(
+        `INSERT INTO holidays (date, title, branchId, createdBy, createdAt) VALUES (?, ?, ?, ?, ?)`,
+        date, title, branchId, req.user.name || '', now
+      );
+      const row = await db.get('SELECT * FROM holidays WHERE id = ?', result.lastID);
+      res.status(201).json(row);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.delete('/api/holidays/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM holidays WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'not found' });
+      if (!req.user.roles.includes('super_admin') && existing.branchId !== (req.user.branchId || null)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      await db.run('DELETE FROM holidays WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Student Leaves ---
+  app.get('/api/student-leaves', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const conditions = [];
+      const params = [];
+      if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      if (req.query.studentId) { conditions.push('studentId = ?'); params.push(req.query.studentId); }
+      // Leaves active "on" a given date: the date falls within [startDate, endDate].
+      if (req.query.date) { conditions.push('startDate <= ? AND endDate >= ?'); params.push(req.query.date, req.query.date); }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await db.all(`SELECT * FROM student_leaves ${where} ORDER BY startDate DESC`, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/student-leaves', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { studentId, studentName, startDate, endDate, reason } = req.body || {};
+      if (!studentId || !startDate || !endDate) return res.status(400).json({ error: 'studentId, startDate and endDate are required' });
+      if (startDate > endDate) return res.status(400).json({ error: 'startDate cannot be after endDate' });
+      const branchId = resolveBranchId(req, req.body.branchId) || req.user.branchId || null;
+      const now = new Date().toISOString();
+      const result = await db.run(
+        `INSERT INTO student_leaves (studentId, studentName, startDate, endDate, reason, branchId, createdBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        studentId, studentName || '', startDate, endDate, reason || '', branchId, req.user.name || '', now
+      );
+      const row = await db.get('SELECT * FROM student_leaves WHERE id = ?', result.lastID);
+      res.status(201).json(row);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.delete('/api/student-leaves/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      await db.run('DELETE FROM student_leaves WHERE id = ?', req.params.id);
+      res.json({ success: true });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
