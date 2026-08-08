@@ -8,7 +8,7 @@ import { Dashboard } from './pages/Dashboard';
 import { StudentManagement } from './pages/StudentManagement';
 import { TeacherManagement } from './pages/TeacherManagement';
 import { ParentManagement } from './pages/ParentManagement';
-import { ClassAllocation } from './pages/ClassAllocation';
+import { Batches } from './pages/Batches';
 import { FeeManagement } from './pages/FeeManagement';
 import { Attendance } from './pages/Attendance';
 import { TeacherAttendance } from './pages/TeacherAttendance';
@@ -123,10 +123,10 @@ export const router = createBrowserRouter([
         ),
       },
       {
-        path: 'allocations',
+        path: 'batches',
         element: (
           <Protected module="class_allocation">
-            <ClassAllocation />
+            <Batches />
           </Protected>
         ),
       },

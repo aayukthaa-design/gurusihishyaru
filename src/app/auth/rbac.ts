@@ -52,7 +52,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'student_management',     // manage student records
       'teacher_management',     // manage teacher profiles & assignments
       'parent_management',      // manage parent records
-      'class_allocation',       // assign teachers to classes/subjects/batches
+      'class_allocation',       // create/edit batches, assign teachers, manage batch students
       'fee_management',         // collect and track fees
       'attendance',             // daily attendance
       'exam_marks',             // exams and results
@@ -133,7 +133,7 @@ export const MODULE_ROUTES: Record<Module, string[]> = {
   student_management:  ['/students'],
   teacher_management:  ['/teachers'],
   parent_management:   ['/parents'],
-  class_allocation:    ['/allocations'],
+  class_allocation:    ['/batches'],
   fee_management:      ['/fees'],
   attendance:          ['/attendance', '/teacher-attendance'],
   exam_marks:          ['/exams'],

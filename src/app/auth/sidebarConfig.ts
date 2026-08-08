@@ -26,6 +26,7 @@ import {
   Library,
   NotebookPen,
   CalendarOff,
+  TrendingUp,
   type LucideIcon,
 } from 'lucide-react';
 import type { Role, Module } from './types';
@@ -53,13 +54,14 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
   { name: 'Students',         href: '/students',         icon: Users,           module: 'student_management' },
   { name: 'Teachers',         href: '/teachers',         icon: BookOpen,        module: 'teacher_management' },
   { name: 'Parents',          href: '/parents',          icon: UserCheck,       module: 'parent_management' },
-  { name: 'Class Allocation', href: '/allocations',      icon: Link2,           module: 'class_allocation' },
+  { name: 'Batches',          href: '/batches',          icon: Link2,           module: 'class_allocation' },
 
   // Admin — Academic
   { name: 'Attendance',       href: '/attendance',       icon: ClipboardCheck,  module: 'attendance' },
   { name: 'Teacher Attendance', href: '/teacher-attendance', icon: Users, module: 'attendance' },
   { name: 'Exams',            href: '/exams',            icon: GraduationCap,   module: 'exam_marks' },
   { name: 'Homework',         href: '/homework',         icon: ClipboardList,  module: 'homework' },
+  { name: 'Student Progress', href: '/progress',         icon: TrendingUp,     module: 'student_progress' },
   { name: 'Study Materials',  href: '/materials',        icon: Library,         module: 'materials' },
   { name: 'Lesson Plans',     href: '/lesson-plan',      icon: NotebookPen,     module: 'lesson_plan' },
   { name: 'Timetable',        href: '/timetable',        icon: Calendar,        module: 'timetable' },

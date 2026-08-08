@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { useBranches, getBranchName } from '../lib/branchService';
-import { useTeacherProfiles, type Teacher } from './TeacherManagement';
+import { useTeachers } from '../lib/teacherService';
 import {
   fetchTeacherAttendance,
   fetchSalaryRecords,
@@ -31,7 +31,7 @@ const statusOptions: Array<{ value: TeacherAttendanceStatus | 'all'; label: stri
 export function TeacherAttendance() {
   const { user } = useAuth();
   const branches = useBranches();
-  const teachers = useTeacherProfiles();
+  const teachers = useTeachers();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const isReadOnly = user?.role === 'accountant' || user?.role === 'teacher';
 
@@ -54,7 +54,11 @@ export function TeacherAttendance() {
 
   const allowedTeachers = useMemo(() => {
     return teachers.filter((teacher) => {
-      const branchMatches = user?.role === 'admin' ? teacher.branchId === user.branchId : true;
+      // Defense-in-depth against the shared teacher cache momentarily holding
+      // another branch's data (e.g. right after a role switch in the same
+      // tab) — every non-super_admin role is pinned to its own branch here,
+      // not just 'admin'.
+      const branchMatches = user?.role === 'super_admin' ? true : teacher.branchId === user?.branchId;
       const branchFilterMatches = !branchFilter || teacher.branchId === branchFilter;
       return branchMatches && branchFilterMatches;
     });

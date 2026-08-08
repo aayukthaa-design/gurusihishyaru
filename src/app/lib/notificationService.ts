@@ -27,12 +27,18 @@ export interface AppNotification {
   /** Specific student IDs for parent-related notifications */
   studentIds?: string[];
   sender?: string;
+  senderId?: string | null;
+  senderRole?: string | null;
+  /** Literal composer audience key (e.g. "branch_teachers") — set only for composer-driven sends. */
+  audience?: string | null;
   notificationType?: string;
   recipient?: string;
   recipientRole?: string;
   branchId?: string;
   status: NotificationStatus;
   read: boolean;
+  /** Only present on items fetched via the Sent mailbox. */
+  totalRecipients?: number;
   /** Whether the CURRENT user has read this — per-recipient, unlike the shared status/read columns which reflect only the most recent reader across everyone the notification was sent to. */
   isReadByMe?: boolean;
   /** How many distinct recipients have read this so far. */
@@ -322,6 +328,86 @@ export function addNotification(
   };
   applyNotificationUpdate((prev) => [newNotif, ...prev]);
   void pushNotificationToBackend(newNotif);
+}
+
+// ─── Composer (role-aware "Send Notification") ─────────────────────────────
+// Distinct from addNotification(), which is used throughout the app for
+// system-generated notifications (batch created, admission recorded, etc.)
+// that already know their own roles/branchId/teacherIds/classNames. A
+// composed send instead names a short `audience` key — the server resolves
+// the actual roles/branchId/teacherIds/classNames from the sender's own
+// verified identity (see resolveComposedAudience in server.js) and rejects
+// any audience the sender's role isn't allowed to use. The client never
+// computes or trusts targeting fields for these.
+
+export type NotificationAudience =
+  | 'all_users' | 'all_admins' | 'all_teachers' | 'all_parents' | 'all_accountants'
+  | 'branch_teachers' | 'branch_parents' | 'branch_accountants' | 'branch_admin'
+  | 'to_super_admin' | 'my_batch_parents' | 'my_assigned_teacher';
+
+export interface ComposeNotificationInput {
+  title: string;
+  message: string;
+  description?: string;
+  priority?: NotificationPriority;
+  notificationType?: string;
+  audience: NotificationAudience;
+  scheduledFor?: string | null;
+}
+
+export async function sendComposedNotification(
+  input: ComposeNotificationInput
+): Promise<{ success: boolean; error?: string; notification?: AppNotification }> {
+  try {
+    const response = await apiFetch(`${API_BASE}/api/notifications`, {
+      method: 'POST',
+      body: {
+        title: input.title,
+        message: input.message,
+        description: input.description || '',
+        type: 'info',
+        priority: input.priority || 'medium',
+        notificationType: input.notificationType || 'General Announcement',
+        audience: input.audience,
+        status: input.scheduledFor ? 'scheduled' : 'unread',
+        scheduledFor: input.scheduledFor || null,
+      },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { success: false, error: (data as { error?: string }).error || 'Failed to send notification.' };
+    }
+    const notification = data as AppNotification;
+    applyNotificationUpdate((prev) => [notification, ...prev]);
+    return { success: true, notification };
+  } catch (err) {
+    console.error('sendComposedNotification error:', err);
+    return { success: false, error: 'Connection to server failed.' };
+  }
+}
+
+// What the current user has sent, regardless of whether they'd also be a
+// recipient — a different query than the inbox (useNotifications), so it's
+// kept in its own store rather than merged into the shared one.
+const sentStore = createStore<AppNotification[]>([]);
+
+export async function refreshSentNotifications(): Promise<AppNotification[]> {
+  try {
+    const response = await apiFetch(`${API_BASE}/api/notifications?mailbox=sent`);
+    if (response.ok) {
+      const data = await response.json();
+      const list = Array.isArray(data) ? data : [];
+      sentStore.setState(list);
+      return list;
+    }
+  } catch (err) {
+    console.error('Failed to fetch sent notifications:', err);
+  }
+  return sentStore.getState();
+}
+
+export function useSentNotifications(): AppNotification[] {
+  return useStoreValue(sentStore);
 }
 
 export function markNotificationAsRead(id: string, actor?: NotificationActor): void {

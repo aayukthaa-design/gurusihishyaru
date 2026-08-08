@@ -13,6 +13,8 @@ export interface StudentRecord {
   branchId: string;
   branchName: string;
   subject?: string;
+  /** Academic board (CBSE/State/ICSE) — see classConstants.ts for the repurposing note. */
+  batch?: string;
   fatherName?: string;
   motherName?: string;
   primaryParentName?: string;

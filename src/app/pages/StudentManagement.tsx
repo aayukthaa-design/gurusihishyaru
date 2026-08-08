@@ -5,10 +5,10 @@ import { useAuth } from '../auth/AuthContext';
 import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { enrollAdmissionByApplicantName } from '../lib/admissionService';
 import { useStudents, addStudentAPI, updateStudentAPI, deleteStudentAPI, refreshStudents } from '../lib/studentService';
-import { GRADES, BOARDS } from '../lib/classConstants';
+import { useClasses, getClassesForBranch } from '../lib/classService';
 import {
   Users, Plus, Search, Eye, Edit2, Trash2, ChevronRight,
-  X, GraduationCap, Phone, MapPin, CalendarDays,
+  X, GraduationCap, Phone, MapPin, CalendarDays, Mail,
 } from 'lucide-react';
 
 interface Student {
@@ -38,9 +38,6 @@ interface Student {
   guardianName?: string;
   guardianMobile?: string;
 }
-
-const CLASSES = GRADES;
-const BATCHES = BOARDS;
 
 const EMPTY_FORM: Omit<Student, 'id'> = {
   branchId: '',
@@ -86,6 +83,13 @@ function StudentForm({
   const [saving, setSaving] = useState(false);
   const set = (k: keyof typeof form, v: string) => setForm((p) => ({ ...p, [k]: v }));
 
+  // Batch-based class restructuring: "Class" now selects a batch (from the
+  // classes table) instead of a fixed standard, and "Board" is derived
+  // read-only from that batch's own board rather than chosen independently.
+  useClasses();
+  const batchOptions = getClassesForBranch(form.branchId || defaultBranchId || undefined);
+  const selectedBatch = batchOptions.find((b) => b.className === form.class);
+
   const handleSaveClick = async () => {
     if (saving) return;
     setSaving(true);
@@ -125,18 +129,19 @@ function StudentForm({
           <input type="date" value={form.dob} onChange={(e) => set('dob', e.target.value)} className="field" />
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-foreground">Class <span className="text-destructive">*</span></label>
-          <select value={form.class} onChange={(e) => set('class', e.target.value)} className="field">
-            <option value="">Select class…</option>
-            {CLASSES.map((c) => <option key={c}>{c}</option>)}
+          <label className="mb-1.5 block text-sm font-medium text-foreground">Batch <span className="text-destructive">*</span></label>
+          <select value={form.class} onChange={(e) => {
+            const chosen = batchOptions.find((b) => b.className === e.target.value);
+            setForm((p) => ({ ...p, class: e.target.value, batch: chosen?.board || p.batch }));
+          }} className="field">
+            <option value="">Select batch…</option>
+            {batchOptions.map((b) => <option key={b.id} value={b.className}>{b.className}</option>)}
           </select>
+          {batchOptions.length === 0 && <p className="mt-1 text-xs text-muted-foreground">No batches for this branch yet — create one from Batches first.</p>}
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-foreground">Board <span className="text-destructive">*</span></label>
-          <select value={form.batch} onChange={(e) => set('batch', e.target.value)} className="field">
-            <option value="">Select board…</option>
-            {BATCHES.map((b) => <option key={b}>{b}</option>)}
-          </select>
+          <label className="mb-1.5 block text-sm font-medium text-foreground">Board</label>
+          <input value={selectedBatch?.board || form.batch || ''} readOnly placeholder="Set by the selected batch" className="field bg-muted" />
         </div>
         <div>
           <label className="mb-1.5 block text-sm font-medium text-foreground">Admission Date <span className="text-destructive">*</span></label>
@@ -397,6 +402,8 @@ export function StudentManagement() {
   const [search, setSearch] = useState('');
   const [classFilter, setClassFilter] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
+  useClasses();
+  const classFilterOptions = getClassesForBranch(branchFilter || user?.branchId || undefined);
   const [panel, setPanel] = useState<'none' | 'add' | { type: 'edit' | 'view'; id: string }>('none');
 
   const filtered = useMemo(() => {
@@ -422,7 +429,11 @@ export function StudentManagement() {
       primaryParentMobile: data.primaryParentMobile || data.parentMobile,
       branchId: resolvedBranchId
     };
-    await addStudentAPI(apiPayload);
+    const saved = await addStudentAPI(apiPayload);
+    if (!saved) {
+      alert('Failed to create student. Please check the details and try again.');
+      return;
+    }
     enrollAdmissionByApplicantName(`${data.firstName} ${data.lastName}`);
     setPanel('none');
   };
@@ -434,7 +445,11 @@ export function StudentManagement() {
       primaryParentName: data.primaryParentName || data.parentName,
       primaryParentMobile: data.primaryParentMobile || data.parentMobile
     };
-    await updateStudentAPI(id, apiPayload);
+    const saved = await updateStudentAPI(id, apiPayload);
+    if (!saved) {
+      alert('Failed to update student. Please check the details and try again.');
+      return;
+    }
     enrollAdmissionByApplicantName(`${data.firstName} ${data.lastName}`);
     setPanel('none');
   };
@@ -508,7 +523,7 @@ export function StudentManagement() {
             className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none"
           >
             <option value="">All Classes</option>
-            {CLASSES.map((className) => <option key={className}>{className}</option>)}
+            {classFilterOptions.map((b) => <option key={b.id} value={b.className}>{b.className}</option>)}
           </select>
           {user?.role === 'super_admin' && (
             <select

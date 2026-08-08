@@ -9,6 +9,7 @@ import {
   MapPin,
   User as UserIcon,
   Download,
+  Eye,
   Info,
   Upload
 } from 'lucide-react';
@@ -21,7 +22,7 @@ import { useNotifications, getVisibleNotificationsForUser } from '../lib/notific
 import { refreshHomework } from '../lib/homeworkService';
 import { subscribeMarks, MarkRecord } from '../lib/examMarksService';
 import { subscribeExams, Exam } from '../lib/examService';
-import { useSchoolExamSchedules, refreshSchoolExamSchedules, getAttachmentUrl, updateSchoolExamSchedule } from '../lib/schoolExamScheduleService';
+import { useSchoolExamSchedules, refreshSchoolExamSchedules, getAttachmentUrl, updateSchoolExamSchedule, createSchoolExamSchedule } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { useFeeRecords, refreshFeeRecords } from '../lib/feeService';
@@ -119,6 +120,53 @@ export function ParentPortal() {
     const result = await updateSchoolExamSchedule(id, fd);
     setExamEditSubmitting(false);
     if (result) setEditingExamId(null);
+  };
+
+  // Upload School Exam Schedule — student, batch, and branch are all resolved
+  // server-side from the parent-child link (see POST /api/school-exam-schedules'
+  // isParentUpload branch); nothing here is trusted client-side beyond the
+  // fields the parent is actually meant to fill in.
+  const [showUploadExamForm, setShowUploadExamForm] = useState(false);
+  const [uploadExamForm, setUploadExamForm] = useState<{ examName: string; startDate: string; endDate: string; description: string; attachment: File | null }>({ examName: '', startDate: '', endDate: '', description: '', attachment: null });
+  const [uploadExamSubmitting, setUploadExamSubmitting] = useState(false);
+  const [uploadExamError, setUploadExamError] = useState<string | null>(null);
+
+  const submitUploadExam = async () => {
+    if (!selectedStudent?.id) return;
+    if (!uploadExamForm.examName.trim() || !uploadExamForm.startDate || !uploadExamForm.endDate) {
+      setUploadExamError('Exam title, start date, and end date are required.');
+      return;
+    }
+    if (uploadExamForm.startDate > uploadExamForm.endDate) {
+      setUploadExamError('Start date cannot be later than end date.');
+      return;
+    }
+    if (uploadExamForm.attachment && !/\.(pdf|png|jpg|jpeg)$/i.test(uploadExamForm.attachment.name)) {
+      setUploadExamError('Only PDF, PNG, JPG, and JPEG files are allowed.');
+      return;
+    }
+    if (uploadExamForm.attachment && uploadExamForm.attachment.size > 10 * 1024 * 1024) {
+      setUploadExamError('Attachment size must be 10MB or less.');
+      return;
+    }
+    setUploadExamSubmitting(true);
+    setUploadExamError(null);
+    const fd = new FormData();
+    fd.append('studentId', selectedStudent.id);
+    fd.append('examName', uploadExamForm.examName);
+    fd.append('startDate', uploadExamForm.startDate);
+    fd.append('endDate', uploadExamForm.endDate);
+    fd.append('description', uploadExamForm.description);
+    if (uploadExamForm.attachment) fd.append('attachment', uploadExamForm.attachment);
+    const result = await createSchoolExamSchedule(fd);
+    setUploadExamSubmitting(false);
+    if (result) {
+      setUploadExamForm({ examName: '', startDate: '', endDate: '', description: '', attachment: null });
+      setShowUploadExamForm(false);
+      void refreshSchoolExamSchedules({ studentId: selectedStudent.id });
+    } else {
+      setUploadExamError('Unable to upload the exam schedule right now.');
+    }
   };
   const [specialClasses, setSpecialClasses] = useState<any[]>([]);
 
@@ -363,10 +411,54 @@ export function ParentPortal() {
             </div>
 
             <div className="rounded-[28px] border border-border bg-card p-6 shadow-sm">
-              <div>
-                <p className="text-base font-semibold text-foreground">School Examination Schedule</p>
-                <p className="mt-1 text-sm text-muted-foreground">You can update the timetable file and exam dates if the school revises them.</p>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-base font-semibold text-foreground">School Examination Schedule</p>
+                  <p className="mt-1 text-sm text-muted-foreground">You can update the timetable file and exam dates if the school revises them.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setShowUploadExamForm((v) => !v); setUploadExamError(null); }}
+                  className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+                >
+                  <Upload className="h-4 w-4" /> Upload School Exam Schedule
+                </button>
               </div>
+
+              {showUploadExamForm && (
+                <div className="mt-4 space-y-3 rounded-2xl border border-dashed border-border bg-secondary/20 p-4">
+                  {uploadExamError && <p className="text-sm text-destructive">{uploadExamError}</p>}
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="sm:col-span-2">
+                      <label className="mb-1 block text-xs font-medium text-muted-foreground">Exam Title *</label>
+                      <input value={uploadExamForm.examName} onChange={(event) => setUploadExamForm((prev) => ({ ...prev, examName: event.target.value }))} placeholder="e.g. Half-Yearly Examination" className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-muted-foreground">Start Date *</label>
+                      <input type="date" value={uploadExamForm.startDate} onChange={(event) => setUploadExamForm((prev) => ({ ...prev, startDate: event.target.value }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-muted-foreground">End Date *</label>
+                      <input type="date" value={uploadExamForm.endDate} onChange={(event) => setUploadExamForm((prev) => ({ ...prev, endDate: event.target.value }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="mb-1 block text-xs font-medium text-muted-foreground">Description / Notes (optional)</label>
+                      <textarea value={uploadExamForm.description} onChange={(event) => setUploadExamForm((prev) => ({ ...prev, description: event.target.value }))} rows={2} placeholder="Any extra notes for the teacher and admin" className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                    </div>
+                  </div>
+                  <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-border bg-secondary/30 px-3 py-2.5 text-sm text-muted-foreground">
+                    <Upload className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{uploadExamForm.attachment ? uploadExamForm.attachment.name : 'Choose PDF / PNG / JPG / JPEG file'}</span>
+                    <input type="file" accept=".pdf,.png,.jpg,.jpeg" className="hidden" onChange={(event) => setUploadExamForm((prev) => ({ ...prev, attachment: event.target.files?.[0] ?? null }))} />
+                  </label>
+                  <div className="flex gap-2">
+                    <button type="button" disabled={uploadExamSubmitting} onClick={() => void submitUploadExam()} className="rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60">
+                      {uploadExamSubmitting ? 'Uploading...' : 'Upload Schedule'}
+                    </button>
+                    <button type="button" onClick={() => { setShowUploadExamForm(false); setUploadExamError(null); }} className="rounded-xl border border-border px-4 py-2 text-sm text-foreground hover:bg-secondary">Cancel</button>
+                  </div>
+                </div>
+              )}
 
               <div className="mt-5 space-y-4">
                 {parentSchoolExams.length === 0 ? (
@@ -408,9 +500,14 @@ export function ParentPortal() {
                         <div><span className="font-medium text-foreground">Start:</span> {exam.startDate}</div>
                         <div><span className="font-medium text-foreground">End:</span> {exam.endDate}</div>
                         {exam.attachmentPath && (
-                          <a href={getAttachmentUrl(exam.attachmentPath)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-primary hover:underline">
-                            <Download className="h-4 w-4" /> View / Download Timetable
-                          </a>
+                          <div className="flex flex-wrap items-center gap-3">
+                            <a href={getAttachmentUrl(exam.attachmentPath)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-primary hover:underline">
+                              <Eye className="h-4 w-4" /> Preview
+                            </a>
+                            <a href={getAttachmentUrl(exam.attachmentPath, exam.attachmentName || 'timetable')} download={exam.attachmentName || 'timetable'} className="inline-flex items-center gap-2 text-sm font-semibold text-primary hover:underline">
+                              <Download className="h-4 w-4" /> Download
+                            </a>
+                          </div>
                         )}
                         <button type="button" onClick={() => startEditExam(exam)} className="inline-flex w-fit items-center gap-2 text-sm font-semibold text-primary hover:underline">
                           <Upload className="h-4 w-4" /> Update Timetable
@@ -477,7 +574,7 @@ export function ParentPortal() {
 
                       {c.attachmentPath && (
                         <a
-                          href={getAttachmentUrl(c.attachmentPath)}
+                          href={getAttachmentUrl(c.attachmentPath, c.attachmentPath.split('/').pop() || 'attachment')}
                           download
                           className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-semibold text-foreground transition hover:bg-secondary/40 self-start sm:self-center"
                         >

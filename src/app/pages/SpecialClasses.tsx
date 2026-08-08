@@ -7,7 +7,9 @@ import {
   Calendar, Clock, MapPin, FileText, User, Plus, Edit2,
   Trash2, XCircle, CheckCircle2, Download, AlertCircle, RefreshCw, BarChart2
 } from 'lucide-react';
-import { GRADES, BOARDS, formatTime12h } from '../lib/classConstants';
+import { formatTime12h } from '../lib/classConstants';
+import { useBranches } from '../lib/branchService';
+import { useClasses, getClassesForBranch } from '../lib/classService';
 
 interface SpecialClass {
   id: number;
@@ -54,7 +56,7 @@ export function SpecialClasses() {
   const [students, setStudents] = useState<Student[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<string>('All');
   const [loading, setLoading] = useState(true);
-  const [branches, setBranches] = useState<any[]>([]);
+  const branches = useBranches();
 
   // Modals state
   const [isScheduleOpen, setIsScheduleOpen] = useState(false);
@@ -68,8 +70,10 @@ export function SpecialClasses() {
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState('Mathematics');
   const [branchId, setBranchId] = useState('');
-  const [className, setClassName] = useState('10th');
-  const [batch, setBatch] = useState(BOARDS[0]);
+  const [className, setClassName] = useState('');
+  const [batch, setBatch] = useState('');
+  useClasses();
+  const batchOptions = getClassesForBranch(branchId || user?.branchId || undefined);
   const [date, setDate] = useState('');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
@@ -86,10 +90,6 @@ export function SpecialClasses() {
       const res = await apiFetch(url);
       const data = await res.json();
       setClasses(Array.isArray(data) ? data : []);
-
-      const branchRes = await apiFetch('/api/branches');
-      const branchData = await branchRes.json();
-      setBranches(Array.isArray(branchData) ? branchData : []);
 
       const studRes = await apiFetch('/api/students');
       const studData = await studRes.json();
@@ -205,8 +205,8 @@ export function SpecialClasses() {
     setEditId(null);
     setTitle('');
     setSubject('Mathematics');
-    setClassName('10th');
-    setBatch(BOARDS[0]);
+    setClassName('');
+    setBatch('');
     setDate('');
     setStartTime('');
     setEndTime('');
@@ -615,25 +615,24 @@ export function SpecialClasses() {
                 )}
 
                 <div className="space-y-1.5">
-                  <label className="font-semibold text-muted-foreground">Class *</label>
+                  <label className="font-semibold text-muted-foreground">Batch *</label>
                   <select
                     value={className}
-                    onChange={(e) => setClassName(e.target.value)}
+                    onChange={(e) => {
+                      const chosen = batchOptions.find((b) => b.className === e.target.value);
+                      setClassName(e.target.value);
+                      if (chosen?.board) setBatch(chosen.board);
+                    }}
                     className="w-full rounded-xl border border-input bg-input-background px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                   >
-                    {GRADES.map((g) => <option key={g}>{g}</option>)}
+                    <option value="">Select batch…</option>
+                    {batchOptions.map((b) => <option key={b.id} value={b.className}>{b.className}</option>)}
                   </select>
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="font-semibold text-muted-foreground">Board *</label>
-                  <select
-                    value={batch}
-                    onChange={(e) => setBatch(e.target.value)}
-                    className="w-full rounded-xl border border-input bg-input-background px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                  >
-                    {BOARDS.map((b) => <option key={b}>{b}</option>)}
-                  </select>
+                  <label className="font-semibold text-muted-foreground">Board</label>
+                  <input value={batch} readOnly placeholder="Set by the selected batch" className="w-full rounded-xl border border-input bg-muted px-3.5 py-2 text-sm" />
                 </div>
               </div>
 

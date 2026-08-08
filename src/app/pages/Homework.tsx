@@ -25,6 +25,7 @@ import {
 } from '../lib/homeworkService';
 import { apiFetch, getFileUrl } from '../lib/apiClient';
 import { GRADES, BOARDS } from '../lib/classConstants';
+import { getTeacherAllocationsShape, useClasses } from '../lib/classService';
 
 const CLASS_OPTIONS = GRADES;
 const BATCH_OPTIONS = BOARDS;
@@ -89,26 +90,28 @@ export function Homework() {
     }
   }, [user]);
 
+  // Batch-based class restructuring: a teacher's classes/subjects/batches used
+  // to come from GET /api/allocations?teacherId=; now derived from the
+  // `classes` table (batches) via getTeacherAllocationsShape, same shape.
+  // Depending on the reactive `allClassesForAlloc` list (not just user) means
+  // this recomputes live if a batch's teacher assignment changes.
+  const allClassesForAlloc = useClasses();
   useEffect(() => {
     if (user?.role === 'teacher') {
-      apiFetch(`${API_BASE}/api/allocations?teacherId=${user.id}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data && data.classes && data.classes.length > 0) {
-            setTeacherAllocations(data);
-            const defaultClass = data.classes[0];
-            setSelectedClass(defaultClass);
-            
-            const classAlloc = data.allocations[defaultClass];
-            if (classAlloc) {
-              if (classAlloc.subjects?.length > 0) setSubject(classAlloc.subjects[0]);
-              if (classAlloc.batches?.length > 0) setBatch(classAlloc.batches[0]);
-            }
-          }
-        })
-        .catch(err => console.error('Failed to fetch allocations', err));
+      const data = getTeacherAllocationsShape(user.id, user.branchId);
+      if (data && data.classes && data.classes.length > 0) {
+        setTeacherAllocations(data);
+        const defaultClass = data.classes[0];
+        setSelectedClass(defaultClass);
+
+        const classAlloc = data.allocations[defaultClass];
+        if (classAlloc) {
+          if (classAlloc.subjects?.length > 0) setSubject(classAlloc.subjects[0]);
+          if (classAlloc.batches?.length > 0) setBatch(classAlloc.batches[0]);
+        }
+      }
     }
-  }, [user]);
+  }, [user, allClassesForAlloc]);
 
   // Handle class select for teachers to update subjects and batches
   function handleClassChange(className: string) {

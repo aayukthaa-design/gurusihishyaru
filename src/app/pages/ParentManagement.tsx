@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
-import { Users, Plus, Search, Eye, Edit2, ChevronRight, X, Phone, Mail, UserCheck } from 'lucide-react';
+import { Users, Plus, Search, Eye, Edit2, ChevronRight, X, Phone, Mail, UserCheck, MapPin, Briefcase } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 
 interface Parent {
@@ -83,6 +83,45 @@ function ParentForm({ initial, isEdit, onSave, onClose }: {
   );
 }
 
+function ParentProfile({ parent, onClose }: { parent: Parent; onClose: () => void }) {
+  return (
+    <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="mb-5 flex items-start justify-between">
+        <div className="flex items-center gap-4">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-amber-100 dark:bg-amber-900/40 text-xl font-bold text-amber-700 dark:text-amber-400">
+            {parent.firstName.charAt(0)}{parent.lastName.charAt(0)}
+          </div>
+          <div>
+            <h2 className="text-lg font-bold text-foreground">{parent.firstName} {parent.lastName}</h2>
+            <p className="text-sm text-muted-foreground">{parent.status}</p>
+          </div>
+        </div>
+        <button onClick={onClose} className="rounded-lg p-1.5 text-muted-foreground hover:bg-secondary">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {[
+          { icon: Phone, label: 'Mobile', value: parent.mobile || '—' },
+          { icon: Mail, label: 'Email', value: parent.email || '—' },
+          { icon: Briefcase, label: 'Occupation', value: parent.occupation || '—' },
+          { icon: UserCheck, label: 'Linked Students', value: parent.linkedStudents || '—' },
+          { icon: MapPin, label: 'Address', value: parent.address || '—' },
+        ].map(({ icon: Icon, label, value }) => (
+          <div key={label} className="rounded-xl border border-border bg-secondary/50 p-4">
+            <div className="mb-1 flex items-center gap-2">
+              <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+              <p className="text-xs text-muted-foreground">{label}</p>
+            </div>
+            <p className="text-sm font-semibold text-foreground">{value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ParentManagement() {
   const { user } = useAuth();
   const branches = useBranches();
@@ -153,6 +192,7 @@ export function ParentManagement() {
   };
 
   const editParent = panel !== 'none' && typeof panel === 'object' && panel.type === 'edit' ? parents.find((p) => p.id === panel.id) : null;
+  const viewParent = panel !== 'none' && typeof panel === 'object' && panel.type === 'view' ? parents.find((p) => p.id === panel.id) : null;
 
   return (
     <div className="flex-1 bg-background">
@@ -179,6 +219,7 @@ export function ParentManagement() {
         )}
         {panel === 'add'  && <ParentForm initial={EMPTY} isEdit={false} onSave={handleAdd} onClose={() => setPanel('none')} />}
         {editParent       && <ParentForm initial={{ ...editParent }} isEdit onSave={(d) => handleEdit(editParent.id, d)} onClose={() => setPanel('none')} />}
+        {viewParent       && <ParentProfile parent={viewParent} onClose={() => setPanel('none')} />}
 
         <div className="flex flex-wrap gap-3">
           <div className="relative flex-1 min-w-[180px]">

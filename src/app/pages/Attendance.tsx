@@ -7,11 +7,8 @@ import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceServ
 import { saveAttendanceAPI } from '../lib/attendanceService';
 import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, CalendarOff, PlaneTakeoff, Trash2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
-import { GRADES, BOARDS } from '../lib/classConstants';
 import { useHolidays, refreshHolidays, isHoliday, useStudentLeaves, refreshStudentLeaves, createStudentLeave, deleteStudentLeave, isOnLeave } from '../lib/holidayService';
-
-
-const CLASSES = GRADES;
+import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
 
 const TODAY = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const TODAY_ISO = new Date().toISOString().split('T')[0];
@@ -20,9 +17,17 @@ export function Attendance() {
   const { user } = useAuth();
   const branches = useBranches();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
+  const isTeacherOnly = user?.role === 'teacher';
   const [selectedClass, setSelectedClass] = useState('');
   const [selectedBoard, setSelectedBoard] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
+
+  // Attendance is batch-based now: pick a batch (its board comes along with
+  // it) instead of a fixed standard + a separately-chosen board.
+  useClasses();
+  const batchOptions = isTeacherOnly
+    ? getClassesForTeacher(user?.id, user?.branchId)
+    : getClassesForBranch(branchFilter || user?.branchId);
   const [attendance, setAttendance] = useState<Record<string, 'present' | 'absent' | 'leave'>>({});
   const [saved, setSaved] = useState(false);
   const [students, setStudents] = useState<any[]>([]);
@@ -75,12 +80,12 @@ export function Attendance() {
 
   // Fetch recent attendance from the backend and aggregate present/total per class+date
   const loadRecentAttendance = async () => {
-    const records = await fetchAttendanceRecords();
-    const scoped = isAdminOrSuper && branchFilter
-      ? records.filter((r: any) => CLASSES.includes(r.className))
-      : records;
+    // Server-side branch scoping (via the classes join added for batch-based
+    // attendance) replaces the old client-side "is this a known standard"
+    // filter, which didn't actually scope by branch at all.
+    const records = await fetchAttendanceRecords(undefined, undefined, isAdminOrSuper ? (branchFilter || undefined) : user?.branchId);
     const groups = new Map<string, { class: string; date: string; present: number; total: number; sortKey: string }>();
-    for (const r of scoped) {
+    for (const r of records) {
       if (r.status === 'leave') continue; // approved leave doesn't count against attendance %
       const key = `${r.className}__${r.date}`;
       const g = groups.get(key) || { class: r.className, date: r.date, present: 0, total: 0, sortKey: r.date };
@@ -99,7 +104,7 @@ export function Attendance() {
 
   useEffect(() => {
     loadRecentAttendance();
-  }, []);
+  }, [branchFilter]);
 
   // Fetch students for selected class, board and branch
   useEffect(() => {
@@ -373,12 +378,12 @@ export function Attendance() {
           </div>
         )}
 
-        {/* ── Step 1: Select Class ── */}
+        {/* ── Step 1: Select Batch ── */}
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
           {user?.role === 'super_admin' && (
             <div className="mb-4">
               <label className="mb-1.5 block text-sm font-medium text-foreground">Branch</label>
-              <select value={branchFilter} onChange={(event) => { setBranchFilter(event.target.value); setSelectedClass(''); setAttendance({}); setSaved(false); }} className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none">
+              <select value={branchFilter} onChange={(event) => { setBranchFilter(event.target.value); setSelectedClass(''); setSelectedBoard(''); setAttendance({}); setSaved(false); }} className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none">
                 <option value="">All Branches</option>
                 {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
               </select>
@@ -386,56 +391,38 @@ export function Attendance() {
           )}
           <h2 className="mb-4 text-base font-semibold text-foreground">
             <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">1</span>
-            Select Class
+            Select Batch
           </h2>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-            {CLASSES.map((cls) => (
-              <button
-                key={cls}
-                onClick={() => { setSelectedClass(cls); setSelectedBoard(''); setAttendance({}); setSaved(false); }}
-                className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${
-                  selectedClass === cls
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : 'border-border bg-secondary text-foreground hover:border-primary/40'
-                }`}
-              >
-                {cls}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* ── Step 2: Select Board ── */}
-        {selectedClass && (
-          <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
-            <h2 className="mb-4 text-base font-semibold text-foreground">
-              <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-              Select Board — {selectedClass}
-            </h2>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {BOARDS.map((board) => (
+          {batchOptions.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {isTeacherOnly ? 'You have no assigned batches yet.' : 'No batches exist for this branch yet — create one from Batches first.'}
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {batchOptions.map((b) => (
                 <button
-                  key={board}
-                  onClick={() => { setSelectedBoard(board); setAttendance({}); setSaved(false); }}
-                  className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-all ${
-                    selectedBoard === board
+                  key={b.id}
+                  onClick={() => { setSelectedClass(b.className); setSelectedBoard(b.board || ''); setAttendance({}); setSaved(false); }}
+                  className={`rounded-xl border px-3 py-2.5 text-left text-sm font-medium transition-all ${
+                    selectedClass === b.className
                       ? 'border-primary bg-primary text-primary-foreground'
                       : 'border-border bg-secondary text-foreground hover:border-primary/40'
                   }`}
                 >
-                  {board}
+                  <span className="block">{b.className}</span>
+                  {b.board && <span className="block text-xs opacity-80">{b.board}</span>}
                 </button>
               ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* ── Step 3: Mark Attendance ── */}
+        {/* ── Step 2: Mark Attendance ── */}
         {selectedClass && selectedBoard && (
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold text-foreground">
-                <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">3</span>
+                <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
                 Mark Attendance — {selectedClass} ({selectedBoard})
               </h2>
               <div className="flex gap-2">

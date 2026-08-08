@@ -19,6 +19,8 @@ import { isTokenExpired } from './jwt';
 import { hasModuleAccess, hasPermission, canAccessRoute, getPrimaryRole } from './rbac';
 import { refreshNotifications } from '../lib/notificationService';
 import { refreshStudents } from '../lib/studentService';
+import { refreshTeachers, clearTeachers } from '../lib/teacherService';
+import { refreshBranches } from '../lib/branchService';
 import { apiFetch, setUnauthorizedHandler } from '../lib/apiClient';
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
@@ -90,6 +92,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // that read the student cache synchronously would otherwise stay empty
       // for the entire session — re-fetch now that we have an authenticated user.
       void refreshStudents();
+      // Same reasoning for teachers: the module-level fetch in teacherService
+      // ran pre-login and no-op'd, and — critically — the branch-scoping for
+      // this list is entirely server-side (GET /api/teachers pins a
+      // non-super_admin caller to their own req.user.branchId regardless of
+      // any query param). Re-fetching here, right after the token with this
+      // user's branchId exists, is what makes every page reading the shared
+      // teacher cache (Class Allocation, Timetable, Teacher Attendance,
+      // Batches, Dashboard…) show this user's branch and nothing else.
+      void refreshTeachers();
+      // Same reasoning again for branches: getBranchName()/getBranchById()
+      // read this cache synchronously, so a branch created after this tab's
+      // pre-login module load (e.g. a Super Admin adds a new branch, then
+      // assigns a teacher to it) would resolve to nothing anywhere that
+      // hadn't separately visited Branch Management yet — showing the raw
+      // branchId string instead of its name.
+      void refreshBranches();
     }
   }, [state.user]);
 
@@ -99,6 +117,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(USER_KEY);
     sessionStorage.removeItem(TOKEN_KEY);
     sessionStorage.removeItem(USER_KEY);
+    // teacherStore is a module-level singleton that outlives this one login
+    // session — without clearing it, a different Admin (or Super Admin)
+    // logging in on the same tab would briefly see the previous account's
+    // (possibly other-branch) teacher list until some page happened to
+    // trigger a refetch.
+    clearTeachers();
     dispatch({ type: 'LOGOUT' });
   }, []);
 

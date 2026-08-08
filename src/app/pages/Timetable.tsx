@@ -1,15 +1,25 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { apiFetch } from '../lib/apiClient';
-import { useTeacherProfiles } from './TeacherManagement';
+import { useAuth } from '../auth/AuthContext';
+import { useTeachers } from '../lib/teacherService';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
-import { X } from 'lucide-react';
-import { GRADES, formatTime12h } from '../lib/classConstants';
+import { Plus, X } from 'lucide-react';
+import { formatTime12h } from '../lib/classConstants';
+import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
+import {
+  useTimetable, refreshTimetable, saveTimetableEntry, deleteTimetableEntry,
+  sortByTime, displayTimeRange, type TimetableEntry,
+} from '../lib/timetableService';
+import { addNotification } from '../lib/notificationService';
 
-const CLASSES = GRADES;
-const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
-const periods = ['08:00-09:00', '09:00-10:00', '10:00-11:00', '11:30-12:30', '12:30-01:30', '02:00-03:00'];
+// Each batch has its own separate timetable now: `className` on a timetable
+// entry is the batch's name (classes.className), and entries are scoped to
+// exactly one batch at a time via the selector below. Free start/end times
+// replace the old fixed 6-slot grid so teachers/admins can set any timing.
+
+const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Geography', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];
 
 const colors: { [key: string]: string } = {
@@ -23,113 +33,112 @@ const colors: { [key: string]: string } = {
 };
 const defaultColor = 'bg-secondary/40 text-foreground border-border';
 
-interface TimetableEntry {
-  id: number;
-  className: string;
-  dayOfWeek: string;
-  period: string;
-  subject: string;
-  teacherId: string | null;
-  teacherName: string | null;
-  room: string;
-}
-
-const EMPTY_FORM = { subject: '', teacherId: '', room: '' };
+const EMPTY_FORM = { subject: '', teacherId: '', room: '', startTime: '', endTime: '', notes: '' };
 
 export function Timetable() {
-  const [selectedClass, setSelectedClass] = useState(CLASSES[0]);
-  const [specialClasses, setSpecialClasses] = useState<any[]>([]);
-  const [entries, setEntries] = useState<TimetableEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const teachers = useTeacherProfiles();
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role === 'super_admin';
+  const isTeacherOnly = user?.role === 'teacher';
 
-  const [editSlot, setEditSlot] = useState<{ day: string; period: string; entry: TimetableEntry | null } | null>(null);
-  const [form, setForm] = useState(EMPTY_FORM);
+  useClasses(); // subscribe so the batch selector stays live
+  const batchOptions = isTeacherOnly
+    ? getClassesForTeacher(user?.id, user?.branchId)
+    : getClassesForBranch(user?.branchId);
 
-  const loadTimetable = async () => {
-    setLoading(true);
-    try {
-      const res = await apiFetch(`/api/timetable?className=${encodeURIComponent(selectedClass)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setEntries(Array.isArray(data) ? data : []);
-      }
-    } catch (err) {
-      console.error('Failed to load timetable', err);
-    } finally {
-      setLoading(false);
+  const [selectedClass, setSelectedClass] = useState('');
+  useEffect(() => {
+    if (!selectedClass && batchOptions.length > 0) setSelectedClass(batchOptions[0].className);
+    if (selectedClass && !batchOptions.some((b) => b.className === selectedClass) && batchOptions.length > 0) {
+      setSelectedClass(batchOptions[0].className);
     }
-  };
+  }, [batchOptions, selectedClass]);
+
+  const selectedBatch = batchOptions.find((b) => b.className === selectedClass) || null;
+  // A teacher may only edit timetable entries for a batch they're assigned to
+  // (the backend enforces this too — this just keeps the UI honest).
+  const canEdit = isSuperAdmin || (user?.role === 'admin') || (isTeacherOnly && selectedBatch?.assignedTeacherId === user?.id);
+
+  const [specialClasses, setSpecialClasses] = useState<any[]>([]);
+  const entries = useTimetable();
+  const [loading, setLoading] = useState(true);
+  const teachers = useTeachers();
+
+  const [editSlot, setEditSlot] = useState<{ day: string; entry: TimetableEntry | null } | null>(null);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void loadTimetable();
-  }, [selectedClass]);
+    if (!selectedClass) return;
+    setLoading(true);
+    void refreshTimetable({ className: selectedClass, branchId: selectedBatch?.branchId }).finally(() => setLoading(false));
+  }, [selectedClass, selectedBatch?.branchId]);
 
   useEffect(() => {
-    apiFetch(`/api/special-classes?className=${selectedClass}`)
+    if (!selectedClass) return;
+    apiFetch(`/api/special-classes?className=${encodeURIComponent(selectedClass)}`)
       .then((res) => res.json())
       .then((data) => setSpecialClasses(Array.isArray(data) ? data : []))
       .catch((err) => console.error('Failed to load special classes for timetable', err));
   }, [selectedClass]);
 
-  const getSpecialClassesForDayAndPeriod = (dayName: string, periodString: string) => {
-    const [pStart, pEnd] = periodString.split('-');
+  const entriesByDay = useMemo(() => {
+    const map: Record<string, TimetableEntry[]> = {};
+    for (const day of days) map[day] = sortByTime(entries.filter((e) => e.dayOfWeek === day));
+    return map;
+  }, [entries]);
+
+  const getSpecialClassesForDay = (dayName: string) => {
     return specialClasses.filter((c) => {
       if (c.status === 'Cancelled') return false;
       const dateObj = new Date(c.date);
       const classDayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
-      if (classDayName !== dayName) return false;
-      return c.startTime >= pStart && c.startTime < pEnd;
+      return classDayName === dayName;
     });
   };
 
-  const getEntry = (day: string, period: string) => entries.find((e) => e.dayOfWeek === day && e.period === period) || null;
-
-  const openSlot = (day: string, period: string) => {
-    const entry = getEntry(day, period);
-    setEditSlot({ day, period, entry });
-    setForm(entry ? { subject: entry.subject, teacherId: entry.teacherId || '', room: entry.room || '' } : EMPTY_FORM);
+  const openSlot = (day: string, entry: TimetableEntry | null) => {
+    setEditSlot({ day, entry });
+    setError(null);
+    setForm(entry
+      ? { subject: entry.subject, teacherId: entry.teacherId || '', room: entry.room || '', startTime: entry.startTime || '', endTime: entry.endTime || '', notes: entry.notes || '' }
+      : EMPTY_FORM);
   };
 
   const saveSlot = async () => {
-    if (!editSlot) return;
-    const teacher = teachers.find((t) => t.id === form.teacherId);
-    try {
-      const res = await apiFetch('/api/timetable', {
-        method: 'POST',
-        body: {
-          className: selectedClass,
-          dayOfWeek: editSlot.day,
-          period: editSlot.period,
-          subject: form.subject,
-          teacherId: form.teacherId || undefined,
-          teacherName: teacher ? `${teacher.firstName} ${teacher.lastName}` : undefined,
-          room: form.room,
-        },
-      });
-      if (res.ok) {
-        await loadTimetable();
-        setEditSlot(null);
-      } else {
-        const err = await res.json().catch(() => ({}));
-        alert(err.error || 'Failed to save timetable entry.');
-      }
-    } catch (err) {
-      console.error(err);
-    }
+    if (!editSlot || !selectedClass) return;
+    if (!form.startTime || !form.endTime) { setError('Start time and end time are required.'); return; }
+    // Teachers only ever edit their own batch's timetable (the Teacher select
+    // is hidden for them), so the entry's teacher is implicitly themselves.
+    const effectiveTeacherId = isTeacherOnly ? user?.id : form.teacherId;
+    const teacher = isTeacherOnly ? null : teachers.find((t) => t.id === form.teacherId);
+    const result = await saveTimetableEntry({
+      className: selectedClass,
+      dayOfWeek: editSlot.day,
+      startTime: form.startTime,
+      endTime: form.endTime,
+      subject: form.subject,
+      teacherId: effectiveTeacherId || undefined,
+      teacherName: isTeacherOnly ? (user?.name || undefined) : (teacher ? `${teacher.firstName} ${teacher.lastName}` : undefined),
+      room: form.room,
+      notes: form.notes,
+      branchId: selectedBatch?.branchId,
+    });
+    if (!result.success) { setError(result.error ?? 'Failed to save timetable entry.'); return; }
+    addNotification({
+      title: editSlot.entry ? 'Timetable Edited' : 'Timetable Updated',
+      message: `${selectedClass}'s timetable was updated for ${editSlot.day}.`,
+      type: 'info', roles: ['teacher', 'admin', 'super_admin'], branchId: selectedBatch?.branchId,
+      recipient: 'Teachers', notificationType: 'General Announcement', priority: 'low',
+      recipientRole: 'teacher', classNames: [selectedClass],
+    });
+    setEditSlot(null);
   };
 
   const clearSlot = async () => {
     if (!editSlot?.entry) return;
-    try {
-      const res = await apiFetch(`/api/timetable/${editSlot.entry.id}`, { method: 'DELETE' });
-      if (res.ok) {
-        await loadTimetable();
-        setEditSlot(null);
-      }
-    } catch (err) {
-      console.error(err);
-    }
+    const result = await deleteTimetableEntry(editSlot.entry.id);
+    if (!result.success) { setError(result.error ?? 'Failed to delete timetable entry.'); return; }
+    setEditSlot(null);
   };
 
   return (
@@ -143,94 +152,82 @@ export function Timetable() {
             onChange={(e) => setSelectedClass(e.target.value)}
             className="rounded-lg border border-input bg-input-background px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
           >
-            {CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
+            {batchOptions.length === 0 && <option value="">No batches available</option>}
+            {batchOptions.map((b) => <option key={b.id} value={b.className}>{b.className}{b.board ? ` (${b.board})` : ''}</option>)}
           </select>
-          <p className="text-xs text-muted-foreground">Click any period to add or edit a class.</p>
+          <p className="text-xs text-muted-foreground">
+            {canEdit ? 'Click any entry to add or edit a class period.' : 'You can view this batch\'s timetable, but only its assigned teacher or an admin can edit it.'}
+          </p>
         </div>
 
-        <div className="overflow-x-auto rounded-xl border border-border bg-card">
-          <table className="w-full">
-            <thead className="border-b border-border bg-muted">
-              <tr>
-                <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">Time</th>
-                {days.map((day) => (
-                  <th key={day} className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
-                    {day}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {periods.map((period) => (
-                <tr key={period} className="border-b border-border last:border-b-0">
-                  <td className="px-4 py-4 text-sm font-medium text-card-foreground">{period}</td>
-                  {days.map((day) => {
-                    const entry = getEntry(day, period);
-                    return (
-                      <td key={day} className="px-4 py-4 space-y-2">
-                        <button
-                          onClick={() => openSlot(day, period)}
-                          className={`w-full rounded-lg border-l-4 p-3 text-left transition-opacity hover:opacity-80 ${
-                            entry?.subject ? (colors[entry.subject] || defaultColor) : 'border-dashed border-border text-muted-foreground'
-                          }`}
-                        >
-                          <p className="text-sm font-medium">{entry?.subject || '+ Add'}</p>
-                          {entry?.teacherName && <p className="text-[10px] opacity-80">{entry.teacherName}{entry.room ? ` · ${entry.room}` : ''}</p>}
-                        </button>
+        {batchOptions.length === 0 && (
+          <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+            {isTeacherOnly ? 'You have no assigned batches yet.' : 'No batches exist for this branch yet — create one from Batches first.'}
+          </div>
+        )}
 
-                        {getSpecialClassesForDayAndPeriod(day, period).map((sc) => (
-                          <div key={sc.id} className="rounded-lg border-l-4 border-purple-500 bg-purple-50 dark:bg-purple-950/20 p-2.5 text-xs font-semibold text-purple-700 dark:text-purple-300">
-                            <span className="inline-flex rounded-full bg-purple-200 dark:bg-purple-900 px-1.5 py-0.5 text-[9px] uppercase font-extrabold mr-1">Special Class</span>
-                            <p className="font-bold line-clamp-1">{sc.title}</p>
-                            <p className="text-[10px] text-muted-foreground">{formatTime12h(sc.startTime)} - {formatTime12h(sc.endTime)} ({sc.venue})</p>
-                          </div>
-                        ))}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-              {loading && (
-                <tr><td colSpan={days.length + 1} className="px-4 py-6 text-center text-sm text-muted-foreground">Loading timetable...</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Weekend or Extra Hours Special Classes List */}
-        <div className="bg-card border border-border rounded-xl p-5 shadow-sm space-y-4">
-          <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
-            <span className="inline-block h-3 w-3 rounded-full bg-purple-500"></span>
-            Special & Weekend Classes Scheduled ({selectedClass})
-          </h3>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {specialClasses.filter(c => c.status !== 'Cancelled').map((c) => (
-              <div key={c.id} className="p-4 rounded-xl border border-purple-100 dark:border-purple-900/60 bg-purple-50/20 dark:bg-purple-950/5 space-y-1.5">
+        {selectedClass && (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {days.map((day) => (
+              <div key={day} className="rounded-xl border border-border bg-card p-4 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="inline-flex rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 px-2 py-0.5 text-xs font-semibold">
-                    {c.subject} · {c.purpose}
-                  </span>
-                  <span className="text-[10px] text-muted-foreground">{c.status}</span>
+                  <h3 className="text-sm font-bold text-foreground">{day}</h3>
+                  {canEdit && (
+                    <button onClick={() => openSlot(day, null)} className="rounded-lg p-1 hover:bg-secondary" title="Add period">
+                      <Plus className="h-4 w-4 text-muted-foreground" />
+                    </button>
+                  )}
                 </div>
-                <h4 className="text-sm font-bold text-foreground line-clamp-1">{c.title}</h4>
-                <p className="text-xs text-muted-foreground">{c.date} · {c.startTime} - {c.endTime} · {c.venue}</p>
-                <p className="text-xs text-muted-foreground font-semibold">Teacher: {c.teacherName}</p>
+
+                {entriesByDay[day].map((entry) => (
+                  <button
+                    key={entry.id}
+                    onClick={() => canEdit && openSlot(day, entry)}
+                    disabled={!canEdit}
+                    className={`w-full rounded-lg border-l-4 p-3 text-left transition-opacity ${canEdit ? 'hover:opacity-80' : 'cursor-default'} ${colors[entry.subject] || defaultColor}`}
+                  >
+                    <p className="text-xs font-semibold opacity-80">{displayTimeRange(entry)}</p>
+                    <p className="text-sm font-medium">{entry.subject || 'Untitled period'}</p>
+                    {entry.teacherName && <p className="text-[10px] opacity-80">{entry.teacherName}{entry.room ? ` · ${entry.room}` : ''}</p>}
+                    {entry.notes && <p className="text-[10px] opacity-70 italic">{entry.notes}</p>}
+                  </button>
+                ))}
+
+                {getSpecialClassesForDay(day).map((sc) => (
+                  <div key={sc.id} className="rounded-lg border-l-4 border-purple-500 bg-purple-50 dark:bg-purple-950/20 p-2.5 text-xs font-semibold text-purple-700 dark:text-purple-300">
+                    <span className="inline-flex rounded-full bg-purple-200 dark:bg-purple-900 px-1.5 py-0.5 text-[9px] uppercase font-extrabold mr-1">Special Class</span>
+                    <p className="font-bold line-clamp-1">{sc.title}</p>
+                    <p className="text-[10px] text-muted-foreground">{formatTime12h(sc.startTime)} - {formatTime12h(sc.endTime)} ({sc.venue})</p>
+                  </div>
+                ))}
+
+                {entriesByDay[day].length === 0 && getSpecialClassesForDay(day).length === 0 && (
+                  <p className="text-xs text-muted-foreground italic py-2">No periods scheduled.</p>
+                )}
               </div>
             ))}
-            {specialClasses.filter(c => c.status !== 'Cancelled').length === 0 && (
-              <p className="text-xs text-muted-foreground italic py-2">No special classes scheduled for this section.</p>
-            )}
+            {loading && <p className="text-sm text-muted-foreground">Loading timetable…</p>}
           </div>
-        </div>
-
+        )}
       </div>
 
       <Dialog open={!!editSlot} onOpenChange={(open) => !open && setEditSlot(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{editSlot?.day} · {editSlot?.period} · {selectedClass}</DialogTitle>
+            <DialogTitle>{editSlot?.day} · {selectedClass}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 mt-2">
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium">Start Time</label>
+                <input type="time" className="w-full border rounded px-2 py-1" value={form.startTime} onChange={(e) => setForm((p) => ({ ...p, startTime: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium">End Time</label>
+                <input type="time" className="w-full border rounded px-2 py-1" value={form.endTime} onChange={(e) => setForm((p) => ({ ...p, endTime: e.target.value }))} />
+              </div>
+            </div>
             <div>
               <label className="block text-sm font-medium">Subject</label>
               <select className="w-full border rounded px-2 py-1" value={form.subject} onChange={(e) => setForm((p) => ({ ...p, subject: e.target.value }))}>
@@ -238,16 +235,22 @@ export function Timetable() {
                 {SUBJECTS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium">Teacher</label>
-              <select className="w-full border rounded px-2 py-1" value={form.teacherId} onChange={(e) => setForm((p) => ({ ...p, teacherId: e.target.value }))}>
-                <option value="">Unassigned</option>
-                {teachers.map((t) => <option key={t.id} value={t.id}>{t.firstName} {t.lastName}</option>)}
-              </select>
-            </div>
+            {!isTeacherOnly && (
+              <div>
+                <label className="block text-sm font-medium">Teacher</label>
+                <select className="w-full border rounded px-2 py-1" value={form.teacherId} onChange={(e) => setForm((p) => ({ ...p, teacherId: e.target.value }))}>
+                  <option value="">Unassigned</option>
+                  {teachers.map((t) => <option key={t.id} value={t.id}>{t.firstName} {t.lastName}</option>)}
+                </select>
+              </div>
+            )}
             <div>
               <label className="block text-sm font-medium">Room</label>
               <input className="w-full border rounded px-2 py-1" value={form.room} onChange={(e) => setForm((p) => ({ ...p, room: e.target.value }))} placeholder="e.g. Room 101" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium">Notes</label>
+              <textarea className="w-full border rounded px-2 py-1" rows={2} value={form.notes} onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Optional notes for this period" />
             </div>
           </div>
           <DialogFooter>

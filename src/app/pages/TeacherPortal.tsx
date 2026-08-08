@@ -6,18 +6,10 @@ import { useAuth } from '../auth/AuthContext';
 import { subscribeExams } from '../lib/examService';
 import { getTeacherExamAttendanceDashboard, subscribeExamAttendance } from '../lib/examAttendanceService';
 import { refreshTasks, getTasksForTeacher, subscribeTasks, TaskRecord } from '../lib/taskService';
-import { ChevronRight, CheckCircle2, Circle } from 'lucide-react';
+import { ChevronRight, CheckCircle2, Circle, Link2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
-
-interface TimetableEntry {
-  id: number;
-  className: string;
-  dayOfWeek: string;
-  period: string;
-  subject: string;
-  teacherId: string;
-  room: string;
-}
+import { useClasses, getClassesForTeacher } from '../lib/classService';
+import { useTimetable, refreshTimetable } from '../lib/timetableService';
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -33,8 +25,22 @@ export function TeacherPortal() {
   const [exams, setExams] = useState<any[]>([]);
   const [attendanceVersion, setAttendanceVersion] = useState(0);
   const [specialClasses, setSpecialClasses] = useState<any[]>([]);
-  const [timetableEntries, setTimetableEntries] = useState<TimetableEntry[]>([]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
+
+  // "My Batches" — reactive via the classes store, so a batch (re)assignment
+  // shows up here immediately without a fresh login (requirement: teacher
+  // portal auto-shows assigned branch/batches on creation/approval/reassignment).
+  useClasses();
+  const myBatches = getClassesForTeacher(user?.id, user?.branchId);
+
+  // Timetable — reactive via the shared store (see timetableService.ts) so
+  // edits made elsewhere (Timetable.tsx, or another admin) show up live here
+  // too, filtered down to just this teacher's own batches.
+  const allTimetableEntries = useTimetable();
+  const timetableEntries = useMemo(
+    () => allTimetableEntries.filter((e) => e.teacherId === user?.id),
+    [allTimetableEntries, user?.id]
+  );
 
   useEffect(() => {
     const unsubscribeExams = subscribeExams((items) => setExams(items));
@@ -47,10 +53,7 @@ export function TeacherPortal() {
         .then(data => setSpecialClasses(Array.isArray(data) ? data : []))
         .catch(e => console.error(e));
 
-      apiFetch(`/api/timetable?branchId=${user.branchId || ''}`)
-        .then(res => res.json())
-        .then(data => setTimetableEntries(Array.isArray(data) ? data.filter((e: TimetableEntry) => e.teacherId === user.id) : []))
-        .catch(e => console.error(e));
+      void refreshTimetable({ branchId: user.branchId });
 
       refreshTasks({ branchId: user.branchId, teacherId: user.id }).then(() => setTasks(getTasksForTeacher(user.id, user.branchId)));
     }
@@ -120,6 +123,27 @@ export function TeacherPortal() {
               <p className="mt-1 text-xs text-purple-700 dark:text-purple-300 font-semibold">{stat.label}</p>
             </div>
           ))}
+        </div>
+
+        {/* My Batches */}
+        <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+          <div className="mb-4 flex items-center gap-2">
+            <Link2 className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-base font-semibold text-foreground">My Batches</h2>
+          </div>
+          {myBatches.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4 text-center">No batches assigned to you yet.</p>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {myBatches.map((b) => (
+                <div key={b.id} className="rounded-xl border border-border bg-secondary/30 p-4">
+                  <p className="text-sm font-semibold text-foreground">{b.className}</p>
+                  <p className="text-xs text-muted-foreground">{[b.board, b.subject].filter(Boolean).join(' · ') || '—'}</p>
+                  {b.classTiming && <p className="mt-1 text-xs text-muted-foreground">{b.classTiming}</p>}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">

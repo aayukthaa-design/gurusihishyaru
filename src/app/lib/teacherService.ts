@@ -4,21 +4,30 @@ import { apiFetch } from './apiClient';
 export interface TeacherRecord {
   id: string;
   employeeId: string;
+  firstName: string;
+  lastName: string;
   fullName: string;
   gender: string;
   dob: string;
   phone: string;
+  mobile: string;
   email: string;
   address: string;
   qualification: string;
   experience: string;
   specialization: string;
+  subjects: string;
+  department: string;
+  salaryType: 'Monthly Fixed' | 'Per Class';
+  salaryAmount: number;
+  monthlySalary: number | null;
+  salaryPerClass: number | null;
   branchId: string;
   dateOfJoining: string;
   username: string;
   password: string;
   employmentType: string;
-  status: 'Active' | 'Inactive';
+  status: 'Active' | 'Inactive' | 'Pending Approval';
   profilePhoto?: string;
   role: 'teacher';
 }
@@ -47,21 +56,33 @@ function mapApiTeacher(row: any): TeacherRecord {
   return {
     id: row.id,
     employeeId: row.id,
+    firstName: row.firstName || '',
+    lastName: row.lastName || '',
     fullName: `${row.firstName || ''} ${row.lastName || ''}`.trim(),
     gender: row.gender || '',
     dob: row.dob || '',
     phone: row.mobile || row.phone || '',
+    mobile: row.mobile || row.phone || '',
     email: row.email || '',
     address: row.address || '',
     qualification: row.qualification || '',
     experience: row.experience || '',
     specialization: row.specialization || row.subjects || '',
+    subjects: row.subjects || row.specialization || '',
+    department: row.department || '',
+    salaryType: row.salaryType === 'Per Class' ? 'Per Class' : 'Monthly Fixed',
+    salaryAmount: Number(row.salaryAmount || 0),
+    monthlySalary: row.monthlySalary ?? null,
+    salaryPerClass: row.salaryPerClass ?? null,
     branchId: row.branchId || '',
     dateOfJoining: row.dateOfJoining || '',
     username: row.email || row.mobile || '',
     password: '',
     employmentType: row.employmentType || '',
-    status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+    // 'Pending Approval' must survive the mapping — it drives the Approve
+    // action in Teacher Management for teachers added by a branch Admin
+    // (server.js: only super_admin-created teachers start Active).
+    status: row.status === 'Inactive' || row.status === 'Pending Approval' ? row.status : 'Active',
     profilePhoto: row.profilePhoto || '',
     role: 'teacher',
   };
@@ -82,6 +103,15 @@ export async function refreshTeachers(branchId?: string): Promise<TeacherRecord[
     console.error('Failed to fetch teachers:', err);
   }
   return teacherStore.getState();
+}
+
+// Wipes the in-memory cache on logout — teacherStore is a module-level
+// singleton, so without this a branch Admin who logs out and a different
+// Admin/Super Admin who logs in on the same tab would briefly still see the
+// previous account's (possibly other-branch) teacher list until some page
+// happens to call refreshTeachers() again.
+export function clearTeachers(): void {
+  teacherStore.setState([]);
 }
 
 // Initial load

@@ -18,6 +18,9 @@ export interface SchoolExamSchedule {
   attachmentSize?: number | null;
   status: 'Upcoming' | 'Ongoing' | 'Completed';
   createdBy?: string;
+  /** Verified id/role of whoever actually created this row (teacher, admin, super_admin, or parent). */
+  createdById?: string | null;
+  createdByRole?: string | null;
   createdAt?: string;
   updatedAt?: string;
   teacherId?: string;
@@ -109,8 +112,8 @@ export async function deleteSchoolExamSchedule(id: string): Promise<boolean> {
   }
 }
 
-export function getAttachmentUrl(path?: string | null) {
-  return getFileUrl(path);
+export function getAttachmentUrl(path?: string | null, downloadName?: string) {
+  return getFileUrl(path, downloadName);
 }
 
 export function formatScheduleDate(value?: string) {

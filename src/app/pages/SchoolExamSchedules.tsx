@@ -381,6 +381,12 @@ export function SchoolExamSchedulesPage() {
                       {schedule.subject && <span>{schedule.subject}</span>}
                     </div>
                     {schedule.description && <p className="text-sm text-muted-foreground">{schedule.description}</p>}
+                    {schedule.createdBy && (
+                      <p className="text-xs text-muted-foreground">
+                        Uploaded by: <span className="font-medium text-foreground">{schedule.createdBy}</span>
+                        {schedule.createdByRole && <span className="ml-1 capitalize">({schedule.createdByRole.replace('_', ' ')})</span>}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {schedule.attachmentPath && (
@@ -388,7 +394,7 @@ export function SchoolExamSchedulesPage() {
                         <a href={getAttachmentUrl(schedule.attachmentPath)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm hover:bg-secondary">
                           <Eye className="h-4 w-4" /> Preview
                         </a>
-                        <a href={getAttachmentUrl(schedule.attachmentPath)} download={schedule.attachmentName || 'timetable'} className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm hover:bg-secondary">
+                        <a href={getAttachmentUrl(schedule.attachmentPath, schedule.attachmentName || 'timetable')} download={schedule.attachmentName || 'timetable'} className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm hover:bg-secondary">
                           <Download className="h-4 w-4" /> Download
                         </a>
                       </>

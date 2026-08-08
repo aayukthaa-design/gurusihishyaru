@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { useTeacherProfiles } from './TeacherManagement';
+import { useTeachers } from '../lib/teacherService';
 import { fetchSalaryRecords, type SalaryRecord } from '../lib/teacherSalaryService';
 import { generateSalarySlipData } from '../lib/reportExport';
 import { formatIndianCurrency } from '../lib/currency';
@@ -10,7 +10,7 @@ import { Download, FileText } from 'lucide-react';
 
 export function TeacherSalarySlips() {
   const { user } = useAuth();
-  const teachers = useTeacherProfiles();
+  const teachers = useTeachers();
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   const [records, setRecords] = useState<SalaryRecord[]>([]);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);

@@ -64,13 +64,22 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
  * and new-tab navigation can't attach the Authorization header apiFetch uses,
  * and /uploads/* requires auth, so without this every download 401s.
  */
-export function getFileUrl(path?: string | null): string {
+/**
+ * @param downloadName When provided, the server responds with
+ * `Content-Disposition: attachment; filename="<downloadName>"` — this is
+ * what actually forces a save-as dialog with the original filename. The
+ * HTML `download` attribute on the resulting <a> is a same-origin-only
+ * fallback; it does nothing if /uploads isn't proxied to the app's own
+ * origin, which this helper can't know from here.
+ */
+export function getFileUrl(path?: string | null, downloadName?: string): string {
   if (!path) return '';
   if (/^https?:\/\//i.test(path)) return path;
-  const url = path.startsWith('/') ? `${API_BASE}${path}` : `${API_BASE}/${path}`;
+  let url = path.startsWith('/') ? `${API_BASE}${path}` : `${API_BASE}/${path}`;
   const token = getToken();
-  if (!token) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+  if (token) url += `${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+  if (downloadName) url += `${url.includes('?') ? '&' : '?'}download=${encodeURIComponent(downloadName)}`;
+  return url;
 }
 
 /** Convenience helper: apiFetch + throws on non-OK + parses JSON. */

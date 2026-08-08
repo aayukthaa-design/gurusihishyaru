@@ -137,6 +137,8 @@ function mapSchoolExamRowToSchedule(row) {
     attachmentSize: row.attachmentSize,
     status: computeSchoolExamStatus(row.startDate, row.endDate),
     createdBy: row.createdBy,
+    createdById: row.createdById,
+    createdByRole: row.createdByRole,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     teacherId: row.teacherId,
@@ -234,6 +236,45 @@ async function upsertSchoolExamReminderNotifications(db, schedule) {
   await insert.finalize();
 }
 
+// The assigned teacher of a student's batch — resolved the same way as the
+// parent notification composer's "my_assigned_teacher" audience (className +
+// branchId join against classes.assignedTeacherId). Used so a parent-uploaded
+// school exam schedule is visible to that teacher via the *same* teacherId
+// column and reminder/visibility logic a teacher's own upload already uses,
+// with no new columns or parallel matching logic required.
+async function resolveAssignedTeacherForClass(db, className, branchId) {
+  if (!className || !branchId) return { teacherId: null, teacherName: null };
+  const row = await db.get(
+    'SELECT u.id AS teacherId, u.name AS teacherName FROM classes c JOIN users u ON u.id = c.assignedTeacherId WHERE c.className = ? AND c.branchId = ? AND c.assignedTeacherId IS NOT NULL LIMIT 1',
+    className, branchId
+  );
+  return { teacherId: row?.teacherId || null, teacherName: row?.teacherName || null };
+}
+
+// Immediate "a school exam schedule was uploaded" notification to the
+// branch's Admin (and, via matchesUserScope's super_admin bypass, to Super
+// Admin too) — distinct from upsertSchoolExamReminderNotifications' -3day/
+// -1day/start-date reminders above, which are scheduled for later and don't
+// tell anyone a new schedule just landed. Fires for every upload (teacher or
+// parent), so the teacher-upload path gains this too rather than diverging
+// from what parent uploads now do.
+async function sendSchoolExamUploadNotification(db, schedule, uploader) {
+  if (!schedule?.id) return;
+  const uploaderLabel = uploader.role === 'parent' ? `Parent ${uploader.name}` : `${uploader.name}`;
+  const title = uploader.role === 'parent'
+    ? `${uploader.name} uploaded a school exam schedule for ${schedule.studentName}`
+    : `New school exam schedule uploaded for ${schedule.studentName}`;
+  const message = `${uploaderLabel} uploaded a school exam schedule. Student: ${schedule.studentName}. Batch: ${schedule.schoolClass || '—'}. Exam: ${schedule.examName}. ${formatReminderDate(schedule.startDate)} to ${formatReminderDate(schedule.endDate)}.`;
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(), title, message, `schoolExamScheduleId:${schedule.id}`, 'info', 'high',
+    JSON.stringify(['admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    uploader.name, uploader.id, uploader.role, 'school_exam_schedule_uploaded', 'Admin', 'admin',
+    schedule.branchId || null, 'unread', 0, new Date().toISOString()
+  );
+}
+
 function matchesUserScope(notification, user) {
   if (!user) return true;
   if (user.role === 'super_admin') return true;
@@ -254,17 +295,31 @@ function matchesUserScope(notification, user) {
   if (user.role === 'teacher') {
     const assignedClasses = user.assignedClassIds ?? [];
     if (notification.classNames?.some((className) => assignedClasses.includes(className))) return true;
-    if (roles.includes('teacher')) return true;
+    // Role-broadcast to 'teacher' still needs to respect the notification's own
+    // branch — otherwise a broadcast sent from one branch reaches every teacher
+    // in every branch (mirrors the admin/accountant branch check below).
+    if (roles.includes('teacher') && (!notification.branchId || notification.branchId === user.branchId)) return true;
     return false;
   }
 
   if (user.role === 'parent') {
     if (notification.classNames?.length && (user.linkedStudentIds?.length ?? 0) > 0) return true;
-    if (roles.includes('parent')) return true;
+    if (roles.includes('parent') && (!notification.branchId || notification.branchId === user.branchId)) return true;
     return false;
   }
 
   if (user.role === 'admin' || user.role === 'accountant') {
+    // A notification aimed only at specific teacherIds/userIds/studentIds
+    // (e.g. a parent's message to their child's assigned teacher, or a
+    // teacher's message to their branch admin sent with an empty `roles`)
+    // must stay private to those exact recipients — it must not also leak
+    // into every admin/accountant's inbox just because it happens to carry
+    // the same branchId. Only fall through to "visible to my branch" for
+    // actual role-broadcasts (roles explicitly includes admin/accountant)
+    // or genuinely unscoped notifications (no roles AND no specific target).
+    const isTargetedAtSomeoneElse = roles.length === 0
+      && ((notification.teacherIds?.length ?? 0) > 0 || (notification.userIds?.length ?? 0) > 0 || (notification.studentIds?.length ?? 0) > 0);
+    if (isTargetedAtSomeoneElse) return false;
     return !notification.branchId || notification.branchId === user.branchId;
   }
 
@@ -285,6 +340,9 @@ function mapRowToNotification(row) {
     userIds: parseJsonList(row.userIds),
     studentIds: parseJsonList(row.studentIds),
     sender: row.sender,
+    senderId: row.senderId,
+    senderRole: row.senderRole,
+    audience: row.audience,
     notificationType: row.notificationType,
     recipient: row.recipient,
     recipientRole: row.recipientRole,
@@ -454,6 +512,17 @@ async function initDb() {
       expiresAt TEXT
     );
   `);
+  // Additive migration: reliable "who actually sent this" identity for the
+  // Notification Center's Sent tab and read-receipt access — the existing
+  // `sender` column is just a display name (not unique, editable by any
+  // caller), so it can't be used to query "notifications I sent".
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN senderId TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN senderRole TEXT;"); } catch (e) {}
+  // The literal composer audience key (e.g. "branch_teachers"), so the Sent
+  // tab can show "Sent to: All Teachers in My Branch" instead of guessing a
+  // label back from the resolved roles/branchId/teacherIds/classNames. Null
+  // for system-generated notifications, which don't go through the composer.
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN audience TEXT;"); } catch (e) {}
 
   const allocationCount = await db.get('SELECT COUNT(1) as c FROM allocations');
   if (allocationCount.c === 0) {
@@ -807,6 +876,12 @@ async function initDb() {
       teacherName TEXT
     );
   `);
+  // Additive migration: who actually created this row and in what role — lets
+  // Admin/Super Admin distinguish a parent's own upload from a teacher's, and
+  // lets a parent-uploaded schedule reliably attribute "uploaded by <parent>"
+  // without trusting the free-text createdBy field alone.
+  try { await db.exec("ALTER TABLE school_exam_schedules ADD COLUMN createdById TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE school_exam_schedules ADD COLUMN createdByRole TEXT;"); } catch (e) {}
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS bonus_attendance (
@@ -992,6 +1067,22 @@ async function initDb() {
       createdAt TEXT
     );
   `);
+
+  // Batch-based class restructuring — additive columns only (existing className/
+  // batchName/etc. rows are untouched; classes.className now doubles as the batch
+  // name for newly-created batches, while historical standards-based rows keep
+  // working unmodified since nothing validates className against a fixed list).
+  try { await db.exec("ALTER TABLE classes ADD COLUMN board TEXT DEFAULT '';"); } catch (e) {}
+  try { await db.exec("ALTER TABLE classes ADD COLUMN description TEXT DEFAULT '';"); } catch (e) {}
+  try { await db.exec("ALTER TABLE classes ADD COLUMN updatedAt TEXT;"); } catch (e) {}
+
+  // Free start/end time + notes for timetable entries — `period` is kept (it's
+  // part of the UNIQUE(className,dayOfWeek,period) index) and is now derived as
+  // "start-end" server-side when start/end times are supplied, so old fixed-slot
+  // rows remain valid and the uniqueness guarantee is unaffected.
+  try { await db.exec("ALTER TABLE timetable_entries ADD COLUMN startTime TEXT DEFAULT '';"); } catch (e) {}
+  try { await db.exec("ALTER TABLE timetable_entries ADD COLUMN endTime TEXT DEFAULT '';"); } catch (e) {}
+  try { await db.exec("ALTER TABLE timetable_entries ADD COLUMN notes TEXT DEFAULT '';"); } catch (e) {}
 
   // Seed the one real branch that predates this table — its id must stay
   // 'branch_main' since it's already hardcoded onto existing users/students.
@@ -1348,6 +1439,40 @@ async function initDb() {
   try { await db.exec("ALTER TABLE parents ADD COLUMN address TEXT;"); } catch (e) {}
   try { await db.exec("ALTER TABLE users ADD COLUMN failedLoginAttempts INTEGER DEFAULT 0;"); } catch (e) {}
   try { await db.exec("ALTER TABLE users ADD COLUMN lockedUntil TEXT;"); } catch (e) {}
+
+  // Dual-role support: the same person can hold separate accounts (e.g. Admin
+  // + Teacher) with different passwords under the same email/mobile, so those
+  // columns can no longer be globally UNIQUE. SQLite can't drop a column
+  // constraint in place, so rebuild the table without it when an older schema
+  // is detected; the narrower "no duplicate (identifier, role)" rule is now
+  // enforced in application code via hasConflictingAccount() below instead.
+  try {
+    const usersSchema = await db.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'");
+    if (usersSchema && /UNIQUE/i.test(usersSchema.sql)) {
+      await db.exec(`
+        CREATE TABLE users_new (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          email TEXT,
+          mobile TEXT,
+          passwordHash TEXT NOT NULL,
+          roles TEXT NOT NULL,
+          branchId TEXT,
+          status TEXT DEFAULT 'Active',
+          mustChangePassword INTEGER DEFAULT 0,
+          createdAt TEXT,
+          updatedAt TEXT,
+          failedLoginAttempts INTEGER DEFAULT 0,
+          lockedUntil TEXT
+        );
+        INSERT INTO users_new (id, name, email, mobile, passwordHash, roles, branchId, status, mustChangePassword, createdAt, updatedAt, failedLoginAttempts, lockedUntil)
+          SELECT id, name, email, mobile, passwordHash, roles, branchId, status, mustChangePassword, createdAt, updatedAt, failedLoginAttempts, lockedUntil FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+      `);
+      console.log('Migrated users table: removed UNIQUE(email)/UNIQUE(mobile) to support dual-role accounts.');
+    }
+  } catch (e) { console.error('users UNIQUE-removal migration failed:', e); }
   // Populated only for recurring monthly fee records (e.g. '2026-07'), so each
   // month stays its own trackable/payable fee_records row instead of one lump sum.
   try { await db.exec("ALTER TABLE fee_records ADD COLUMN month TEXT;"); } catch (e) {}
@@ -1550,7 +1675,20 @@ async function main() {
       req.headers.authorization = `Bearer ${req.query.token}`;
     }
     next();
-  }, authMiddleware, express.static(UPLOAD_DIR));
+  }, authMiddleware, (req, res, next) => {
+    // Content-Disposition set server-side (not left to the HTML `download`
+    // attribute alone) — that attribute is silently ignored by browsers for
+    // cross-origin URLs, and whether /uploads ends up same-origin as the app
+    // depends on deployment-specific proxying this repo doesn't control.
+    // Setting the header here forces a real "Save As" with the original
+    // filename regardless of origin, instead of the file just opening/
+    // previewing in a new tab under its random stored filename.
+    if (typeof req.query.download === 'string' && req.query.download) {
+      const safeName = req.query.download.replace(/[\r\n"]/g, '');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    }
+    next();
+  }, express.static(UPLOAD_DIR));
 
   // ─── Auth helpers ───────────────────────────────────────────────────────────
 
@@ -1646,6 +1784,39 @@ async function main() {
     return authMiddleware(req, res, next);
   });
 
+  // Fail-closed guard against every branch-scoping bug below being an
+  // "if (branchId) { query += ' AND branchId = ?' }" pattern (~50 call sites
+  // built on resolveBranchId): if a scoped staff account's token has no
+  // branchId — a stale token issued before the account had one, a manually
+  // crafted request, or any future account-creation bug that leaves branchId
+  // unset — that `if` silently evaluates false and the query runs with NO
+  // branch filter at all, returning every branch's data instead of none.
+  // Rejecting here, once, before any handler runs, closes that whole class
+  // of leak in one place instead of depending on every handler doing it
+  // right. super_admin is exempt (branchId legitimately null = "all
+  // branches"); parent is exempt (scoped via parent_student, not branchId).
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/auth/') || req.path === '/api/client-errors') return next();
+    const roles = req.user?.roles || [];
+    const isStaffScopedRole = roles.some((r) => ['admin', 'teacher', 'accountant'].includes(r));
+    const isSuperAdmin = roles.includes('super_admin');
+    if (isStaffScopedRole && !isSuperAdmin && !req.user?.branchId) {
+      return res.status(403).json({ error: 'Your account has no branch assigned. Contact your Super Admin to assign one before you can access branch data.' });
+    }
+    next();
+  });
+
+  // Authenticated API responses must never be reused across sessions by a
+  // shared HTTP cache (browser back/forward cache, an intermediary proxy) —
+  // without this, two different users hitting the exact same GET URL
+  // (e.g. /api/teachers with no query string) in the same browser profile
+  // risk one seeing a cached response fetched under the other's token,
+  // independent of anything the branch-scoping logic above gets right.
+  app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store, private');
+    next();
+  });
+
   // Browser-side JS errors and unhandled promise rejections land here so a
   // "the button does nothing" report can be diagnosed from server logs
   // instead of needing the reporter's DevTools console — several bugs this
@@ -1674,6 +1845,18 @@ async function main() {
     return req.user?.branchId || undefined;
   }
 
+  // email/mobile are no longer globally UNIQUE (dual-role accounts share an
+  // identifier with a different password per role) — this enforces the
+  // narrower rule that still applies: no two accounts may share both an
+  // identifier AND a role. excludeId lets an update ignore the row being edited.
+  async function hasConflictingAccount(email, mobile, roles, excludeId) {
+    const rows = await db.all(
+      `SELECT id, roles FROM users WHERE (LOWER(email) = LOWER(?) OR mobile = ?)${excludeId ? ' AND id != ?' : ''}`,
+      ...(excludeId ? [email || '', mobile || '', excludeId] : [email || '', mobile || ''])
+    );
+    return rows.some((row) => parseJsonList(row.roles).some((r) => roles.includes(r)));
+  }
+
   const MAX_FAILED_LOGIN_ATTEMPTS = 5;
   const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 
@@ -1684,40 +1867,58 @@ async function main() {
       if (!identifier || !password) {
         return res.status(400).json({ error: 'Identifier and password are required' });
       }
-      const row = await db.get(
+      // Same email/mobile can belong to more than one account (dual-role
+      // logins, e.g. Admin + Teacher, each with their own password) — fetch
+      // every matching account and let the supplied password pick which one
+      // the user means. Single-account users hit the same path with exactly
+      // one candidate, so behavior for them is unchanged.
+      const candidates = await db.all(
         'SELECT * FROM users WHERE (LOWER(email) = LOWER(?) OR mobile = ?) AND status = ?',
         identifier, identifier, 'Active'
       );
-      if (!row) return res.status(401).json({ error: 'Invalid credentials' });
+      if (candidates.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
       // Per-account lockout — the IP-based authLimiter above stops a single
       // attacker from brute-forcing, but not a distributed attempt against one
       // specific account from many IPs. This closes that gap independently.
-      if (row.lockedUntil && new Date(row.lockedUntil) > new Date()) {
-        const minutesLeft = Math.ceil((new Date(row.lockedUntil) - new Date()) / 60000);
+      const now = new Date();
+      const lockedCandidates = candidates.filter((c) => c.lockedUntil && new Date(c.lockedUntil) > now);
+      const availableCandidates = candidates.filter((c) => !c.lockedUntil || new Date(c.lockedUntil) <= now);
+
+      if (availableCandidates.length === 0) {
+        const soonest = lockedCandidates.reduce((a, b) => (new Date(a.lockedUntil) < new Date(b.lockedUntil) ? a : b));
+        const minutesLeft = Math.ceil((new Date(soonest.lockedUntil) - now) / 60000);
         return res.status(423).json({ error: `Too many failed attempts. Try again in ${minutesLeft} minute(s).` });
       }
 
-      const match = await bcrypt.compare(password, row.passwordHash);
-      if (!match) {
-        const attempts = (row.failedLoginAttempts || 0) + 1;
-        const lockedUntil = attempts >= MAX_FAILED_LOGIN_ATTEMPTS
-          ? new Date(Date.now() + LOCKOUT_DURATION_MS).toISOString()
-          : null;
-        await db.run('UPDATE users SET failedLoginAttempts=?, lockedUntil=? WHERE id=?', attempts, lockedUntil, row.id);
-        if (lockedUntil) {
+      let matched = null;
+      for (const candidate of availableCandidates) {
+        if (await bcrypt.compare(password, candidate.passwordHash)) { matched = candidate; break; }
+      }
+
+      if (!matched) {
+        let justLocked = false;
+        for (const candidate of availableCandidates) {
+          const attempts = (candidate.failedLoginAttempts || 0) + 1;
+          const lockedUntil = attempts >= MAX_FAILED_LOGIN_ATTEMPTS
+            ? new Date(Date.now() + LOCKOUT_DURATION_MS).toISOString()
+            : null;
+          await db.run('UPDATE users SET failedLoginAttempts=?, lockedUntil=? WHERE id=?', attempts, lockedUntil, candidate.id);
+          if (lockedUntil) justLocked = true;
+        }
+        if (justLocked && availableCandidates.length === 1) {
           return res.status(423).json({ error: `Too many failed attempts. Account locked for 15 minutes.` });
         }
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
-      if (row.failedLoginAttempts || row.lockedUntil) {
-        await db.run('UPDATE users SET failedLoginAttempts=0, lockedUntil=NULL WHERE id=?', row.id);
+      if (matched.failedLoginAttempts || matched.lockedUntil) {
+        await db.run('UPDATE users SET failedLoginAttempts=0, lockedUntil=NULL WHERE id=?', matched.id);
       }
 
       const rememberMe = Boolean(req.body?.rememberMe);
-      const token = await signToken(row, rememberMe);
-      res.json({ token, user: mapUserRow(row) });
+      const token = await signToken(matched, rememberMe);
+      res.json({ token, user: mapUserRow(matched) });
     } catch (err) {
       console.error('Login error:', err);
       res.status(500).json({ error: 'Login failed' });
@@ -1970,6 +2171,9 @@ async function main() {
       if (!body.firstName || !mobile) {
         return res.status(400).json({ error: 'First name and phone/mobile are required' });
       }
+      if (await hasConflictingAccount(body.email, mobile, ['teacher'])) {
+        return res.status(409).json({ error: 'A teacher account with this email or mobile already exists' });
+      }
       const name = body.fullName || `${body.firstName} ${body.lastName || ''}`.trim();
       const id = `USR${Date.now()}`;
       const initialPassword = body.password || mobile;
@@ -2208,27 +2412,47 @@ async function main() {
     }
   });
 
+  // A teacher may only write timetable entries for a batch they're assigned to
+  // (classes.assignedTeacherId); admin/super_admin remain unrestricted within
+  // their existing branch scope.
+  async function isTeacherAssignedToClass(teacherId, className) {
+    const row = await db.get('SELECT assignedTeacherId FROM classes WHERE className = ?', className);
+    return Boolean(row && row.assignedTeacherId === teacherId);
+  }
+
   app.post('/api/timetable', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const roles = req.user.roles || [];
+    const isStaffAdmin = roles.some((r) => ['admin', 'super_admin'].includes(r));
+    const isTeacher = roles.includes('teacher');
+    if (!isStaffAdmin && !isTeacher) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
-      if (!body.className || !body.dayOfWeek || !body.period) {
-        return res.status(400).json({ error: 'className, dayOfWeek and period are required' });
+      const startTime = body.startTime || '';
+      const endTime = body.endTime || '';
+      const period = startTime && endTime ? `${startTime}-${endTime}` : body.period;
+      if (!body.className || !body.dayOfWeek || !period) {
+        return res.status(400).json({ error: 'className, dayOfWeek and a time range (period, or startTime+endTime) are required' });
       }
+      if (isTeacher && !isStaffAdmin) {
+        const owns = await isTeacherAssignedToClass(req.user.sub, body.className);
+        if (!owns) return res.status(403).json({ error: 'You are not assigned to this batch.' });
+      }
+      const notes = body.notes || '';
       const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
       const now = new Date().toISOString();
       await db.run(
-        `INSERT INTO timetable_entries (className, dayOfWeek, period, subject, teacherId, teacherName, room, branchId, createdAt, updatedAt)
-         VALUES (?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO timetable_entries (className, dayOfWeek, period, subject, teacherId, teacherName, room, branchId, createdAt, updatedAt, startTime, endTime, notes)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(className, dayOfWeek, period) DO UPDATE SET
            subject=excluded.subject, teacherId=excluded.teacherId, teacherName=excluded.teacherName,
-           room=excluded.room, branchId=excluded.branchId, updatedAt=excluded.updatedAt`,
-        body.className, body.dayOfWeek, body.period, body.subject || '', body.teacherId || null, body.teacherName || null,
-        body.room || '', branchId, now, now
+           room=excluded.room, branchId=excluded.branchId, updatedAt=excluded.updatedAt,
+           startTime=excluded.startTime, endTime=excluded.endTime, notes=excluded.notes`,
+        body.className, body.dayOfWeek, period, body.subject || '', body.teacherId || null, body.teacherName || null,
+        body.room || '', branchId, now, now, startTime, endTime, notes
       );
       const row = await db.get(
         'SELECT * FROM timetable_entries WHERE className = ? AND dayOfWeek = ? AND period = ?',
-        body.className, body.dayOfWeek, body.period
+        body.className, body.dayOfWeek, period
       );
       res.status(201).json(row);
     } catch (err) {
@@ -2238,8 +2462,17 @@ async function main() {
   });
 
   app.delete('/api/timetable/:id', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const roles = req.user.roles || [];
+    const isStaffAdmin = roles.some((r) => ['admin', 'super_admin'].includes(r));
+    const isTeacher = roles.includes('teacher');
+    if (!isStaffAdmin && !isTeacher) return res.status(403).json({ error: 'Forbidden' });
     try {
+      if (isTeacher && !isStaffAdmin) {
+        const entry = await db.get('SELECT className FROM timetable_entries WHERE id = ?', req.params.id);
+        if (!entry) return res.status(404).json({ error: 'Timetable entry not found.' });
+        const owns = await isTeacherAssignedToClass(req.user.sub, entry.className);
+        if (!owns) return res.status(403).json({ error: 'You are not assigned to this batch.' });
+      }
       await db.run('DELETE FROM timetable_entries WHERE id = ?', req.params.id);
       res.json({ success: true });
     } catch (err) {
@@ -2596,7 +2829,24 @@ async function main() {
       }
       const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const rows = await db.all(`SELECT * FROM school_exam_schedules ${whereClause} ORDER BY startDate ASC, endDate ASC`, ...params);
-      res.json(rows.map(mapSchoolExamRowToSchedule));
+      let mapped = rows.map(mapSchoolExamRowToSchedule);
+
+      // Server-side narrowing to match what the client already filters down
+      // to (previously enforced only in SchoolExamSchedulesPage's UI code) —
+      // a raw API call must not be able to read another teacher's batches or
+      // another parent's children just because they share a branch.
+      const roles = req.user.roles || [];
+      if (!roles.some((r) => ['admin', 'super_admin'].includes(r))) {
+        if (roles.includes('teacher')) {
+          mapped = mapped.filter((s) => !s.teacherId || s.teacherId === req.user.sub);
+        } else if (roles.includes('parent')) {
+          const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+          const linkedIds = new Set(linkedRows.map((r) => r.studentId));
+          mapped = mapped.filter((s) => s.studentId && linkedIds.has(s.studentId));
+        }
+      }
+
+      res.json(mapped);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -2604,18 +2854,48 @@ async function main() {
   });
 
   app.post('/api/school-exam-schedules', upload.single('attachment'), async (req, res) => {
-    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const roles = req.user.roles;
+    if (!roles.some((r) => ['teacher', 'admin', 'super_admin', 'parent'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
       const attachment = req.file;
       const now = new Date().toISOString();
+      const isParentUpload = roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r));
+
+      let studentId = body.studentId || '';
+      let studentName = body.studentName || '';
+      let branchId = body.branchId || '';
+      let schoolClass = body.schoolClass || '';
+      let teacherId = body.teacherId || '';
+      let teacherName = body.teacherName || '';
+
+      if (isParentUpload) {
+        // Never trust student/branch/batch/teacher from a parent's request —
+        // resolve every one of them server-side from the verified parent-
+        // child link and the student's own record, the same trust boundary
+        // used throughout this file for branch-scoped writes.
+        const link = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, studentId);
+        if (!link) return res.status(403).json({ error: 'You can only upload a schedule for your own child.' });
+        const student = await db.get('SELECT * FROM students WHERE id = ?', studentId);
+        if (!student) return res.status(404).json({ error: 'Student not found.' });
+        studentName = student.fullName || `${student.firstName || ''} ${student.lastName || ''}`.trim();
+        branchId = student.branchId || '';
+        schoolClass = student.className || '';
+        const resolvedTeacher = await resolveAssignedTeacherForClass(db, schoolClass, branchId);
+        teacherId = resolvedTeacher.teacherId || '';
+        teacherName = resolvedTeacher.teacherName || '';
+      }
+
       const status = computeSchoolExamStatus(body.startDate, body.endDate);
-      const stmt = await db.prepare(`INSERT INTO school_exam_schedules (studentId, studentName, branchId, schoolName, schoolClass, examName, startDate, endDate, subject, description, attachmentPath, attachmentName, attachmentSize, status, createdBy, createdAt, updatedAt, teacherId, teacherName) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-      const result = await stmt.run(body.studentId || '', body.studentName || '', body.branchId || '', body.schoolName || '', body.schoolClass || '', body.examName || '', body.startDate || '', body.endDate || '', body.subject || '', body.description || '', attachment ? `/uploads/${attachment.filename}` : null, attachment ? attachment.originalname : null, attachment ? attachment.size : null, status, body.createdBy || '', now, now, body.teacherId || '', body.teacherName || '');
+      const createdBy = req.user.name || body.createdBy || '';
+      const stmt = await db.prepare(`INSERT INTO school_exam_schedules (studentId, studentName, branchId, schoolName, schoolClass, examName, startDate, endDate, subject, description, attachmentPath, attachmentName, attachmentSize, status, createdBy, createdById, createdByRole, createdAt, updatedAt, teacherId, teacherName) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const result = await stmt.run(studentId, studentName, branchId, body.schoolName || '', schoolClass, body.examName || '', body.startDate || '', body.endDate || '', body.subject || '', body.description || '', attachment ? `/uploads/${attachment.filename}` : null, attachment ? attachment.originalname : null, attachment ? attachment.size : null, status, createdBy, req.user.sub, roles[0] || '', now, now, teacherId, teacherName);
       await stmt.finalize();
       const row = await db.get('SELECT * FROM school_exam_schedules WHERE id = ?', result.lastID);
+      const schedule = mapSchoolExamRowToSchedule(row);
       await upsertSchoolExamReminderNotifications(db, row);
-      res.json(mapSchoolExamRowToSchedule(row));
+      await sendSchoolExamUploadNotification(db, schedule, { id: req.user.sub, name: req.user.name, role: isParentUpload ? 'parent' : (roles[0] || 'teacher') });
+      res.json(schedule);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -2686,6 +2966,7 @@ async function main() {
   // userIds/studentIds, or a broadcast to one or more roles.
   async function resolveRecipientCount(notification) {
     if (notification.userIds?.length) return notification.userIds.length;
+    if (notification.teacherIds?.length) return notification.teacherIds.length;
 
     if (notification.studentIds?.length) {
       const placeholders = notification.studentIds.map(() => '?').join(',');
@@ -2753,8 +3034,107 @@ async function main() {
     return matchesUserScope(notif, deriveNotificationUser(req));
   }
 
+  // ─── Compose audience resolution (server-authoritative) ───────────────────
+  // The Notification Center composer sends a short `audience` key instead of
+  // raw roles/branchId/teacherIds/classNames — those targeting fields are
+  // always computed HERE from the verified sender's own role/branch/id, the
+  // same trust boundary resolveBranchId() enforces elsewhere in this file.
+  // A client can request an audience it isn't allowed to use, but it can
+  // never make the server target roles/branches/people it didn't resolve
+  // itself. Only applies to payload.audience-driven sends from the composer;
+  // internal system notifications (batch created, admission, etc.) keep
+  // passing roles/branchId/teacherIds/classNames directly and are untouched.
+  const AUDIENCE_ALLOWED_ROLES = {
+    all_users: ['super_admin'],
+    all_admins: ['super_admin'],
+    all_teachers: ['super_admin'],
+    all_parents: ['super_admin'],
+    all_accountants: ['super_admin'],
+    branch_teachers: ['admin'],
+    branch_parents: ['admin'],
+    branch_accountants: ['admin'],
+    branch_admin: ['teacher', 'parent', 'accountant'],
+    to_super_admin: ['admin', 'teacher', 'parent', 'accountant'],
+    my_batch_parents: ['teacher'],
+    my_assigned_teacher: ['parent'],
+  };
+
+  async function resolveComposedAudience(req, audience) {
+    const senderRoles = req.user.roles || [];
+    const senderBranchId = req.user.branchId || null;
+    const senderId = req.user.sub;
+
+    const allowedRoles = AUDIENCE_ALLOWED_ROLES[audience];
+    if (!allowedRoles) return { error: 'Unknown audience.' };
+    if (!allowedRoles.some((r) => senderRoles.includes(r))) {
+      return { error: 'You are not allowed to send to this audience.' };
+    }
+
+    switch (audience) {
+      case 'all_users':
+        return { roles: ['admin', 'teacher', 'parent', 'accountant'], branchId: null };
+      case 'all_admins':
+        return { roles: ['admin'], branchId: null };
+      case 'all_teachers':
+        return { roles: ['teacher'], branchId: null };
+      case 'all_parents':
+        return { roles: ['parent'], branchId: null };
+      case 'all_accountants':
+        return { roles: ['accountant'], branchId: null };
+      case 'branch_teachers':
+        if (!senderBranchId) return { error: 'Your account has no branch assigned. Contact your Super Admin.' };
+        return { roles: ['teacher'], branchId: senderBranchId };
+      case 'branch_parents':
+        if (!senderBranchId) return { error: 'Your account has no branch assigned. Contact your Super Admin.' };
+        return { roles: ['parent'], branchId: senderBranchId };
+      case 'branch_accountants':
+        if (!senderBranchId) return { error: 'Your account has no branch assigned. Contact your Super Admin.' };
+        return { roles: ['accountant'], branchId: senderBranchId };
+      case 'branch_admin':
+        if (!senderBranchId) return { error: 'Your account has no branch assigned. Contact your Super Admin.' };
+        return { roles: ['admin'], branchId: senderBranchId };
+      case 'to_super_admin':
+        return { roles: ['super_admin'], branchId: null };
+      case 'my_batch_parents': {
+        if (!senderBranchId) return { error: 'Your account has no branch assigned. Contact your Super Admin.' };
+        const rows = await db.all('SELECT DISTINCT className FROM classes WHERE assignedTeacherId = ? AND branchId = ?', senderId, senderBranchId);
+        const classNames = rows.map((r) => r.className).filter(Boolean);
+        if (!classNames.length) return { error: 'You have no assigned batches yet — nothing to notify parents about.' };
+        return { roles: [], classNames, branchId: senderBranchId };
+      }
+      case 'my_assigned_teacher': {
+        const rows = await db.all(
+          `SELECT DISTINCT c.assignedTeacherId AS teacherId FROM parent_student ps
+           JOIN students s ON s.id = ps.studentId
+           JOIN classes c ON c.className = s.className AND c.branchId = s.branchId
+           WHERE ps.parentId = ? AND c.assignedTeacherId IS NOT NULL`,
+          senderId
+        );
+        const teacherIds = rows.map((r) => r.teacherId).filter(Boolean);
+        if (!teacherIds.length) return { error: 'No assigned teacher found for your child yet.' };
+        return { roles: [], teacherIds, branchId: senderBranchId };
+      }
+      default:
+        return { error: 'Unknown audience.' };
+    }
+  }
+
   app.get('/api/notifications', async (req, res) => {
     try {
+      // "Sent" mailbox: what I actually sent, regardless of whether I'd also
+      // be a recipient — a completely different query from the inbox filter
+      // below, so it's handled and returned before any scope/mute filtering.
+      if (req.query.mailbox === 'sent') {
+        const sentRows = await db.all('SELECT * FROM notifications WHERE senderId = ? ORDER BY createdAt DESC', req.user.sub);
+        const sentMapped = sentRows.map(mapRowToNotification);
+        const withCounts = await Promise.all(sentMapped.map(async (notif) => ({
+          ...notif,
+          readCount: (await db.get('SELECT COUNT(*) as c FROM notification_reads WHERE notificationId = ?', notif.id))?.c || 0,
+          totalRecipients: await resolveRecipientCount(notif),
+        })));
+        return res.json(withCounts);
+      }
+
       const rows = await db.all('SELECT * FROM notifications ORDER BY createdAt DESC');
       const user = deriveNotificationUser(req);
       const mapped = rows.map(mapRowToNotification);
@@ -2787,23 +3167,21 @@ async function main() {
   });
 
   // Full read-by list for one notification — who has actually seen it and when.
-  // Staff-only: this is for the sender (admin/accountant/etc.) to audit delivery,
-  // not something a parent/teacher recipient needs to see about other recipients.
-  // Teachers get a narrower allowance: only Materials notifications (e.g. "did
-  // parents see the study material I posted") — there's no stored notion of
-  // which teacher authored a given notification, so this can't be scoped down
-  // to "their own" posts specifically without a schema change, but it's kept
-  // to material-sharing notifications rather than opening up every broadcast
-  // (payroll, admissions, etc.) to every teacher.
+  // Staff (admin/accountant/super_admin) can audit any notification in their
+  // scope; anyone else can only audit a notification they themselves sent
+  // (the composer's own "delivery count" for their sent items) — with one
+  // narrower legacy allowance for teachers viewing Materials read-receipts,
+  // since there's no per-post authorship for those older notifications.
   app.get('/api/notifications/:id/reads', async (req, res) => {
     const roles = req.user.roles;
     const isStaff = roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r));
     const isTeacherViewingMaterials = roles.includes('teacher');
-    if (!isStaff && !isTeacherViewingMaterials) return res.status(403).json({ error: 'Forbidden' });
     try {
       const row = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
       if (!row) return res.status(404).json({ error: 'Notification not found' });
-      if (!isStaff && row.notificationType !== 'Materials') return res.status(403).json({ error: 'Forbidden' });
+      const isOwnSentNotification = row.senderId && row.senderId === req.user.sub;
+      const allowed = isStaff || isOwnSentNotification || (isTeacherViewingMaterials && row.notificationType === 'Materials');
+      if (!allowed) return res.status(403).json({ error: 'Forbidden' });
       const notif = mapRowToNotification(row);
 
       const [reads, totalRecipients] = await Promise.all([
@@ -2878,6 +3256,30 @@ async function main() {
     try {
       const now = new Date().toISOString();
       const payload = req.body || {};
+
+      // Composer-driven sends: audience is resolved server-side from the
+      // verified sender's own role/branch/id — the client cannot request
+      // roles/branchId/teacherIds/classNames/userIds/studentIds directly.
+      // Everything else (system-generated notifications from admissions,
+      // batch creation, timetable edits, etc.) keeps passing those fields
+      // directly, unchanged.
+      let roles = payload.roles || [];
+      let branchId = payload.branchId || null;
+      let teacherIds = payload.teacherIds || [];
+      let classNames = payload.classNames || [];
+      let userIds = payload.userIds || [];
+      const studentIds = payload.studentIds || [];
+
+      if (payload.audience) {
+        const resolved = await resolveComposedAudience(req, payload.audience);
+        if (resolved.error) return res.status(403).json({ error: resolved.error });
+        roles = resolved.roles || [];
+        branchId = resolved.branchId ?? null;
+        teacherIds = resolved.teacherIds || [];
+        classNames = resolved.classNames || [];
+        userIds = []; // audience-driven sends never target arbitrary userIds
+      }
+
       const notification = {
         // Never trust a client-supplied id as the primary key — the composer's
         // locally-incrementing counter isn't synced across browsers/sessions
@@ -2889,16 +3291,21 @@ async function main() {
         description: payload.description || '',
         type: payload.type || 'info',
         priority: payload.priority || 'medium',
-        roles: serializeList(payload.roles || []),
-        teacherIds: serializeList(payload.teacherIds || []),
-        classNames: serializeList(payload.classNames || []),
-        userIds: serializeList(payload.userIds || []),
-        studentIds: serializeList(payload.studentIds || []),
-        sender: payload.sender || 'System',
+        roles: serializeList(roles),
+        teacherIds: serializeList(teacherIds),
+        classNames: serializeList(classNames),
+        userIds: serializeList(userIds),
+        studentIds: serializeList(studentIds),
+        // The display name always reflects who's actually authenticated —
+        // a client could otherwise set `sender` to impersonate anyone.
+        sender: req.user?.name || payload.sender || 'System',
+        senderId: req.user?.sub || null,
+        senderRole: req.user?.roles?.[0] || null,
+        audience: payload.audience || null,
         notificationType: payload.notificationType || payload.type || 'info',
         recipient: payload.recipient || 'All',
         recipientRole: payload.recipientRole || '',
-        branchId: payload.branchId || null,
+        branchId,
         status: payload.status || 'unread',
         read: payload.status === 'read' ? 1 : 0,
         createdAt: payload.createdAt || now,
@@ -2912,8 +3319,8 @@ async function main() {
         scheduledFor: payload.scheduledFor || null,
         expiresAt: payload.expiresAt || null,
       };
-      const stmt = await db.prepare(`INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, notificationType, recipient, recipientRole, branchId, status, read, createdAt, readAt, readBy, readByRole, readByBranch, deletedAt, deletedBy, deletedByBranch, scheduledFor, expiresAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-      await stmt.run(notification.id, notification.title, notification.message, notification.description, notification.type, notification.priority, notification.roles, notification.teacherIds, notification.classNames, notification.userIds, notification.studentIds, notification.sender, notification.notificationType, notification.recipient, notification.recipientRole, notification.branchId, notification.status, notification.read, notification.createdAt, notification.readAt, notification.readBy, notification.readByRole, notification.readByBranch, notification.deletedAt, notification.deletedBy, notification.deletedByBranch, notification.scheduledFor, notification.expiresAt);
+      const stmt = await db.prepare(`INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, audience, notificationType, recipient, recipientRole, branchId, status, read, createdAt, readAt, readBy, readByRole, readByBranch, deletedAt, deletedBy, deletedByBranch, scheduledFor, expiresAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      await stmt.run(notification.id, notification.title, notification.message, notification.description, notification.type, notification.priority, notification.roles, notification.teacherIds, notification.classNames, notification.userIds, notification.studentIds, notification.sender, notification.senderId, notification.senderRole, notification.audience, notification.notificationType, notification.recipient, notification.recipientRole, notification.branchId, notification.status, notification.read, notification.createdAt, notification.readAt, notification.readBy, notification.readByRole, notification.readByBranch, notification.deletedAt, notification.deletedBy, notification.deletedByBranch, notification.scheduledFor, notification.expiresAt);
       await stmt.finalize();
       const saved = await db.get('SELECT * FROM notifications WHERE id = ?', notification.id);
       res.json(mapRowToNotification(saved));
@@ -3890,18 +4297,34 @@ async function main() {
   app.get('/api/attendance', async (req, res) => {
     if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { className, date } = req.query;
-      let query = 'SELECT * FROM attendance';
+      const { className, date, branchId, board } = req.query;
+      // branchId/board filters need a join to classes (attendance has neither
+      // column); only join when actually requested so the plain className+date
+      // path used by every existing caller is untouched.
+      const needsClassJoin = Boolean(branchId || board);
+      let query = needsClassJoin
+        ? 'SELECT a.* FROM attendance a JOIN classes c ON c.className = a.className'
+        : 'SELECT * FROM attendance';
+      const classCol = needsClassJoin ? 'a.className' : 'className';
+      const dateCol = needsClassJoin ? 'a.date' : 'date';
       const params = [];
       const conditions = [];
 
       if (className) {
-        conditions.push('className = ?');
+        conditions.push(`${classCol} = ?`);
         params.push(className);
       }
       if (date) {
-        conditions.push('date = ?');
+        conditions.push(`${dateCol} = ?`);
         params.push(date);
+      }
+      if (branchId) {
+        conditions.push('c.branchId = ?');
+        params.push(branchId);
+      }
+      if (board) {
+        conditions.push('c.board = ?');
+        params.push(board);
       }
 
       if (conditions.length > 0) {
@@ -5306,35 +5729,119 @@ async function main() {
   });
 
   // --- Classes Endpoints ---
+  // "classes" rows are batch records (requirement: batch-based class management).
+  // className now doubles as the free-text batch name for newly-created rows;
+  // historical standards-based rows ("10th" etc.) are untouched and keep working
+  // since nothing validates className against a fixed list.
+
+  // Teacher must belong to the batch's branch and hold the 'teacher' role.
+  // branchId may be null/undefined (super_admin creating a branch-less batch),
+  // in which case only the role is checked.
+  async function validateTeacherAssignment(teacherId, branchId) {
+    const teacher = await db.get('SELECT id, roles, branchId FROM users WHERE id = ? AND status = ?', teacherId, 'Active');
+    if (!teacher) return 'Assigned teacher not found.';
+    const roles = parseJsonList(teacher.roles);
+    if (!roles.includes('teacher')) return 'Assigned user is not a teacher.';
+    if (branchId && teacher.branchId !== branchId) return 'Assigned teacher does not belong to the selected branch.';
+    return null;
+  }
 
   app.get('/api/classes', async (req, res) => {
     try {
       const branchId = resolveBranchId(req, req.query.branchId);
-      const rows = branchId
-        ? await db.all('SELECT * FROM classes WHERE branchId = ? ORDER BY createdAt DESC', branchId)
-        : await db.all('SELECT * FROM classes ORDER BY createdAt DESC');
+      const includeArchived = String(req.query.includeArchived || '') === 'true';
+      const clauses = [];
+      const params = [];
+      if (branchId) { clauses.push('branchId = ?'); params.push(branchId); }
+      if (!includeArchived) { clauses.push("status != 'Archived'"); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows = await db.all(`SELECT * FROM classes ${where} ORDER BY createdAt DESC`, ...params);
       res.json(rows.map((row) => ({ ...row, daysOfWeek: JSON.parse(row.daysOfWeek || '[]') })));
     } catch (error) { console.error('List classes error:', error); res.status(500).json({ error: 'Failed to load classes' }); }
   });
   app.post('/api/classes', async (req, res) => {
     if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { className, batchName, course, subject, assignedTeacherId, roomNumber, maxStudents, startDate, endDate, classTiming, daysOfWeek, status } = req.body;
+      const { className, batchName, course, subject, assignedTeacherId, board, description, roomNumber, maxStudents, startDate, endDate, classTiming, daysOfWeek, status } = req.body;
       if (!className || !String(className).trim()) return res.status(400).json({ error: 'Class name is required.' });
       if (!assignedTeacherId) return res.status(400).json({ error: 'Assigned teacher is required.' });
       const branchId = resolveBranchId(req, req.body.branchId);
+      const teacherError = await validateTeacherAssignment(assignedTeacherId, branchId);
+      if (teacherError) return res.status(400).json({ error: teacherError });
       const id = `CLS${Date.now()}`;
       const now = new Date().toISOString();
       await db.run(
-        `INSERT INTO classes (id, className, batchName, course, subject, assignedTeacherId, branchId, roomNumber, maxStudents, startDate, endDate, classTiming, daysOfWeek, status, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO classes (id, className, batchName, course, subject, assignedTeacherId, branchId, roomNumber, maxStudents, startDate, endDate, classTiming, daysOfWeek, status, createdAt, board, description, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id, String(className).trim(), batchName || '', course || '', subject || '', assignedTeacherId, branchId || null,
         roomNumber || '', Number(maxStudents || 0), startDate || '', endDate || '', classTiming || '', JSON.stringify(daysOfWeek || []),
-        status || 'Active', now
+        status || 'Active', now, board || '', description || '', now
       );
       const row = await db.get('SELECT * FROM classes WHERE id = ?', id);
       res.json({ ...row, daysOfWeek: JSON.parse(row.daysOfWeek || '[]') });
     } catch (error) { console.error('Create class error:', error); res.status(500).json({ error: 'Failed to create class' }); }
+  });
+  app.put('/api/classes/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM classes WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Class not found.' });
+      const isSuperAdmin = req.user.roles.includes('super_admin');
+      if (!isSuperAdmin && existing.branchId !== req.user.branchId) return res.status(404).json({ error: 'Class not found.' });
+
+      const { className, batchName, course, subject, assignedTeacherId, board, description, roomNumber, maxStudents, startDate, endDate, classTiming, daysOfWeek, status, branchId: requestedBranchId } = req.body;
+      if (className !== undefined && !String(className).trim()) return res.status(400).json({ error: 'Class name is required.' });
+
+      // Only super_admin may move a batch to a different branch; admins are
+      // confined to their own branch (mirrors resolveBranchId's rule elsewhere).
+      const nextBranchId = isSuperAdmin && requestedBranchId !== undefined ? (requestedBranchId || null) : existing.branchId;
+      const nextTeacherId = assignedTeacherId !== undefined ? assignedTeacherId : existing.assignedTeacherId;
+      if (!nextTeacherId) return res.status(400).json({ error: 'Assigned teacher is required.' });
+      if (assignedTeacherId !== undefined || nextBranchId !== existing.branchId) {
+        const teacherError = await validateTeacherAssignment(nextTeacherId, nextBranchId);
+        if (teacherError) return res.status(400).json({ error: teacherError });
+      }
+
+      const now = new Date().toISOString();
+      await db.run(
+        `UPDATE classes SET className=?, batchName=?, course=?, subject=?, assignedTeacherId=?, branchId=?, roomNumber=?, maxStudents=?, startDate=?, endDate=?, classTiming=?, daysOfWeek=?, status=?, board=?, description=?, updatedAt=? WHERE id=?`,
+        className !== undefined ? String(className).trim() : existing.className,
+        batchName !== undefined ? batchName : existing.batchName,
+        course !== undefined ? course : existing.course,
+        subject !== undefined ? subject : existing.subject,
+        nextTeacherId,
+        nextBranchId,
+        roomNumber !== undefined ? roomNumber : existing.roomNumber,
+        maxStudents !== undefined ? Number(maxStudents || 0) : existing.maxStudents,
+        startDate !== undefined ? startDate : existing.startDate,
+        endDate !== undefined ? endDate : existing.endDate,
+        classTiming !== undefined ? classTiming : existing.classTiming,
+        daysOfWeek !== undefined ? JSON.stringify(daysOfWeek || []) : existing.daysOfWeek,
+        status !== undefined ? status : existing.status,
+        board !== undefined ? board : existing.board,
+        description !== undefined ? description : existing.description,
+        now,
+        req.params.id
+      );
+      const row = await db.get('SELECT * FROM classes WHERE id = ?', req.params.id);
+      res.json({ ...row, daysOfWeek: JSON.parse(row.daysOfWeek || '[]') });
+    } catch (error) { console.error('Update class error:', error); res.status(500).json({ error: 'Failed to update class' }); }
+  });
+  app.delete('/api/classes/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM classes WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Class not found.' });
+      const isSuperAdmin = req.user.roles.includes('super_admin');
+      if (!isSuperAdmin && existing.branchId !== req.user.branchId) return res.status(404).json({ error: 'Class not found.' });
+      // Soft delete only: the batch's own metadata and every student/attendance/
+      // timetable row that references it by className string are preserved.
+      // Archived batches are simply excluded from GET /api/classes by default
+      // (fetch with ?includeArchived=true to see them for history/reporting).
+      const now = new Date().toISOString();
+      await db.run("UPDATE classes SET status = 'Archived', updatedAt = ? WHERE id = ?", now, req.params.id);
+      res.json({ success: true });
+    } catch (error) { console.error('Delete class error:', error); res.status(500).json({ error: 'Failed to delete class' }); }
   });
 
   // --- Inventory Endpoints ---

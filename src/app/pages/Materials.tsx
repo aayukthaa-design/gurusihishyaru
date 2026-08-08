@@ -12,6 +12,7 @@ import {
 } from '../lib/materialsService';
 import { Library, Upload, Trash2, Download, Loader2, FileText } from 'lucide-react';
 import { BOARDS } from '../lib/classConstants';
+import { useClasses, getClassesForBranch } from '../lib/classService';
 
 const BATCH_OPTIONS = BOARDS;
 
@@ -26,6 +27,8 @@ export function Materials() {
   const [selectedClass, setSelectedClass] = useState('');
   const [subject, setSubject] = useState('');
   const [batch, setBatch] = useState(BATCH_OPTIONS[0]);
+  useClasses();
+  const batchOptions = getClassesForBranch(user?.branchId);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -134,15 +137,20 @@ export function Materials() {
                   />
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm">
-                  <span className="font-medium text-foreground">Class</span>
-                  <input
-                    type="text"
+                  <span className="font-medium text-foreground">Batch</span>
+                  <select
                     value={selectedClass}
-                    onChange={(e) => setSelectedClass(e.target.value)}
-                    placeholder="e.g. 10th"
+                    onChange={(e) => {
+                      const chosen = batchOptions.find((b) => b.className === e.target.value);
+                      setSelectedClass(e.target.value);
+                      if (chosen?.board) setBatch(chosen.board);
+                    }}
                     className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
                     required
-                  />
+                  >
+                    <option value="">Select batch…</option>
+                    {batchOptions.map((b) => <option key={b.id} value={b.className}>{b.className}</option>)}
+                  </select>
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm">
                   <span className="font-medium text-foreground">Subject</span>

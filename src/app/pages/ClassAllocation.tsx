@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Button } from '../components/ui/button';
 import { addNotification } from '../lib/notificationService';
 import { apiFetch } from '../lib/apiClient';
-import { useTeacherProfiles, refreshTeacherProfiles } from './TeacherManagement';
+import { useTeachers, refreshTeachers } from '../lib/teacherService';
 import { GRADES, BOARDS } from '../lib/classConstants';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ export function ClassAllocation() {
   const { user } = useAuth();
   const isSuperAdmin = user?.role === 'super_admin';
   const branches = useBranches();
-  const teachers = useTeacherProfiles();
+  const teachers = useTeachers();
   const [allocations, setAllocations] = useState<Allocation[]>([]);
   const [loading, setLoading] = useState(true);
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
@@ -64,7 +64,7 @@ export function ClassAllocation() {
 
   useEffect(() => {
     void loadAllocations();
-    void refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+    void refreshTeachers(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
   }, [user?.role, user?.branchId, branchFilter]);
 
   const openEdit = (alloc: Allocation) => {

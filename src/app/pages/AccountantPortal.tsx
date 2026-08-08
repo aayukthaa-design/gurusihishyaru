@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router';
-import { SEED_TEACHERS, Teacher, useTeacherProfiles } from './TeacherManagement';
+import { useTeachers } from '../lib/teacherService';
 import { generateSalarySlipData } from '../lib/reportExport';
 import { fetchSalaryRecords, fetchTeacherAttendance, markSalaryRecordPaid, summarizeTeacherAttendance, unlockSalaryRecord, type SalaryRecord, type TeacherAttendanceEntry } from '../lib/teacherSalaryService';
 import { Header } from '../components/Header';
@@ -8,6 +8,7 @@ import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
 import { useBranches, getBranchName } from '../lib/branchService';
 import { useStudents, refreshStudents } from '../lib/studentService';
+import { fetchFeeStats } from '../lib/feeService';
 import { addNotification } from '../lib/notificationService';
 import { formatIndianCurrency } from '../lib/currency';
 import { 
@@ -78,7 +79,7 @@ interface AllocationRecord {
 
 interface MonthlyReport {
   id: number;
-  week: string;
+  month: string;
   branchId: string;
   submittedBy: string;
   submittedDate: string;
@@ -116,8 +117,9 @@ export function AccountantPortal() {
   const [categoryForm, setCategoryForm] = useState({ id: 0, name: '', status: 'Active' as 'Active' | 'Inactive' });
   const [allocations, setAllocations] = useState<AllocationRecord[]>([]);
   const [reports, setReports] = useState<MonthlyReport[]>([]);
+  const [outstandingFees, setOutstandingFees] = useState(0);
   const [loading, setLoading] = useState(false);
-  const teacherProfiles = useTeacherProfiles();
+  const teacherProfiles = useTeachers();
   const [salaryMonth, setSalaryMonth] = useState(new Date().toISOString().slice(0, 7));
   const [salaryBranchFilter, setSalaryBranchFilter] = useState(isSuperAdmin ? '' : myBranchId);
   const [salaryTeacherFilter, setSalaryTeacherFilter] = useState('');
@@ -252,7 +254,8 @@ export function AccountantPortal() {
       fetchCategories(),
       fetchAllocations(),
       fetchReports(),
-      refreshStudents()
+      refreshStudents(),
+      fetchFeeStats({ branchId: branchFilter || myBranchId || undefined }).then((stats) => setOutstandingFees(stats.totalPending)),
     ]);
     setLoading(false);
   };
@@ -385,7 +388,7 @@ export function AccountantPortal() {
   const todayStr = new Date().toISOString().split('T')[0];
   const currentMonthStr = new Date().toISOString().slice(0, 7);
   const currentMonthReportSubmitted = useMemo(() => {
-    return reports.some(r => r.week === currentMonthStr && r.status !== 'Returned');
+    return reports.some(r => r.month === currentMonthStr && r.status !== 'Returned');
   }, [reports, currentMonthStr]);
 
   const todayIncome = useMemo(() => {
@@ -453,7 +456,7 @@ export function AccountantPortal() {
         id: `report-${r.id}`,
         type: 'Weekly Report Submitted',
         date: r.submittedDate,
-        message: `Weekly Report for ${r.week} submitted by ${r.submittedBy} (Status: ${r.status})`,
+        message: `Weekly Report for ${r.month} submitted by ${r.submittedBy} (Status: ${r.status})`,
         timestamp: new Date(r.submittedDate).getTime()
       });
     });
@@ -783,9 +786,6 @@ export function AccountantPortal() {
     const remaining = inventory.reduce((s, item) => s + item.availableQuantity, 0);
     const lowStock = inventory.filter(item => item.availableQuantity <= item.minStock).map(item => item.itemName);
 
-    // Hardcoded Outstanding Fee computation for mock
-    const outstanding = 25500; 
-
     return {
       income,
       expense,
@@ -795,13 +795,13 @@ export function AccountantPortal() {
       remaining,
       lowStockList: lowStock,
       admissionsCount,
-      outstanding
+      outstanding: outstandingFees
     };
-  }, [ledger, inventory, allocations, students, reportWeek, branchFilter]);
+  }, [ledger, inventory, allocations, students, reportWeek, branchFilter, outstandingFees]);
 
   // Is Weekly Report already submitted for selected week?
   const submittedReport = useMemo(() => {
-    return reports.find(r => r.week === reportWeek && (!branchFilter || r.branchId === branchFilter));
+    return reports.find(r => r.month === reportWeek && (!branchFilter || r.branchId === branchFilter));
   }, [reports, reportWeek, branchFilter]);
 
   useEffect(() => {
@@ -822,7 +822,7 @@ export function AccountantPortal() {
     }
 
     const payload = {
-      week: reportWeek,
+      month: reportWeek,
       branchId: branchFilter || myBranchId,
       submittedBy: user?.name || 'Accountant',
       remarks: reportRemarks,
@@ -830,7 +830,7 @@ export function AccountantPortal() {
       totalIncome: computedReportData.income,
       totalExpense: computedReportData.expense,
       netProfit: computedReportData.netProfit,
-      ledgerSummary: ledger.filter(t => t.date.startsWith(reportWeek)).map(t => `${t.voucherNumber}: ${t.type} - ${t.category} (â‚¹${t.amount})`),
+      ledgerSummary: ledger.filter(t => t.date.startsWith(reportWeek)).map(t => `${t.voucherNumber}: ${t.type} - ${t.category} (₹${t.amount})`),
       inventoryPurchased: computedReportData.purchased,
       inventoryAllocated: computedReportData.allocated,
       inventoryRemaining: computedReportData.remaining,
@@ -847,8 +847,11 @@ export function AccountantPortal() {
       if (res.ok) {
         alert('Monthly Financial Report submitted successfully to Super Admin.');
         await fetchReports();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to submit report. Please try again.');
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); alert('Failed to submit report. Please try again.'); }
   };
 
   return (
@@ -1598,7 +1601,7 @@ export function AccountantPortal() {
                           <td className="px-6 py-3 text-center font-bold">{alloc.quantity}</td>
                           <td className="px-6 py-3 whitespace-nowrap">{alloc.allocatedDate}</td>
                           <td className="px-6 py-3 text-xs">{alloc.allocatedBy}</td>
-                          <td className="px-6 py-3 max-w-[150px] truncate" title={alloc.remarks}>{alloc.remarks || 'â€”'}</td>
+                          <td className="px-6 py-3 max-w-[150px] truncate" title={alloc.remarks}>{alloc.remarks || '—'}</td>
                           <td className="px-6 py-3 text-center">
                             <button
                               onClick={() => handleReturnAllocation(alloc.id)}
@@ -2168,7 +2171,7 @@ export function AccountantPortal() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Purchase Unit Cost (â‚¹)</label>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Purchase Unit Cost (₹)</label>
                 <input
                   type="number"
                   placeholder="e.g. 150"
@@ -2240,7 +2243,7 @@ export function AccountantPortal() {
           <form onSubmit={handleAllocateSubmit} className="bg-card border border-border rounded-2xl w-full max-w-md p-6 shadow-xl space-y-4">
             <div className="flex justify-between items-center border-b border-border pb-3">
               <h3 className="font-bold text-foreground">Allocate Inventory to Student</h3>
-              <button type="button" onClick={() => setShowAllocateModal(false)} className="text-sm text-muted-foreground hover:text-foreground">âœ•</button>
+              <button type="button" onClick={() => setShowAllocateModal(false)} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
             </div>
 
             <div className="space-y-4">

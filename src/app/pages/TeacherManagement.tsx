@@ -7,10 +7,17 @@ import {
   Phone, Mail, Award, GraduationCap, Cake,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
-import { createStore, useStoreValue } from '../lib/store';
+import { useTeachers, refreshTeachers } from '../lib/teacherService';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+// Lean shape this page's add/edit form actually collects — kept distinct from
+// (but structurally compatible with) teacherService.ts's TeacherRecord, which
+// is the single source of truth for teacher *data*. Deliberately excludes
+// TeacherRecord's server-computed fields (fullName, employeeId, username,
+// role, specialization…) so the payload built from a saved form never echoes
+// a stale value back over a freshly edited one (e.g. a stale `fullName`
+// silently overwriting a just-changed firstName/lastName on save).
 export interface Teacher {
   branchId?: string;
   id: string;
@@ -25,44 +32,14 @@ export interface Teacher {
   department?: string;
   salaryType: 'Monthly Fixed' | 'Per Class';
   salaryAmount: number;
-  monthlySalary?: number;
-  salaryPerClass?: number;
+  monthlySalary?: number | null;
+  salaryPerClass?: number | null;
   status: 'Active' | 'Inactive' | 'Pending Approval';
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Geography', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];
-
-export const SEED_TEACHERS: Teacher[] = [];
-
-const teacherProfileStore = createStore<Teacher[]>(SEED_TEACHERS);
-
-export async function refreshTeacherProfiles(branchId?: string): Promise<Teacher[]> {
-  try {
-    const res = await apiFetch(`/api/teachers${branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''}`);
-    if (res.ok) {
-      const data = await res.json();
-      const mapped = Array.isArray(data) ? data : [];
-      teacherProfileStore.setState(mapped);
-      return mapped;
-    }
-  } catch (err) {
-    console.error('Failed to fetch teacher profiles:', err);
-  }
-  return teacherProfileStore.getState();
-}
-
-// Initial load
-void refreshTeacherProfiles();
-
-export function getTeacherProfiles(): Teacher[] {
-  return teacherProfileStore.getState();
-}
-
-export function useTeacherProfiles(): Teacher[] {
-  return useStoreValue(teacherProfileStore);
-}
 
 const EMPTY: Omit<Teacher, 'id'> = {
   branchId: '',
@@ -281,7 +258,7 @@ function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () =>
 export function TeacherManagement() {
   const { user } = useAuth();
   const branches = useBranches();
-  const teachers = useTeacherProfiles();
+  const teachers = useTeachers();
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [panel, setPanel] = useState<'none' | 'add' | { type: 'edit' | 'view'; id: string }>('none');
@@ -289,7 +266,7 @@ export function TeacherManagement() {
   const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
-    void refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+    void refreshTeachers(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
   }, [user?.role, user?.branchId, branchFilter]);
 
   const filtered = filterByBranch(teachers, user, branchFilter).filter((teacher) => {
@@ -313,7 +290,7 @@ export function TeacherManagement() {
       return;
     }
     setFormError(null);
-    await refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+    await refreshTeachers(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
     setPanel('none');
   };
   const handleEdit = async (id: string, data: Omit<Teacher, 'id'>) => {
@@ -327,14 +304,14 @@ export function TeacherManagement() {
       return;
     }
     setFormError(null);
-    await refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+    await refreshTeachers(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
     setPanel('none');
   };
 
   const handleApprove = async (id: string) => {
     const res = await apiFetch(`/api/teachers/${id}`, { method: 'PUT', body: { status: 'Active' } });
     if (res.ok) {
-      await refreshTeacherProfiles(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
+      await refreshTeachers(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
     }
   };
 

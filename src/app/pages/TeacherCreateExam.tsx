@@ -9,6 +9,7 @@ import { updateExamStatus } from '../lib/examService';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../lib/apiClient';
 import { BOARDS } from '../lib/classConstants';
+import { getTeacherAllocationsShape, useClasses } from '../lib/classService';
 
 export function TeacherCreateExam() {
   const { user } = useAuth();
@@ -58,22 +59,18 @@ export function TeacherCreateExam() {
     if (batchesForClass.length > 0 && !batchesForClass.includes(batch)) setBatch(batchesForClass[0]);
   }, [className, batchesForClass, batch]);
 
-  // load allocations from API
+  // Batch-based class restructuring: classes/subjects/boards used to come from
+  // GET /api/allocations?teacherId=; now derived from the `classes` table
+  // (batches) via getTeacherAllocationsShape, same shape as before. Depending
+  // on the reactive `allClasses` list (not just user.id) means this recomputes
+  // live if a batch's teacher assignment changes.
+  const allClasses = useClasses();
   React.useEffect(() => {
-    async function loadAlloc() {
-      try {
-        const base = '';
-        const resp = await apiFetch(`${base}/api/allocations?teacherId=${user?.id}`);
-        if (!resp.ok) throw new Error('no');
-        const data = await resp.json();
-        if (data.classes && data.classes.length) setClassesState(data.classes);
-        if (data.allocations) setAllocMap(data.allocations);
-      } catch (err) {
-        // fallback to assignedClassIds already present
-      }
-    }
-    loadAlloc();
-  }, [user?.id]);
+    if (!user?.id) return;
+    const data = getTeacherAllocationsShape(user.id, user.branchId);
+    if (data.classes.length) setClassesState(data.classes);
+    if (data.allocations) setAllocMap(data.allocations);
+  }, [user?.id, user?.branchId, allClasses]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

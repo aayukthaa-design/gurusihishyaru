@@ -51,11 +51,13 @@ export interface WhatsappStats {
 const TODAY = new Date().toISOString().slice(0, 10);
 const SEED_ATTENDANCE: AttendanceRecord[] = [];
 
-export async function fetchAttendance(className?: string, date?: string): Promise<AttendanceRecord[]> {
+export async function fetchAttendance(className?: string, date?: string, branchId?: string, board?: string): Promise<AttendanceRecord[]> {
   try {
     const params = new URLSearchParams();
     if (className) params.append('className', className);
     if (date) params.append('date', date);
+    if (branchId) params.append('branchId', branchId);
+    if (board) params.append('board', board);
     const res = await apiFetch(`${API_BASE}/api/attendance?${params.toString()}`);
     if (res.ok) {
       const data = await res.json();

@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { subscribeExams } from '../lib/examService';
 import { getMarksForExam, subscribeMarks } from '../lib/examMarksService';
 import { getTeacherExamAttendanceDashboard, subscribeExamAttendance } from '../lib/examAttendanceService';
+import { getBranchName } from '../lib/branchService';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import { BarChart3, PieChart } from 'lucide-react';

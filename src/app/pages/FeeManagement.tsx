@@ -20,7 +20,7 @@ import {
   FeeRecord,
 } from '../lib/feeService';
 import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus, Pencil, CalendarClock } from 'lucide-react';
-import { GRADES } from '../lib/classConstants';
+import { useClasses, getClassesForBranch } from '../lib/classService';
 
 function formatMonthLabel(month?: string | null): string {
   if (!month) return '';
@@ -41,7 +41,6 @@ const STATUS_CONFIG = {
   Overdue:         { icon: AlertCircle,   color: 'text-red-600 dark:text-red-400',      bg: 'bg-red-100 dark:bg-red-900/40' },
 } as const;
 
-const CLASS_OPTIONS = GRADES;
 const FEE_TYPES = ['Tuition', 'Admission', 'Exam', 'Transport', 'Other'];
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
 
@@ -62,6 +61,8 @@ export function FeeManagement() {
   const [filter, setFilter] = useState<'All' | 'Paid' | 'Pending' | 'Overdue'>('All');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [showAll, setShowAll] = useState(false);
+  useClasses();
+  const classOptions = getClassesForBranch(branchFilter || user?.branchId || undefined);
 
   const [collecting, setCollecting] = useState<FeeRecord | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
@@ -70,13 +71,13 @@ export function FeeManagement() {
   const [isPaying, setIsPaying] = useState(false);
 
   const [showSetup, setShowSetup] = useState(false);
-  const [structureForm, setStructureForm] = useState({ className: CLASS_OPTIONS[0], feeType: FEE_TYPES[0], amount: '', dueDate: '', academicYear: '' });
+  const [structureForm, setStructureForm] = useState({ className: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', academicYear: '' });
   const [isCreatingStructure, setIsCreatingStructure] = useState(false);
   const [isGenerating, setIsGenerating] = useState<number | null>(null);
 
   const [showMonthly, setShowMonthly] = useState(false);
   const [monthlyForm, setMonthlyForm] = useState({
-    className: CLASS_OPTIONS[0], feeType: 'Tuition', amount: '', academicYear: '',
+    className: '', feeType: 'Tuition', amount: '', academicYear: '',
     startMonth: nextMonthValue(), months: '12', dueDay: '5',
   });
   const [isGeneratingMonthly, setIsGeneratingMonthly] = useState(false);
@@ -147,7 +148,7 @@ export function FeeManagement() {
         academicYear: structureForm.academicYear || new Date().getFullYear().toString(),
       }, user);
       setSuccess('Fee structure created. Use "Generate for class" below to create records for students.');
-      setStructureForm({ className: CLASS_OPTIONS[0], feeType: FEE_TYPES[0], amount: '', dueDate: '', academicYear: '' });
+      setStructureForm({ className: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', academicYear: '' });
     } catch (err: any) {
       setError(err.message || 'Failed to create fee structure.');
     } finally {
@@ -345,10 +346,11 @@ export function FeeManagement() {
               <div className="border-t border-border p-6 space-y-6">
                 <form onSubmit={handleCreateStructure} className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5 items-end">
                   <label className="flex flex-col gap-1.5 text-sm">
-                    <span className="font-medium text-foreground">Class</span>
+                    <span className="font-medium text-foreground">Batch</span>
                     <select value={structureForm.className} onChange={(e) => setStructureForm((f) => ({ ...f, className: e.target.value }))}
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
-                      {CLASS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                      <option value="">Select batch…</option>
+                      {classOptions.map((c) => <option key={c.id} value={c.className}>{c.className}</option>)}
                     </select>
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
@@ -414,10 +416,11 @@ export function FeeManagement() {
                 </p>
                 <form onSubmit={handleGenerateMonthly} className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   <label className="flex flex-col gap-1.5 text-sm">
-                    <span className="font-medium text-foreground">Class</span>
+                    <span className="font-medium text-foreground">Batch</span>
                     <select value={monthlyForm.className} onChange={(e) => setMonthlyForm((f) => ({ ...f, className: e.target.value }))}
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
-                      {CLASS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                      <option value="">Select batch…</option>
+                      {classOptions.map((c) => <option key={c.id} value={c.className}>{c.className}</option>)}
                     </select>
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">

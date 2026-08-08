@@ -8,7 +8,7 @@ import {
 import { useLocation } from 'react-router';
 import { getRoleLabel } from '../auth/rbac';
 import type { Role } from '../auth/types';
-import { useBranches } from '../lib/branchService';
+import { useBranches, getBranchName } from '../lib/branchService';
 import { apiJson } from '../lib/apiClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ function ViewProfile({ user, onClose }: { user: ApiUser; onClose: () => void }) 
               { label: 'Roles',    value: user.roles.map((r) => getRoleLabel(r)).join(', ') },
               { label: 'Status',   value: user.status },
               { label: 'Joined',   value: user.createdAt.slice(0, 10) },
-              { label: 'Branch',   value: user.roles.includes('super_admin') ? 'All Branches' : (user.branchId ?? '-') },
+              { label: 'Branch',   value: user.roles.includes('super_admin') ? 'All Branches' : (user.branchId ? getBranchName(user.branchId) : '-') },
             ].map(({ label, value }) => (
               <div key={label} className="rounded-xl border border-border bg-secondary/50 p-3">
                 <p className="text-xs text-muted-foreground mb-0.5">{label}</p>
@@ -308,7 +308,7 @@ function UserRow({
       </td>
       <td className="px-5 py-4 text-sm text-muted-foreground">{user.email || '-'}</td>
       <td className="px-5 py-4 text-sm text-muted-foreground hidden md:table-cell">{user.mobile}</td>
-      <td className="px-5 py-4 text-sm text-muted-foreground hidden md:table-cell">{user.roles.includes('super_admin') ? 'All Branches' : (user.branchId ?? '-')}</td>
+      <td className="px-5 py-4 text-sm text-muted-foreground hidden md:table-cell">{user.roles.includes('super_admin') ? 'All Branches' : (user.branchId ? getBranchName(user.branchId) : '-')}</td>
       <td className="px-5 py-4">
         <div className="flex flex-wrap gap-1">
           {user.roles.map((role) => (

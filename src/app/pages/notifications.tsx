@@ -3,9 +3,9 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Input } from '../components/ui/input';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import React from 'react';
 import {
-  addNotification,
   clearNotifications,
   deleteNotification,
   exportNotificationsReport,
@@ -16,40 +16,83 @@ import {
   markAllRead,
   markNotificationAsRead,
   refreshNotifications,
+  refreshSentNotifications,
   restoreNotification,
+  sendComposedNotification,
   useNotifications,
+  useSentNotifications,
+  type NotificationAudience,
   type NotificationReadEntry,
 } from '../lib/notificationService';
 import { useAuth } from '../auth/AuthContext';
-import { useBranches, getBranchName } from '../lib/branchService';
-import { getTeachersForBranch } from '../lib/teacherService';
-import { getClassesForBranch } from '../lib/classService';
 import { sendBirthdayWhatsAppWish } from '../lib/birthdayService';
+import type { Role } from '../auth/types';
 
 function formatDateTime(value?: string | null) {
   if (!value) return '—';
   return new Date(value).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+// ─── Role-aware compose audiences ──────────────────────────────────────────
+// Matches exactly what each role is allowed to send to (server-enforced —
+// see AUDIENCE_ALLOWED_ROLES in server.js). No branch/class/teacher picker
+// is shown anywhere here: branch, assigned batches, and assigned teacher are
+// always resolved server-side from the sender's own account, never chosen
+// by hand.
+const AUDIENCE_OPTIONS_BY_ROLE: Partial<Record<Role, { value: NotificationAudience; label: string }[]>> = {
+  super_admin: [
+    { value: 'all_users', label: 'All Users' },
+    { value: 'all_admins', label: 'All Admins' },
+    { value: 'all_teachers', label: 'All Teachers' },
+    { value: 'all_parents', label: 'All Parents' },
+    { value: 'all_accountants', label: 'All Accountants' },
+  ],
+  admin: [
+    { value: 'branch_teachers', label: 'All Teachers in My Branch' },
+    { value: 'branch_parents', label: 'All Parents in My Branch' },
+    { value: 'branch_accountants', label: 'All Accountants in My Branch' },
+    { value: 'to_super_admin', label: 'Super Admin' },
+  ],
+  teacher: [
+    { value: 'my_batch_parents', label: 'All Parents of My Assigned Batches' },
+    { value: 'branch_admin', label: 'Admin of My Branch' },
+    { value: 'to_super_admin', label: 'Super Admin' },
+  ],
+  parent: [
+    { value: 'my_assigned_teacher', label: 'Assigned Teacher' },
+    { value: 'branch_admin', label: 'Admin of My Branch' },
+    { value: 'to_super_admin', label: 'Super Admin' },
+  ],
+  accountant: [
+    { value: 'branch_admin', label: 'Admin of My Branch' },
+    { value: 'to_super_admin', label: 'Super Admin' },
+  ],
+};
+
+const AUDIENCE_LABELS: Record<string, string> = Object.fromEntries(
+  Object.values(AUDIENCE_OPTIONS_BY_ROLE).flat().filter(Boolean).map((opt) => [opt!.value, opt!.label])
+);
+
 export function NotificationsPage() {
   const notifications = useNotifications();
+  const sentNotifications = useSentNotifications();
   const auth = useAuth();
-  const branches = useBranches();
   const [search, setSearch] = React.useState('');
   const [filter, setFilter] = React.useState<'all' | 'unread' | 'deleted'>('all');
+  const [mailbox, setMailbox] = React.useState<'inbox' | 'sent'>('inbox');
   const [composerOpen, setComposerOpen] = React.useState(false);
+  const audienceOptions = (auth.user?.role && AUDIENCE_OPTIONS_BY_ROLE[auth.user.role]) || [];
   const [composeForm, setComposeForm] = React.useState({
     title: '',
     message: '',
     description: '',
-    recipient: 'all_students',
+    audience: (audienceOptions[0]?.value ?? '') as NotificationAudience | '',
     notificationType: 'General Announcement',
     priority: 'medium',
-    branchId: auth.user?.branchId ?? '',
     schedule: '',
-    className: '',
-    teacherId: '',
   });
+  const [sendError, setSendError] = React.useState<string | null>(null);
+  const [sending, setSending] = React.useState(false);
 
   const scopedNotifications = React.useMemo(
     () => getVisibleNotificationsForUser(notifications, auth.user),
@@ -85,11 +128,9 @@ export function NotificationsPage() {
     });
   }, [filter, scopedNotifications, search]);
 
-  const teacherOptions = React.useMemo(() => getTeachersForBranch(auth.user?.branchId), [auth.user?.branchId, composerOpen]);
-  const classOptions = React.useMemo(() => getClassesForBranch(auth.user?.branchId), [auth.user?.branchId, composerOpen]);
-
   React.useEffect(() => {
     void refreshNotifications(auth.user);
+    void refreshSentNotifications();
   }, [auth.user]);
 
   const isStaff = auth.user?.role === 'admin' || auth.user?.role === 'super_admin' || auth.user?.role === 'accountant';
@@ -130,37 +171,33 @@ export function NotificationsPage() {
   const activeNotifications = visibleNotifications.filter((notification) => isUnreadForMe(notification) || notification.status === 'scheduled');
   const historyNotifications = visibleNotifications.filter((notification) => (!isUnreadForMe(notification) && notification.status !== 'scheduled') || notification.status === 'deleted' || notification.status === 'expired');
 
-  const handleSendNotification = () => {
-    if (!auth.user?.branchId) return;
-    const base = {
+  const resetComposeForm = () => setComposeForm({
+    title: '', message: '', description: '',
+    audience: (audienceOptions[0]?.value ?? '') as NotificationAudience | '',
+    notificationType: 'General Announcement', priority: 'medium', schedule: '',
+  });
+
+  const handleSendNotification = async () => {
+    if (!auth.user || !composeForm.title.trim() || !composeForm.message.trim() || !composeForm.audience) return;
+    setSending(true);
+    setSendError(null);
+    const result = await sendComposedNotification({
       title: composeForm.title,
       message: composeForm.message,
       description: composeForm.description,
-      type: 'info' as const,
       priority: composeForm.priority as 'high' | 'medium' | 'low',
-      branchId: composeForm.branchId || auth.user.branchId,
       notificationType: composeForm.notificationType,
-      recipient: composeForm.recipient,
-      recipientRole: composeForm.recipient === 'all_teachers' ? 'teacher' : composeForm.recipient === 'all_parents' ? 'parent' : 'student',
-      sender: auth.user?.name ?? 'Admin',
-      status: composeForm.schedule ? 'scheduled' : 'unread',
+      audience: composeForm.audience,
       scheduledFor: composeForm.schedule || null,
-    };
-
-    const targetRoles = composeForm.recipient === 'all_teachers' ? ['teacher'] : composeForm.recipient === 'all_parents' ? ['parent'] : composeForm.recipient === 'one_branch' ? ['admin', 'teacher', 'parent'] : ['student'];
-    const classNames = composeForm.recipient === 'selected_classes' && composeForm.className ? [composeForm.className] : [];
-    const teacherIds = composeForm.recipient === 'selected_teachers' && composeForm.teacherId ? [composeForm.teacherId] : [];
-
-    addNotification({
-      ...base,
-      roles: targetRoles,
-      classNames,
-      teacherIds,
-      branchId: composeForm.recipient === 'one_branch' ? composeForm.branchId || auth.user.branchId : auth.user.branchId,
     });
-
+    setSending(false);
+    if (!result.success) {
+      setSendError(result.error || 'Failed to send notification.');
+      return;
+    }
+    void refreshSentNotifications();
     setComposerOpen(false);
-    setComposeForm({ title: '', message: '', description: '', recipient: 'all_students', notificationType: 'General Announcement', priority: 'medium', branchId: auth.user?.branchId ?? '', schedule: '', className: '', teacherId: '' });
+    resetComposeForm();
   };
 
   return (
@@ -224,47 +261,127 @@ export function NotificationsPage() {
             <Plus className="mr-2 h-4 w-4" />
             Compose Notification
           </Button>
+          <div className="flex rounded-xl border border-border overflow-hidden">
+            {(['inbox', 'sent'] as const).map((value) => (
+              <button
+                key={value}
+                onClick={() => setMailbox(value)}
+                className={`px-3 py-2 text-sm font-medium capitalize transition-colors ${mailbox === value ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-secondary'}`}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {(['all', 'unread', 'deleted'] as const).map((value) => (
-            <Button
-              key={value}
-              size="sm"
-              variant={filter === value ? 'default' : 'outline'}
-              onClick={() => setFilter(value)}
-              className="capitalize"
-            >
-              {value}
-            </Button>
-          ))}
-        </div>
+        {mailbox === 'inbox' && (
+          <div className="flex flex-wrap gap-2">
+            {(['all', 'unread', 'deleted'] as const).map((value) => (
+              <Button
+                key={value}
+                size="sm"
+                variant={filter === value ? 'default' : 'outline'}
+                onClick={() => setFilter(value)}
+                className="capitalize"
+              >
+                {value}
+              </Button>
+            ))}
+          </div>
+        )}
         <div className="flex flex-col gap-2 md:flex-row md:items-center">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search title, recipient, branch, sender..."
-              className="w-full min-w-[260px] pl-9"
-            />
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => markAllRead(auth.user ?? undefined)}>
-              <Check className="mr-2 h-4 w-4" />
-              Mark All as Read
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => clearNotifications(auth.user ?? undefined)}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete Visible
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => exportNotificationsReport('pdf', visibleNotifications, auth.user)}>
-              <FileDown className="mr-2 h-4 w-4" />
-              PDF
-            </Button>
-          </div>
+          {mailbox === 'inbox' && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search title, recipient, branch, sender..."
+                className="w-full min-w-[260px] pl-9"
+              />
+            </div>
+          )}
+          {mailbox === 'inbox' && (
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => markAllRead(auth.user ?? undefined)}>
+                <Check className="mr-2 h-4 w-4" />
+                Mark All as Read
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => clearNotifications(auth.user ?? undefined)}>
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete Visible
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => exportNotificationsReport('pdf', visibleNotifications, auth.user)}>
+                <FileDown className="mr-2 h-4 w-4" />
+                PDF
+              </Button>
+            </div>
+          )}
         </div>
       </div>
 
+      {mailbox === 'sent' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold">Sent Notifications</h3>
+            <p className="text-sm text-muted-foreground">Everything you've sent, with delivery and read counts.</p>
+          </div>
+          <div className="space-y-3">
+            {sentNotifications.length === 0 && (
+              <Card>
+                <CardContent className="py-8 text-center text-sm text-muted-foreground">You haven't sent any notifications yet.</CardContent>
+              </Card>
+            )}
+            {sentNotifications.map((notification) => (
+              <Card key={notification.id} className="transition-all duration-300 hover:shadow-lg">
+                <CardHeader className="pb-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 space-y-1">
+                      <CardTitle className="text-base">{notification.title}</CardTitle>
+                      <CardDescription>{notification.message}</CardDescription>
+                    </div>
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] uppercase">{notification.status}</Badge>
+                  </div>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-2 pb-4 text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">
+                  <div className="space-y-1">
+                    <p>Sent: {formatDateTime(notification.createdAt)}</p>
+                    <p>To: {AUDIENCE_LABELS[notification.audience ?? ''] ?? notification.recipient ?? 'Custom'}</p>
+                  </div>
+                  <Button size="sm" variant="ghost" onClick={() => toggleReadsDetail(notification.id)}>
+                    <MailOpen className="mr-1 h-3 w-3" />
+                    {notification.readCount ?? 0} of {notification.totalRecipients ?? '?'} read
+                  </Button>
+                </CardContent>
+                {expandedReadsId === notification.id && (
+                  <CardContent className="border-t border-border pt-4">
+                    {loadingReads ? (
+                      <p className="text-sm text-muted-foreground">Loading…</p>
+                    ) : readsDetail ? (
+                      readsDetail.reads.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No one has read this yet.</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {readsDetail.reads.map((r) => (
+                            <li key={r.userId} className="flex items-center justify-between text-xs text-muted-foreground">
+                              <span>{r.userName} <span className="text-muted-foreground/70">({r.userRole})</span></span>
+                              <span>{formatDateTime(r.readAt)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Failed to load read receipts.</p>
+                    )}
+                  </CardContent>
+                )}
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mailbox === 'inbox' && (
+      <>
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold">Active Notifications</h3>
@@ -464,6 +581,98 @@ export function NotificationsPage() {
           ))}
         </div>
       </div>
+      </>
+      )}
+
+      <Dialog open={composerOpen} onOpenChange={setComposerOpen}>
+        <DialogContent className="max-h-[90dvh] max-w-xl overflow-y-auto p-6">
+          <DialogHeader>
+            <DialogTitle>Compose Notification</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Title *</label>
+              <input
+                value={composeForm.title}
+                onChange={(e) => setComposeForm((prev) => ({ ...prev, title: e.target.value }))}
+                placeholder="e.g. Fee Payment Reminder"
+                className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Message *</label>
+              <textarea
+                value={composeForm.message}
+                onChange={(e) => setComposeForm((prev) => ({ ...prev, message: e.target.value }))}
+                placeholder="Short message shown in the notification"
+                rows={3}
+                className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Description</label>
+              <input
+                value={composeForm.description}
+                onChange={(e) => setComposeForm((prev) => ({ ...prev, description: e.target.value }))}
+                placeholder="Optional additional detail"
+                className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-sm font-medium">Send To *</label>
+                <select
+                  value={composeForm.audience}
+                  onChange={(e) => setComposeForm((prev) => ({ ...prev, audience: e.target.value as NotificationAudience }))}
+                  className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+                >
+                  {audienceOptions.length === 0 && <option value="">No recipients available for your role</option>}
+                  {audienceOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {composeForm.audience === 'my_batch_parents' && 'Automatically resolved from your assigned batches.'}
+                  {composeForm.audience === 'my_assigned_teacher' && "Automatically resolved from your child's batch."}
+                  {(composeForm.audience === 'branch_teachers' || composeForm.audience === 'branch_parents' || composeForm.audience === 'branch_accountants' || composeForm.audience === 'branch_admin') && 'Automatically limited to your own branch.'}
+                </p>
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium">Priority</label>
+                <select
+                  value={composeForm.priority}
+                  onChange={(e) => setComposeForm((prev) => ({ ...prev, priority: e.target.value }))}
+                  className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+                >
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Schedule for later (optional)</label>
+              <input
+                type="datetime-local"
+                value={composeForm.schedule}
+                onChange={(e) => setComposeForm((prev) => ({ ...prev, schedule: e.target.value }))}
+                className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+              />
+            </div>
+            {sendError && <p className="text-sm text-destructive">{sendError}</p>}
+          </div>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setComposerOpen(false)}>Cancel</Button>
+            <Button
+              disabled={!composeForm.title.trim() || !composeForm.message.trim() || !composeForm.audience || sending}
+              onClick={handleSendNotification}
+            >
+              <Send className="mr-2 h-4 w-4" />
+              {sending ? 'Sending…' : composeForm.schedule ? 'Schedule' : 'Send'} Notification
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

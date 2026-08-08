@@ -27,6 +27,7 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { addTeacher, getTeachersForBranch, useTeachers, refreshTeachers } from '../lib/teacherService';
 import { addClass, getClassesForBranch } from '../lib/classService';
+import { BOARDS } from '../lib/classConstants';
 import { addNotification } from '../lib/notificationService';
 import { useSchoolExamSchedules } from '../lib/schoolExamScheduleService';
 import { formatIndianCurrency } from '../lib/currency';
@@ -84,7 +85,7 @@ function getAdminConfig(): { actions: QuickAction[] } {
   return {
     actions: [
       { label: 'Add Teacher',       icon: UserPlus,     path: '/teachers',   color: 'bg-green-600 hover:bg-green-700' },
-      { label: 'Create Class',      icon: GraduationCap,path: '/allocations',color: 'bg-amber-600 hover:bg-amber-700' },
+      { label: 'Create Class',      icon: GraduationCap,path: '/batches',    color: 'bg-amber-600 hover:bg-amber-700' },
       { label: 'Mark Attendance',   icon: ClipboardCheck,path: '/attendance',color: 'bg-sky-600 hover:bg-sky-700' },
       { label: 'Notifications',     icon: Bell,         path: '/notifications', color: 'bg-violet-600 hover:bg-violet-700' },
       { label: 'Manage Timetable',  icon: CalendarDays, path: '/timetable',  color: 'bg-teal-600 hover:bg-teal-700' },
@@ -112,6 +113,8 @@ export function Dashboard() {
   const allStudents = useStudents();
   const allTeachers = useTeachers();
   const [weeklyAttendanceTrend, setWeeklyAttendanceTrend] = React.useState<{ week: string; value: number }[]>([]);
+  const [totalParents, setTotalParents] = React.useState(0);
+  const [totalAccountants, setTotalAccountants] = React.useState(0);
 
   React.useEffect(() => {
     // /api/teachers is admin/super_admin-only (it includes salary/DOB/address) —
@@ -121,6 +124,31 @@ export function Dashboard() {
       void refreshTeachers();
     }
   }, [isAdmin, isSuperAdmin]);
+
+  React.useEffect(() => {
+    // Super Admin system overview panel — real counts instead of placeholder numbers.
+    if (!isSuperAdmin) return;
+    const loadOverviewCounts = async () => {
+      try {
+        const parentsRes = await apiFetch(`/api/parents${branchFilter ? `?branchId=${branchFilter}` : ''}`);
+        const parents = await parentsRes.json();
+        setTotalParents(Array.isArray(parents) ? parents.length : 0);
+      } catch {
+        setTotalParents(0);
+      }
+      try {
+        const usersRes = await apiFetch('/api/users');
+        const users = await usersRes.json();
+        const accountants = Array.isArray(users)
+          ? users.filter((u: any) => u.roles?.includes('accountant') && (!branchFilter || u.branchId === branchFilter))
+          : [];
+        setTotalAccountants(accountants.length);
+      } catch {
+        setTotalAccountants(0);
+      }
+    };
+    void loadOverviewCounts();
+  }, [isSuperAdmin, branchFilter]);
 
   React.useEffect(() => {
     // Build a real 6-week attendance trend from raw attendance rows — grouped by
@@ -198,7 +226,7 @@ export function Dashboard() {
     fullName: '', gender: 'Female', dob: '', phone: '', email: '', address: '', qualification: '', experience: '', specialization: '', username: '', password: '', confirmPassword: '', employmentType: 'Full Time', status: 'Active' as 'Active' | 'Inactive', dateOfJoining: '', profilePhoto: ''
   });
   const [classForm, setClassForm] = React.useState({
-    className: '', batchName: '', course: '', subject: '', assignedTeacherId: '', branchId: user?.branchId ?? '', roomNumber: '', maxStudents: '30', startDate: '', endDate: '', classTiming: '', daysOfWeek: [] as string[], status: 'Active' as 'Active' | 'Inactive'
+    className: '', batchName: '', course: '', subject: '', assignedTeacherId: '', branchId: user?.branchId ?? '', roomNumber: '', maxStudents: '30', startDate: '', endDate: '', classTiming: '', daysOfWeek: [] as string[], status: 'Active' as 'Active' | 'Inactive', board: '', description: ''
   });
   const [notificationModalOpen, setNotificationModalOpen] = React.useState(false);
   const [notificationForm, setNotificationForm] = React.useState({
@@ -557,18 +585,12 @@ export function Dashboard() {
       return [
         { label: 'Students', value: scopedStudentCount.toLocaleString('en-IN'), icon: Users, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
         { label: 'Teachers', value: scopedTeacherCount.toLocaleString('en-IN'), icon: BookOpen, color: 'bg-sky-50 dark:bg-sky-950/40', iconColor: 'text-sky-600 dark:text-sky-400', border: 'border-sky-100 dark:border-sky-900' },
-        { label: "Today's WhatsApp Sent", value: whatsappStats ? String(whatsappStats.todaySent) : '0', icon: MessageSquare, color: 'bg-emerald-50 dark:bg-emerald-950/40', iconColor: 'text-emerald-600 dark:text-emerald-400', border: 'border-emerald-100 dark:border-emerald-900' },
-        { label: 'Failed WhatsApp Today', value: whatsappStats ? String(whatsappStats.todayFailed) : '0', icon: X, color: 'bg-rose-50 dark:bg-rose-950/40', iconColor: 'text-rose-600 dark:text-rose-400', border: 'border-rose-100 dark:border-rose-900' },
-        { label: 'WhatsApp Delivery Rate', value: whatsappStats ? `${whatsappStats.deliveryRate}%` : '100%', icon: CheckCircle2, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
       ];
     }
 
     return [
       { label: 'Students', value: scopedStudentCount.toLocaleString('en-IN'), icon: Users, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
       { label: 'Teachers', value: scopedTeacherCount.toLocaleString('en-IN'), icon: BookOpen, color: 'bg-sky-50 dark:bg-sky-950/40', iconColor: 'text-sky-600 dark:text-sky-400', border: 'border-sky-100 dark:border-sky-900' },
-      { label: "Today's WhatsApp Sent", value: whatsappStats ? String(whatsappStats.todaySent) : '0', icon: MessageSquare, color: 'bg-emerald-50 dark:bg-emerald-950/40', iconColor: 'text-emerald-600 dark:text-emerald-400', border: 'border-emerald-100 dark:border-emerald-900' },
-      { label: 'Failed WhatsApp Today', value: whatsappStats ? String(whatsappStats.todayFailed) : '0', icon: X, color: 'bg-rose-50 dark:bg-rose-950/40', iconColor: 'text-rose-600 dark:text-rose-400', border: 'border-rose-100 dark:border-rose-900' },
-      { label: 'WhatsApp Success Rate', value: whatsappStats ? `${whatsappStats.deliveryRate}%` : '100%', icon: CheckCircle2, color: 'bg-green-50 dark:bg-green-950/40', iconColor: 'text-green-600 dark:text-green-400', border: 'border-green-100 dark:border-green-900' },
     ];
   }, [isSuperAdmin, whatsappStats, scopedStudentCount, scopedTeacherCount]);
 
@@ -644,7 +666,7 @@ export function Dashboard() {
     });
     setFeedback('Class created successfully.');
     setClassModalOpen(false);
-    setClassForm({ className: '', batchName: '', course: '', subject: '', assignedTeacherId: '', branchId: user.branchId, roomNumber: '', maxStudents: '30', startDate: '', endDate: '', classTiming: '', daysOfWeek: [], status: 'Active' });
+    setClassForm({ className: '', batchName: '', course: '', subject: '', assignedTeacherId: '', branchId: user.branchId, roomNumber: '', maxStudents: '30', startDate: '', endDate: '', classTiming: '', daysOfWeek: [], status: 'Active', board: '', description: '' });
   };
 
   if (isAccountant) {
@@ -1437,7 +1459,7 @@ export function Dashboard() {
                   }
                   if (a.label.startsWith('Add ')) {
                     const role = a.label.split(' ')[1].toLowerCase();
-                    navigate(a.path.split('?')[0], { state: { openAdd: true, role } });
+                    navigate(`/users?tab=${role}s&action=add-${role}`);
                     return;
                   }
                   navigate(a.path);
@@ -1502,8 +1524,9 @@ export function Dashboard() {
             </DialogHeader>
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-3">
-                <div><label className="mb-1 block text-sm font-medium">Class Name</label><Input value={classForm.className} onChange={(e) => setClassForm((prev) => ({ ...prev, className: e.target.value }))} /></div>
-                <div><label className="mb-1 block text-sm font-medium">Batch Name</label><Input value={classForm.batchName} onChange={(e) => setClassForm((prev) => ({ ...prev, batchName: e.target.value }))} /></div>
+                <div><label className="mb-1 block text-sm font-medium">Batch Name</label><Input placeholder="e.g. NEET Morning Batch" value={classForm.className} onChange={(e) => setClassForm((prev) => ({ ...prev, className: e.target.value }))} /></div>
+                <div><label className="mb-1 block text-sm font-medium">Board</label><select className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm" value={classForm.board} onChange={(e) => setClassForm((prev) => ({ ...prev, board: e.target.value }))}><option value="">Select board</option>{BOARDS.map((board) => <option key={board} value={board}>{board}</option>)}</select></div>
+                <div><label className="mb-1 block text-sm font-medium">Display Label (optional)</label><Input value={classForm.batchName} onChange={(e) => setClassForm((prev) => ({ ...prev, batchName: e.target.value }))} /></div>
                 <div><label className="mb-1 block text-sm font-medium">Course</label><Input value={classForm.course} onChange={(e) => setClassForm((prev) => ({ ...prev, course: e.target.value }))} /></div>
                 <div><label className="mb-1 block text-sm font-medium">Subject</label><Input value={classForm.subject} onChange={(e) => setClassForm((prev) => ({ ...prev, subject: e.target.value }))} /></div>
                 <div><label className="mb-1 block text-sm font-medium">Assigned Teacher</label><select className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm" value={classForm.assignedTeacherId} onChange={(e) => setClassForm((prev) => ({ ...prev, assignedTeacherId: e.target.value }))}><option value="">Select teacher</option>{teacherOptions.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.fullName}</option>)}</select></div>
@@ -1514,9 +1537,10 @@ export function Dashboard() {
                 <div><label className="mb-1 block text-sm font-medium">Maximum Students</label><Input type="number" value={classForm.maxStudents} onChange={(e) => setClassForm((prev) => ({ ...prev, maxStudents: e.target.value }))} /></div>
                 <div><label className="mb-1 block text-sm font-medium">Start Date</label><Input type="date" value={classForm.startDate} onChange={(e) => setClassForm((prev) => ({ ...prev, startDate: e.target.value }))} /></div>
                 <div><label className="mb-1 block text-sm font-medium">End Date</label><Input type="date" value={classForm.endDate} onChange={(e) => setClassForm((prev) => ({ ...prev, endDate: e.target.value }))} /></div>
-                <div><label className="mb-1 block text-sm font-medium">Class Timing</label><Input value={classForm.classTiming} onChange={(e) => setClassForm((prev) => ({ ...prev, classTiming: e.target.value }))} /></div>
+                <div><label className="mb-1 block text-sm font-medium">Timings</label><Input placeholder="e.g. Mon-Sat, 6:00-8:00 AM" value={classForm.classTiming} onChange={(e) => setClassForm((prev) => ({ ...prev, classTiming: e.target.value }))} /></div>
                 <div><label className="mb-1 block text-sm font-medium">Days of Week</label><input value={classForm.daysOfWeek.join(', ')} onChange={(e) => setClassForm((prev) => ({ ...prev, daysOfWeek: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm" /></div>
                 <div><label className="mb-1 block text-sm font-medium">Status</label><select className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm" value={classForm.status} onChange={(e) => setClassForm((prev) => ({ ...prev, status: e.target.value as 'Active' | 'Inactive' }))}><option value="Active">Active</option><option value="Inactive">Inactive</option></select></div>
+                <div><label className="mb-1 block text-sm font-medium">Description (optional)</label><textarea value={classForm.description} onChange={(e) => setClassForm((prev) => ({ ...prev, description: e.target.value }))} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm" rows={3} /></div>
               </div>
             </div>
             <DialogFooter className="mt-4">
@@ -1606,10 +1630,10 @@ export function Dashboard() {
         {isSuperAdmin && (
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             {[
-              { label: 'Total Students',  value: '1,000', icon: Users,    color: 'text-green-600 dark:text-green-400' },
-              { label: 'Total Teachers',  value: '42',    icon: BookOpen, color: 'text-sky-600 dark:text-sky-400' },
-              { label: 'Total Parents',   value: '850',   icon: UserCog,  color: 'text-amber-600 dark:text-amber-400' },
-              { label: 'Accountants',     value: '5',     icon: Wallet,   color: 'text-teal-600 dark:text-teal-400' },
+              { label: 'Total Students',  value: scopedStudentCount.toLocaleString('en-IN'), icon: Users,    color: 'text-green-600 dark:text-green-400' },
+              { label: 'Total Teachers',  value: scopedTeacherCount.toLocaleString('en-IN'), icon: BookOpen, color: 'text-sky-600 dark:text-sky-400' },
+              { label: 'Total Parents',   value: totalParents.toLocaleString('en-IN'),       icon: UserCog,  color: 'text-amber-600 dark:text-amber-400' },
+              { label: 'Accountants',     value: totalAccountants.toLocaleString('en-IN'),   icon: Wallet,   color: 'text-teal-600 dark:text-teal-400' },
             ].map((s) => (
               <div key={s.label} className="rounded-2xl border border-border bg-card p-5">
                 <s.icon className={`h-5 w-5 mb-2 ${s.color}`} />
