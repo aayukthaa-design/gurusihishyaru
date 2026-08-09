@@ -5,7 +5,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
 import { enrollAdmissionByApplicantName } from '../lib/admissionService';
 import { useStudents, addStudentAPI, updateStudentAPI, deleteStudentAPI, refreshStudents } from '../lib/studentService';
-import { useClasses, getClassesForBranch } from '../lib/classService';
+import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
 import {
   Users, Plus, Search, Eye, Edit2, Trash2, ChevronRight,
   X, GraduationCap, Phone, MapPin, CalendarDays, Mail,
@@ -86,8 +86,15 @@ function StudentForm({
   // Batch-based class restructuring: "Class" now selects a batch (from the
   // classes table) instead of a fixed standard, and "Board" is derived
   // read-only from that batch's own board rather than chosen independently.
+  // A teacher-only account may only place a student into a batch actually
+  // assigned to them — otherwise they could admit a student into a batch
+  // they'd then never see again (Student -> Batch -> Teacher Assignment).
   useClasses();
-  const batchOptions = getClassesForBranch(form.branchId || defaultBranchId || undefined);
+  const { user: formUser } = useAuth();
+  const isTeacherOnly = formUser?.role === 'teacher';
+  const batchOptions = isTeacherOnly
+    ? getClassesForTeacher(formUser?.id, formUser?.branchId)
+    : getClassesForBranch(form.branchId || defaultBranchId || undefined);
   const selectedBatch = batchOptions.find((b) => b.className === form.class);
 
   const handleSaveClick = async () => {
@@ -137,7 +144,11 @@ function StudentForm({
             <option value="">Select batch…</option>
             {batchOptions.map((b) => <option key={b.id} value={b.className}>{b.className}</option>)}
           </select>
-          {batchOptions.length === 0 && <p className="mt-1 text-xs text-muted-foreground">No batches for this branch yet — create one from Batches first.</p>}
+          {batchOptions.length === 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {isTeacherOnly ? 'No batch has been assigned yet.' : 'No batches for this branch yet — create one from Batches first.'}
+            </p>
+          )}
         </div>
         <div>
           <label className="mb-1.5 block text-sm font-medium text-foreground">Board</label>

@@ -132,7 +132,7 @@ export function TeacherPortal() {
             <h2 className="text-base font-semibold text-foreground">My Batches</h2>
           </div>
           {myBatches.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-4 text-center">No batches assigned to you yet.</p>
+            <p className="text-sm text-muted-foreground py-4 text-center">No batch has been assigned yet.</p>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {myBatches.map((b) => (

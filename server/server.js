@@ -275,6 +275,77 @@ async function sendSchoolExamUploadNotification(db, schedule, uploader) {
   );
 }
 
+function formatAttendanceDate(dateString) {
+  const date = new Date(dateString);
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = date.toLocaleDateString('en-IN', { month: 'short' });
+  return `${day}-${month}-${date.getFullYear()}`;
+}
+
+function formatTime12h(date) {
+  let hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12 || 12;
+  return `${String(hours).padStart(2, '0')}:${minutes} ${ampm}`;
+}
+
+// Detailed "attendance submitted" notification, fired once per Submit
+// Attendance click from POST /api/attendance. A single row with roles:
+// ['admin'] and branchId set to the batch's own branch is enough for both
+// recipients: matchesUserScope keeps a branch Admin scoped to their own
+// branchId, while its super_admin bypass (checked first, before any role/
+// branch filtering) delivers the same row to Super Admin regardless of
+// branch — so no duplicate rows or per-recipient fan-out are needed.
+// Built entirely from the attendanceRecords just written by the caller;
+// this never re-reads or duplicates the attendance table.
+async function sendAttendanceSubmissionNotification(db, { className, date, attendanceRecords, submitter, branchId, branchName }) {
+  const entries = Object.entries(attendanceRecords);
+  const totalStudents = entries.length;
+  const presentCount = entries.filter(([, status]) => status === 'present').length;
+  const absentCount = entries.filter(([, status]) => status === 'absent').length;
+  const absentStudentIds = entries.filter(([, status]) => status === 'absent').map(([studentId]) => studentId);
+
+  let absentNames = [];
+  if (absentStudentIds.length > 0) {
+    const placeholders = absentStudentIds.map(() => '?').join(',');
+    const rows = await db.all(`SELECT id, firstName, lastName, fullName FROM students WHERE id IN (${placeholders})`, ...absentStudentIds);
+    const nameById = new Map(rows.map((r) => [r.id, r.fullName || `${r.firstName || ''} ${r.lastName || ''}`.trim()]));
+    absentNames = absentStudentIds.map((id) => nameById.get(id) || id);
+  }
+
+  const submittedAt = new Date();
+  const dateLabel = formatAttendanceDate(date);
+  const timeLabel = formatTime12h(submittedAt);
+
+  const title = `Attendance Submitted — ${className}`;
+  const message = `${submitter.name} submitted attendance for ${className} (${branchName}) on ${dateLabel}: ${presentCount} present, ${absentCount} absent of ${totalStudents}.`;
+
+  const descriptionLines = [
+    `Teacher: ${submitter.name}`,
+    `Branch: ${branchName}`,
+    `Batch: ${className}`,
+    `Date: ${dateLabel}`,
+    `Total Students: ${totalStudents}`,
+    `Present: ${presentCount}`,
+    `Absent: ${absentCount}`,
+  ];
+  if (absentNames.length > 0) {
+    descriptionLines.push('Absent Students:');
+    absentNames.forEach((name) => descriptionLines.push(`- ${name}`));
+  }
+  descriptionLines.push(`Submitted at: ${timeLabel}`);
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(), title, message, descriptionLines.join('\n'), 'info', 'medium',
+    JSON.stringify(['admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    submitter.name, submitter.id, submitter.role, 'attendance_submitted', 'Admin', 'admin',
+    branchId || null, 'unread', 0, submittedAt.toISOString()
+  );
+}
+
 function matchesUserScope(notification, user) {
   if (!user) return true;
   if (user.role === 'super_admin') return true;
@@ -763,8 +834,40 @@ async function initDb() {
     );
   `);
 
+  // Additive columns for the accounting-grade edit workflow — existing rows
+  // simply get NULL/'' defaults, no historical data is touched.
+  try { await db.exec("ALTER TABLE ledger_transactions ADD COLUMN vendorName TEXT DEFAULT '';"); } catch (e) {}
+  try { await db.exec("ALTER TABLE ledger_transactions ADD COLUMN notes TEXT DEFAULT '';"); } catch (e) {}
+  try { await db.exec("ALTER TABLE ledger_transactions ADD COLUMN updatedAt TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE ledger_transactions ADD COLUMN updatedBy TEXT;"); } catch (e) {}
+  // Soft-delete markers — a deleted voucher is never actually removed from
+  // the table (financial history must stay intact); it is just excluded
+  // from every read (ledger list, dashboard, reports) once deletedAt is set.
+  try { await db.exec("ALTER TABLE ledger_transactions ADD COLUMN deletedAt TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE ledger_transactions ADD COLUMN deletedBy TEXT;"); } catch (e) {}
+
+  // Append-only audit trail for every income/expense edit — never updated or
+  // pruned by the edit endpoint, so history survives regardless of how many
+  // times a record is subsequently edited again.
   await db.exec(`
-    
+    CREATE TABLE IF NOT EXISTS ledger_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ledgerId INTEGER NOT NULL,
+      editedByUserId TEXT,
+      editedByName TEXT,
+      editedByRole TEXT,
+      branchId TEXT,
+      editedAt TEXT,
+      previousValues TEXT,
+      updatedValues TEXT
+    );
+  `);
+  // action distinguishes an edit ('UPDATE') from a delete ('DELETE') row in
+  // the same append-only log, so the audit trail covers both in one place.
+  try { await db.exec("ALTER TABLE ledger_audit_log ADD COLUMN action TEXT DEFAULT 'UPDATE';"); } catch (e) {}
+
+  await db.exec(`
+
     CREATE TABLE IF NOT EXISTS inventory_categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT UNIQUE,
@@ -1845,6 +1948,28 @@ async function main() {
     return req.user?.branchId || undefined;
   }
 
+  // Student visibility must follow Student -> Batch -> Teacher Assignment:
+  // a teacher-only account (no admin/super_admin/accountant role — those
+  // keep their existing branch/global scope, matching the rest of this file's
+  // "server-side auth always checks the full role set" convention) may only
+  // ever act on batches (classes.className) they are currently assigned to
+  // via classes.assignedTeacherId. Returns null when no batch restriction
+  // applies (admin/super_admin/accountant, or a dual-role teacher+admin
+  // account), or the (possibly empty) array of className values a
+  // teacher-only account is scoped to. A student with no batch (className
+  // '') can never appear in this list, so unallocated students are excluded
+  // by construction — not by any extra filtering.
+  async function getTeacherAssignedClassNames(req) {
+    const roles = req.user?.roles || [];
+    const isTeacherOnly = roles.includes('teacher') && !roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r));
+    if (!isTeacherOnly) return null;
+    const rows = await db.all(
+      "SELECT DISTINCT className FROM classes WHERE assignedTeacherId = ? AND status != 'Archived'",
+      req.user.sub
+    );
+    return rows.map((r) => r.className).filter(Boolean);
+  }
+
   // email/mobile are no longer globally UNIQUE (dual-role accounts share an
   // identifier with a different password per role) — this enforces the
   // narrower rule that still applies: no two accounts may share both an
@@ -2351,10 +2476,27 @@ async function main() {
   }
 
   app.get('/api/exam-marks', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      let query = 'SELECT * FROM exam_marks WHERE 1=1';
+      // Same batch-assignment scoping as GET /api/students — exam_marks has no
+      // className of its own, so a teacher-only account is scoped via a join
+      // back to the owning exam's className.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames && teacherClassNames.length === 0) return res.json([]);
+
+      let query = teacherClassNames
+        ? 'SELECT em.* FROM exam_marks em JOIN exams e ON e.id = em.examId'
+        : 'SELECT * FROM exam_marks em';
+      const examIdCol = teacherClassNames ? 'em.examId' : 'examId';
       const params = [];
-      if (req.query.examId) { query += ' AND examId = ?'; params.push(String(req.query.examId)); }
+      const conditions = [];
+      if (req.query.examId) { conditions.push(`${examIdCol} = ?`); params.push(String(req.query.examId)); }
+      if (teacherClassNames) {
+        conditions.push(`e.className IN (${teacherClassNames.map(() => '?').join(',')})`);
+        params.push(...teacherClassNames);
+      }
+      if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
+
       const rows = await db.all(query, ...params);
       res.json(rows.map((r) => ({ ...r, pass: Boolean(r.pass) })));
     } catch (err) {
@@ -2372,6 +2514,16 @@ async function main() {
       const passingMarks = Number(body.passingMarks ?? Math.round(maxMarks * 0.35));
       const records = Array.isArray(body.records) ? body.records : [];
       const now = new Date().toISOString();
+
+      // A teacher-only account may only submit marks for an exam belonging to
+      // a batch actually assigned to them.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames) {
+        const exam = await db.get('SELECT className FROM exams WHERE id = ?', examId);
+        if (!exam || !teacherClassNames.includes(exam.className)) {
+          return res.status(403).json({ error: 'You can only submit marks for a batch assigned to you.' });
+        }
+      }
 
       for (const r of records) {
         const percentage = (Number(r.marksObtained) / maxMarks) * 100;
@@ -2404,6 +2556,17 @@ async function main() {
       const params = [];
       if (req.query.className) { query += ' AND className = ?'; params.push(req.query.className); }
       if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+
+      // A teacher-only account only ever sees the timetable of batches
+      // assigned to them.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames) {
+        if (teacherClassNames.length === 0) return res.json([]);
+        if (req.query.className && !teacherClassNames.includes(req.query.className)) return res.json([]);
+        query += ` AND className IN (${teacherClassNames.map(() => '?').join(',')})`;
+        params.push(...teacherClassNames);
+      }
+
       const rows = await db.all(query, ...params);
       res.json(rows);
     } catch (err) {
@@ -3636,6 +3799,14 @@ async function main() {
       const teacherId = isTeacherOnly ? req.user.sub : (body.teacherId || req.user.sub);
       const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || body.branchId;
 
+      // A teacher-only account may only assign homework to a batch actually
+      // assigned to them — otherwise they could later pull the submissions
+      // (names + uploaded files) for a batch that isn't theirs.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames && !teacherClassNames.includes(body.className)) {
+        return res.status(403).json({ error: 'You can only assign homework to a batch assigned to you.' });
+      }
+
       const fileList = files.map(file => ({
         filename: file.filename,
         originalname: file.originalname,
@@ -3786,6 +3957,34 @@ async function main() {
   app.get('/api/homework/:id/submissions', async (req, res) => {
     try {
       const id = req.params.id;
+      const homework = await db.get('SELECT * FROM homework WHERE id = ?', id);
+      if (!homework) return res.status(404).json({ error: 'Homework not found' });
+
+      const roles = req.user.roles || [];
+
+      // A parent only ever gets their own linked children's submissions —
+      // same pattern as GET /api/students — never the whole class's.
+      if (roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) {
+        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const linkedIds = linkedRows.map((r) => r.studentId);
+        if (linkedIds.length === 0) return res.json([]);
+        const placeholders = linkedIds.map(() => '?').join(',');
+        const rows = await db.all(`SELECT * FROM homework_submissions WHERE homeworkId = ? AND studentId IN (${placeholders})`, id, ...linkedIds);
+        return res.json(rows);
+      }
+
+      if (!roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      // A teacher-only account may only view submissions for homework they
+      // themselves assigned (which, per POST /api/homework above, is always
+      // for a batch actually assigned to them).
+      const isTeacherOnly = roles.includes('teacher') && !roles.some((r) => ['admin', 'super_admin'].includes(r));
+      if (isTeacherOnly && homework.teacherId !== req.user.sub) {
+        return res.status(403).json({ error: 'You can only view submissions for your own homework assignments.' });
+      }
+
       const rows = await db.all('SELECT * FROM homework_submissions WHERE homeworkId = ?', id);
       res.json(rows);
     } catch (err) {
@@ -4022,6 +4221,20 @@ async function main() {
         params.push(branchId);
       }
 
+      // Student -> Batch -> Teacher Assignment: a teacher-only account only ever
+      // sees students in batches actually assigned to them. This also means an
+      // unallocated student (className '') is never returned to a teacher, since
+      // '' can never match a real assigned batch name — enforced here so no
+      // amount of client-side filtering (or a hand-crafted className/batch query
+      // param for a batch that isn't theirs) can leak another batch's roster.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames) {
+        if (teacherClassNames.length === 0) return res.json([]);
+        if (className && !teacherClassNames.includes(className)) return res.json([]);
+        conditions.push(`className IN (${teacherClassNames.map(() => '?').join(',')})`);
+        params.push(...teacherClassNames);
+      }
+
       if (conditions.length > 0) {
         query += ' WHERE ' + conditions.join(' AND ');
       }
@@ -4108,6 +4321,16 @@ async function main() {
       if (!s.firstName || !s.lastName || !s.primaryParentMobile) {
         return res.status(400).json({ error: 'First name, last name, and primary parent mobile are required' });
       }
+
+      // A teacher-only account may only place a new student into a batch
+      // actually assigned to them (an empty className still leaves the
+      // student unallocated, visible only to admin/super_admin — just not
+      // silently placed into a batch that isn't theirs).
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames && s.className && !teacherClassNames.includes(s.className)) {
+        return res.status(403).json({ error: 'You can only add a student to a batch assigned to you.' });
+      }
+
       // A mobile number sent as a JSON number (rather than a string) exceeds the
       // sqlite3 driver's 32-bit int-bind range, gets bound as a float, and lands
       // in these TEXT columns as e.g. "9535755739.0" — silently breaking that
@@ -4206,6 +4429,24 @@ async function main() {
       const studentId = req.params.id;
       const s = req.body;
       const branchId = resolveBranchId(req, s.branchId) || 'branch_main';
+
+      // A teacher-only account may only edit a student who is currently in a
+      // batch assigned to them (closes an IDOR: student ids are guessable,
+      // and without this check GET's batch scoping could be bypassed by
+      // editing/reading back an arbitrary student via this endpoint), and
+      // may only move them into another batch that is also assigned to them
+      // (an empty className is still allowed — that unassigns the student,
+      // it doesn't move them into someone else's batch).
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames) {
+        const existing = await db.get('SELECT className FROM students WHERE id = ?', studentId);
+        if (!existing || !teacherClassNames.includes(existing.className)) {
+          return res.status(403).json({ error: 'You can only edit students in a batch assigned to you.' });
+        }
+        if (s.className && !teacherClassNames.includes(s.className)) {
+          return res.status(403).json({ error: 'You can only move a student into a batch assigned to you.' });
+        }
+      }
 
       const stmt = await db.prepare(`
         UPDATE students SET
@@ -4327,6 +4568,16 @@ async function main() {
         params.push(board);
       }
 
+      // Same batch-assignment scoping as GET /api/students — a teacher-only
+      // account only ever sees attendance for batches assigned to them.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames) {
+        if (teacherClassNames.length === 0) return res.json([]);
+        if (className && !teacherClassNames.includes(className)) return res.json([]);
+        conditions.push(`${classCol} IN (${teacherClassNames.map(() => '?').join(',')})`);
+        params.push(...teacherClassNames);
+      }
+
       if (conditions.length > 0) {
         query += ' WHERE ' + conditions.join(' AND ');
       }
@@ -4345,6 +4596,13 @@ async function main() {
       const { className, date, attendanceRecords, markedBy } = req.body;
       if (!className || !date || !attendanceRecords) {
         return res.status(400).json({ error: 'Missing className, date, or attendanceRecords' });
+      }
+
+      // A teacher-only account may only mark attendance for a batch they are
+      // actually assigned to — mirrors the read-side scoping on GET above.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames && !teacherClassNames.includes(className)) {
+        return res.status(403).json({ error: 'You can only mark attendance for a batch assigned to you.' });
       }
 
       const now = new Date().toISOString();
@@ -4374,6 +4632,30 @@ async function main() {
         `, className, date, studentId, status, markedBy || 'Teacher', now);
 
         results.push({ studentId, status });
+      }
+
+      // Detailed attendance notification to the batch's branch Admin + Super
+      // Admin (see sendAttendanceSubmissionNotification). Resolved from the
+      // batch's own classes.branchId — not the submitter's req.user.branchId —
+      // since an admin/super_admin can submit on behalf of a batch outside
+      // their own branch. Failure here must never fail the attendance save
+      // itself: the records above are already committed.
+      try {
+        const classRow = await db.get('SELECT branchId FROM classes WHERE className = ? LIMIT 1', className);
+        const resolvedBranchId = classRow?.branchId || req.user.branchId || null;
+        const branchRow = resolvedBranchId ? await db.get('SELECT name FROM branches WHERE id = ?', resolvedBranchId) : null;
+        const branchName = branchRow?.name || resolvedBranchId || 'Unknown Branch';
+
+        await sendAttendanceSubmissionNotification(db, {
+          className,
+          date,
+          attendanceRecords,
+          submitter: { id: req.user.sub, name: req.user.name, role: req.user.roles?.[0] || 'teacher' },
+          branchId: resolvedBranchId,
+          branchName,
+        });
+      } catch (notifyErr) {
+        console.error('sendAttendanceSubmissionNotification failed:', notifyErr);
       }
 
       res.json({ success: true, results });
@@ -5454,7 +5736,7 @@ async function main() {
     try {
       const { type, category, voucherNumber, date } = req.query;
       const branchId = resolveBranchId(req, req.query.branchId);
-      let query = 'SELECT * FROM ledger_transactions WHERE 1=1';
+      let query = 'SELECT * FROM ledger_transactions WHERE deletedAt IS NULL';
       const params = [];
       if (branchId) {
         query += ' AND branchId = ?';
@@ -5500,7 +5782,7 @@ async function main() {
   app.post('/api/ledger', upload.single('attachment'), async (req, res) => {
     if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { date, type, category, description, amount, paymentMode, referenceNumber, enteredBy } = req.body;
+      const { date, type, category, description, amount, paymentMode, referenceNumber, enteredBy, vendorName, notes } = req.body;
       const branchId = resolveBranchId(req, req.body.branchId) || 'branch_main';
       const file = req.file;
 
@@ -5516,11 +5798,12 @@ async function main() {
 
       // Insert record
       const stmt = await db.prepare(`
-        INSERT INTO ledger_transactions (voucherNumber, date, type, category, description, amount, paymentMode, referenceNumber, enteredBy, branchId, attachmentPath, attachmentName, attachmentSize)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ledger_transactions (voucherNumber, date, type, category, description, amount, paymentMode, referenceNumber, enteredBy, branchId, vendorName, notes, attachmentPath, attachmentName, attachmentSize)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const result = await stmt.run(
         voucherNumber, date, type, category, description, Number(amount), paymentMode, referenceNumber || '', enteredBy || '', branchId,
+        vendorName || '', notes || '',
         file ? `/uploads/${file.filename}` : null, file ? file.originalname : null, file ? file.size : null
       );
       await stmt.finalize();
@@ -5533,26 +5816,194 @@ async function main() {
     }
   });
 
+  const LEDGER_ATTACHMENT_MIME_ALLOWLIST = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+
+  function deleteUploadedFileIfAny(file) {
+    if (!file) return;
+    try { fs.unlinkSync(file.path); } catch (e) { /* best-effort cleanup */ }
+  }
+
+  function deleteLedgerAttachmentFile(attachmentPath) {
+    if (!attachmentPath) return;
+    try {
+      const filePath = path.join(process.cwd(), 'server', attachmentPath);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) { console.error('Failed to delete ledger attachment file:', e); }
+  }
+
+  // Accounting-grade edit: enforces branch ownership (super_admin: any branch;
+  // admin/accountant: only their own), validates every field, supports
+  // keep/replace/remove for the attachment in one atomic save, guards against
+  // a stale-data overwrite via expectedUpdatedAt, and always appends an
+  // immutable audit_log row capturing the full before/after snapshot. Never
+  // deletes or truncates anything — this only ever UPDATEs the one row named
+  // by :id and INSERTs one audit row.
   app.put('/api/ledger/:id', upload.single('attachment'), async (req, res) => {
-    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const roles = req.user.roles || [];
+    if (!roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) {
+      deleteUploadedFileIfAny(req.file);
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     try {
       const existing = await db.get('SELECT * FROM ledger_transactions WHERE id = ?', req.params.id);
-      if (!existing) return res.status(404).json({ error: 'Transaction not found' });
-      const { date, type, category, description, amount, paymentMode, referenceNumber } = req.body;
+      if (!existing || existing.deletedAt) {
+        deleteUploadedFileIfAny(req.file);
+        return res.status(404).json({ error: 'Transaction not found' });
+      }
+
+      const isSuperAdmin = roles.includes('super_admin');
+      if (!isSuperAdmin && existing.branchId !== (req.user.branchId || null)) {
+        deleteUploadedFileIfAny(req.file);
+        return res.status(403).json({ error: 'You can only edit records belonging to your own branch.' });
+      }
+
+      const { date, type, category, description, amount, paymentMode, referenceNumber, vendorName, notes, removeAttachment, expectedUpdatedAt } = req.body;
+
       if (!date || !type || !category || !description || !amount || !paymentMode) {
+        deleteUploadedFileIfAny(req.file);
         return res.status(400).json({ error: 'Date, type, category, description, amount, and paymentMode are required.' });
       }
+      if (!['Income', 'Expense'].includes(type)) {
+        deleteUploadedFileIfAny(req.file);
+        return res.status(400).json({ error: 'Type must be Income or Expense.' });
+      }
+      if (isNaN(Number(amount)) || Number(amount) <= 0) {
+        deleteUploadedFileIfAny(req.file);
+        return res.status(400).json({ error: 'Amount must be a positive number.' });
+      }
+      if (isNaN(new Date(date).getTime())) {
+        deleteUploadedFileIfAny(req.file);
+        return res.status(400).json({ error: 'Date is invalid.' });
+      }
+      if (req.file && !LEDGER_ATTACHMENT_MIME_ALLOWLIST.includes(req.file.mimetype)) {
+        deleteUploadedFileIfAny(req.file);
+        return res.status(400).json({ error: 'Attachment must be a PDF, JPG, JPEG, or PNG file.' });
+      }
+
+      // Optimistic concurrency: if the client fetched the record before
+      // someone else already saved a change, reject rather than silently
+      // overwriting their edit.
+      if (expectedUpdatedAt && existing.updatedAt && expectedUpdatedAt !== existing.updatedAt) {
+        deleteUploadedFileIfAny(req.file);
+        return res.status(409).json({ error: 'This record was modified by someone else since you opened it. Please refresh and try again.' });
+      }
+
+      // Only super_admin may move a record to a different branch; admin/
+      // accountant edits always keep the record's existing branch, and any
+      // branchId they send is ignored rather than trusted.
+      let targetBranchId = existing.branchId;
+      if (isSuperAdmin && req.body.branchId && req.body.branchId !== existing.branchId) {
+        const branchRow = await db.get('SELECT id FROM branches WHERE id = ?', req.body.branchId);
+        if (!branchRow) {
+          deleteUploadedFileIfAny(req.file);
+          return res.status(400).json({ error: 'Selected branch does not exist.' });
+        }
+        targetBranchId = req.body.branchId;
+      }
+
       const file = req.file;
+      const shouldRemoveAttachment = !file && (removeAttachment === 'true' || removeAttachment === true);
+
+      let attachmentPath = existing.attachmentPath;
+      let attachmentName = existing.attachmentName;
+      let attachmentSize = existing.attachmentSize;
+
+      if (file) {
+        deleteLedgerAttachmentFile(existing.attachmentPath);
+        attachmentPath = `/uploads/${file.filename}`;
+        attachmentName = file.originalname;
+        attachmentSize = file.size;
+      } else if (shouldRemoveAttachment) {
+        deleteLedgerAttachmentFile(existing.attachmentPath);
+        attachmentPath = null;
+        attachmentName = null;
+        attachmentSize = null;
+      }
+
+      const now = new Date().toISOString();
       await db.run(
-        `UPDATE ledger_transactions SET date=?, type=?, category=?, description=?, amount=?, paymentMode=?, referenceNumber=?, attachmentPath=?, attachmentName=?, attachmentSize=? WHERE id=?`,
+        `UPDATE ledger_transactions SET date=?, type=?, category=?, description=?, amount=?, paymentMode=?, referenceNumber=?, vendorName=?, notes=?, branchId=?, attachmentPath=?, attachmentName=?, attachmentSize=?, updatedAt=?, updatedBy=? WHERE id=?`,
         date, type, category, description, Number(amount), paymentMode, referenceNumber || '',
-        file ? `/uploads/${file.filename}` : existing.attachmentPath,
-        file ? file.originalname : existing.attachmentName,
-        file ? file.size : existing.attachmentSize,
+        vendorName || '', notes || '', targetBranchId,
+        attachmentPath, attachmentName, attachmentSize,
+        now, req.user.name || 'Unknown',
         req.params.id
       );
+
       const saved = await db.get('SELECT * FROM ledger_transactions WHERE id = ?', req.params.id);
+
+      await db.run(
+        `INSERT INTO ledger_audit_log (ledgerId, editedByUserId, editedByName, editedByRole, branchId, editedAt, previousValues, updatedValues) VALUES (?,?,?,?,?,?,?,?)`,
+        Number(req.params.id), req.user.sub, req.user.name || 'Unknown', roles[0] || '', targetBranchId, now,
+        JSON.stringify(existing), JSON.stringify(saved)
+      );
+
       res.json(saved);
+    } catch (err) {
+      console.error(err);
+      deleteUploadedFileIfAny(req.file);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Soft-delete a ledger record (income or expense). Same auth/branch rules
+  // as the edit endpoint above. Never physically removes the row — every
+  // read (GET /api/ledger, dashboard, reports) already filters on
+  // deletedAt IS NULL, so a deleted voucher disappears from all totals
+  // immediately while the row and its full history stay in the database.
+  app.delete('/api/ledger/:id', async (req, res) => {
+    const roles = req.user.roles || [];
+    if (!roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    try {
+      const existing = await db.get('SELECT * FROM ledger_transactions WHERE id = ?', req.params.id);
+      if (!existing || existing.deletedAt) {
+        return res.status(404).json({ error: 'Transaction not found' });
+      }
+
+      const isSuperAdmin = roles.includes('super_admin');
+      if (!isSuperAdmin && existing.branchId !== (req.user.branchId || null)) {
+        return res.status(403).json({ error: 'You can only delete records belonging to your own branch.' });
+      }
+
+      const now = new Date().toISOString();
+      await db.run(
+        'UPDATE ledger_transactions SET deletedAt=?, deletedBy=? WHERE id=?',
+        now, req.user.name || 'Unknown', req.params.id
+      );
+
+      await db.run(
+        `INSERT INTO ledger_audit_log (ledgerId, editedByUserId, editedByName, editedByRole, branchId, editedAt, previousValues, updatedValues, action) VALUES (?,?,?,?,?,?,?,?,?)`,
+        Number(req.params.id), req.user.sub, req.user.name || 'Unknown', roles[0] || '', existing.branchId, now,
+        JSON.stringify(existing), null, 'DELETE'
+      );
+
+      res.json({ success: true, id: Number(req.params.id) });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Staff-only audit trail for one ledger record — branch-scoped the same way
+  // as the edit endpoint above (admin/accountant limited to their own branch).
+  app.get('/api/ledger/:id/audit-log', async (req, res) => {
+    const roles = req.user.roles || [];
+    if (!roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT branchId FROM ledger_transactions WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Transaction not found' });
+      if (!roles.includes('super_admin') && existing.branchId !== (req.user.branchId || null)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const rows = await db.all('SELECT * FROM ledger_audit_log WHERE ledgerId = ? ORDER BY editedAt DESC', req.params.id);
+      const mapped = rows.map((r) => ({
+        ...r,
+        previousValues: (() => { try { return JSON.parse(r.previousValues); } catch { return null; } })(),
+        updatedValues: (() => { try { return JSON.parse(r.updatedValues); } catch { return null; } })(),
+      }));
+      res.json(mapped);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -5671,6 +6122,15 @@ async function main() {
       const params = [];
       if (req.query.examId) { conditions.push('examId = ?'); params.push(req.query.examId); }
       if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+
+      // Same batch-assignment scoping as GET /api/students.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames) {
+        if (teacherClassNames.length === 0) return res.json([]);
+        conditions.push(`className IN (${teacherClassNames.map(() => '?').join(',')})`);
+        params.push(...teacherClassNames);
+      }
+
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const rows = await db.all(`SELECT * FROM exam_attendance ${where} ORDER BY createdAt ASC`, ...params);
       res.json(rows.map((row) => ({ ...row, isLocked: Boolean(row.isLocked) })));
@@ -5681,6 +6141,15 @@ async function main() {
     try {
       const submissions = Array.isArray(req.body?.submissions) ? req.body.submissions : [];
       if (!submissions.length) return res.status(400).json({ error: 'No attendance records provided' });
+
+      // A teacher-only account may only submit exam attendance for a batch
+      // actually assigned to them — checked against every record in the batch
+      // up front, same all-or-nothing behaviour as the lock check below.
+      const teacherClassNames = await getTeacherAssignedClassNames(req);
+      if (teacherClassNames) {
+        const disallowed = submissions.some((s) => !teacherClassNames.includes(s.className));
+        if (disallowed) return res.status(403).json({ error: 'You can only record exam attendance for a batch assigned to you.' });
+      }
 
       // Reject the whole batch up front if any targeted record is already locked —
       // matches the original all-or-nothing behaviour of the in-memory version.

@@ -395,7 +395,7 @@ export function Attendance() {
           </h2>
           {batchOptions.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              {isTeacherOnly ? 'You have no assigned batches yet.' : 'No batches exist for this branch yet — create one from Batches first.'}
+              {isTeacherOnly ? 'No batch has been assigned yet.' : 'No batches exist for this branch yet — create one from Batches first.'}
             </p>
           ) : (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">

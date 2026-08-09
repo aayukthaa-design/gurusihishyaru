@@ -13,7 +13,7 @@ import { addNotification } from '../lib/notificationService';
 import { formatIndianCurrency } from '../lib/currency';
 import { 
   ChevronRight, TrendingUp, TrendingDown, Plus, Search,
-  Download, Eye, Edit2, BookOpen, Box, DollarSign, SlidersHorizontal,
+  Download, Eye, Edit2, Trash2, BookOpen, Box, DollarSign, SlidersHorizontal,
   Upload, Lock, Unlock, FileText, CheckCircle, Package, AlertTriangle, RefreshCw, Wallet, CreditCard, ClipboardCheck, Boxes, FileSpreadsheet, Users
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
@@ -29,12 +29,47 @@ interface LedgerEntry {
   amount: number;
   paymentMode: string;
   referenceNumber?: string;
+  vendorName?: string | null;
+  notes?: string | null;
   enteredBy: string;
   branchId: string;
   attachmentPath?: string | null;
   attachmentName?: string | null;
   attachmentSize?: number | null;
   runningBalance: number;
+  updatedAt?: string | null;
+  updatedBy?: string | null;
+  deletedAt?: string | null;
+  deletedBy?: string | null;
+}
+
+interface LedgerFormState {
+  date: string;
+  type: 'Income' | 'Expense';
+  category: string;
+  description: string;
+  amount: string;
+  paymentMode: string;
+  referenceNumber: string;
+  vendorName: string;
+  notes: string;
+  branchId: string;
+  attachment: File | null;
+  removeAttachment: boolean;
+  expectedUpdatedAt: string;
+}
+
+interface LedgerAuditEntry {
+  id: number;
+  ledgerId: number;
+  editedByUserId: string;
+  editedByName: string;
+  editedByRole: string;
+  branchId: string;
+  editedAt: string;
+  previousValues: Partial<LedgerEntry> | null;
+  updatedValues: Partial<LedgerEntry> | null;
+  action?: 'UPDATE' | 'DELETE';
 }
 
 interface InventoryItem {
@@ -141,16 +176,54 @@ export function AccountantPortal() {
   const [showAddLedgerModal, setShowAddLedgerModal] = useState(false);
   const [editingLedgerId, setEditingLedgerId] = useState<number | null>(null);
   const [viewingLedgerRow, setViewingLedgerRow] = useState<LedgerEntry | null>(null);
-  const [ledgerForm, setLedgerForm] = useState({
+  const [isSavingLedger, setIsSavingLedger] = useState(false);
+  const [ledgerSaveMessage, setLedgerSaveMessage] = useState<string | null>(null);
+  const [ledgerAuditLog, setLedgerAuditLog] = useState<LedgerAuditEntry[]>([]);
+  const [showLedgerAudit, setShowLedgerAudit] = useState(false);
+  const [loadingLedgerAudit, setLoadingLedgerAudit] = useState(false);
+  const [ledgerForm, setLedgerForm] = useState<LedgerFormState>({
     date: new Date().toISOString().split('T')[0],
-    type: 'Income' as 'Income' | 'Expense',
+    type: 'Income',
     category: 'Tuition Fee',
     description: '',
     amount: '',
     paymentMode: 'UPI',
     referenceNumber: '',
-    attachment: null as File | null
+    vendorName: '',
+    notes: '',
+    branchId: isSuperAdmin ? '' : myBranchId,
+    attachment: null,
+    removeAttachment: false,
+    expectedUpdatedAt: '',
   });
+
+  // One place to build a fresh form for both "Add Income"/"Add Expense"
+  // quick actions and the ledger tab's own Add button — every reset site
+  // used to duplicate this object by hand, which is how the Add flow
+  // previously leaked a just-edited record's branch/vendor/notes into the
+  // next brand-new entry when the modal was reopened without an explicit
+  // reset.
+  const defaultLedgerForm = (type: 'Income' | 'Expense' = 'Income', category: string = type === 'Income' ? 'Tuition Fee' : 'Utilities'): LedgerFormState => ({
+    date: new Date().toISOString().split('T')[0],
+    type,
+    category,
+    description: '',
+    amount: '',
+    paymentMode: 'UPI',
+    referenceNumber: '',
+    vendorName: '',
+    notes: '',
+    branchId: branchFilter || myBranchId,
+    attachment: null,
+    removeAttachment: false,
+    expectedUpdatedAt: '',
+  });
+
+  useEffect(() => {
+    if (!ledgerSaveMessage) return;
+    const timer = setTimeout(() => setLedgerSaveMessage(null), 3500);
+    return () => clearTimeout(timer);
+  }, [ledgerSaveMessage]);
 
   const [showAddInvModal, setShowAddInvModal] = useState(false);
   const [editingInvItem, setEditingInvItem] = useState<InventoryItem | null>(null);
@@ -519,8 +592,17 @@ export function AccountantPortal() {
   // Handle Add/Edit transaction
   const handleAddTransactionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingLedger) return; // guards against a double-click firing two submits
     if (!ledgerForm.description || !ledgerForm.amount || Number(ledgerForm.amount) <= 0) {
       alert('Description and a valid amount are required.');
+      return;
+    }
+    if (!ledgerForm.date || isNaN(new Date(ledgerForm.date).getTime())) {
+      alert('Please enter a valid date.');
+      return;
+    }
+    if (!ledgerForm.branchId) {
+      alert('Please select a branch.');
       return;
     }
 
@@ -532,42 +614,52 @@ export function AccountantPortal() {
     formData.append('amount', ledgerForm.amount);
     formData.append('paymentMode', ledgerForm.paymentMode);
     formData.append('referenceNumber', ledgerForm.referenceNumber);
+    formData.append('vendorName', ledgerForm.vendorName);
+    formData.append('notes', ledgerForm.notes);
     formData.append('enteredBy', user?.name || 'Accountant');
-    formData.append('branchId', branchFilter || myBranchId);
+    formData.append('branchId', ledgerForm.branchId);
     if (ledgerForm.attachment) {
       formData.append('attachment', ledgerForm.attachment);
+    } else if (editingLedgerId && ledgerForm.removeAttachment) {
+      formData.append('removeAttachment', 'true');
+    }
+    if (editingLedgerId) {
+      formData.append('expectedUpdatedAt', ledgerForm.expectedUpdatedAt || '');
     }
 
+    setIsSavingLedger(true);
     try {
+      const wasEdit = Boolean(editingLedgerId);
       const res = editingLedgerId
         ? await apiFetch(`/api/ledger/${editingLedgerId}`, { method: 'PUT', body: formData })
         : await apiFetch('/api/ledger', { method: 'POST', body: formData });
       if (res.ok) {
         closeLedgerModal();
         await fetchLedger();
+        setLedgerSaveMessage(wasEdit ? 'Voucher updated successfully — ledger, dashboard and reports now reflect the change.' : 'Voucher recorded successfully.');
       } else {
-        const errorData = await res.json();
-        alert(errorData.error || 'Failed to submit ledger entry.');
+        const errorData = await res.json().catch(() => ({} as { error?: string }));
+        if (res.status === 409) {
+          // Someone else saved a change to this same record first — refuse to
+          // blindly overwrite it; pull the latest copy instead.
+          alert(errorData.error || 'This record was modified by someone else since you opened it. Reloading the latest version.');
+          await fetchLedger();
+        } else {
+          alert(errorData.error || 'Failed to submit ledger entry.');
+        }
       }
     } catch (e) {
       console.error(e);
       alert('Connection error');
+    } finally {
+      setIsSavingLedger(false);
     }
   };
 
   const closeLedgerModal = () => {
     setShowAddLedgerModal(false);
     setEditingLedgerId(null);
-    setLedgerForm({
-      date: new Date().toISOString().split('T')[0],
-      type: 'Income',
-      category: 'Tuition Fee',
-      description: '',
-      amount: '',
-      paymentMode: 'UPI',
-      referenceNumber: '',
-      attachment: null
-    });
+    setLedgerForm(defaultLedgerForm());
   };
 
   const openEditLedger = (row: LedgerEntry) => {
@@ -580,9 +672,65 @@ export function AccountantPortal() {
       amount: String(row.amount),
       paymentMode: row.paymentMode,
       referenceNumber: row.referenceNumber || '',
-      attachment: null
+      vendorName: row.vendorName || '',
+      notes: row.notes || '',
+      branchId: row.branchId,
+      attachment: null,
+      removeAttachment: false,
+      expectedUpdatedAt: row.updatedAt || '',
     });
+    setLedgerAuditLog([]);
+    setShowLedgerAudit(false);
     setShowAddLedgerModal(true);
+  };
+
+  const openLedgerAuditLog = async (ledgerId: number) => {
+    if (showLedgerAudit) {
+      setShowLedgerAudit(false);
+      return;
+    }
+    setShowLedgerAudit(true);
+    setLoadingLedgerAudit(true);
+    try {
+      const res = await apiFetch(`/api/ledger/${ledgerId}/audit-log`);
+      if (res.ok) {
+        setLedgerAuditLog(await res.json());
+      } else {
+        setLedgerAuditLog([]);
+      }
+    } catch (e) {
+      console.error(e);
+      setLedgerAuditLog([]);
+    } finally {
+      setLoadingLedgerAudit(false);
+    }
+  };
+
+  // Soft-deletes the voucher on the server (deletedAt/deletedBy is recorded,
+  // the row itself is never dropped) then refetches so the ledger table,
+  // dashboard totals and reports all reflect it immediately without a
+  // page reload.
+  const handleDeleteLedger = async (row: LedgerEntry) => {
+    const confirmed = confirm(
+      `Delete this ${row.type} voucher ${row.voucherNumber} for ${formatIndianCurrency(row.amount)}?\n\nThis will remove it from the ledger, dashboard and reports. This cannot be undone from this screen.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await apiFetch(`/api/ledger/${row.id}`, { method: 'DELETE' });
+      if (res.ok) {
+        if (viewingLedgerRow?.id === row.id) setViewingLedgerRow(null);
+        if (editingLedgerId === row.id) closeLedgerModal();
+        await fetchLedger();
+        setLedgerSaveMessage(`${row.type} voucher ${row.voucherNumber} deleted — ledger, dashboard and reports now reflect the change.`);
+      } else {
+        const err = await res.json().catch(() => ({} as { error?: string }));
+        alert(err.error || 'Failed to delete ledger entry.');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Connection error');
+    }
   };
 
   // Handle Add/Edit Inventory item
@@ -691,16 +839,6 @@ export function AccountantPortal() {
         method: 'DELETE'
       });
       if (res.ok) await fetchInventory();
-    } catch (e) { console.error(e); }
-  };
-
-  const handleDeleteAttachment = async (ledgerId: number) => {
-    if (!confirm('Are you sure you want to remove the uploaded attachment?')) return;
-    try {
-      const res = await apiFetch(`/api/ledger/${ledgerId}/attachment`, {
-        method: 'DELETE'
-      });
-      if (res.ok) await fetchLedger();
     } catch (e) { console.error(e); }
   };
 
@@ -884,6 +1022,13 @@ export function AccountantPortal() {
           )}
         </div>
 
+        {ledgerSaveMessage && (
+          <div className="flex items-center gap-2 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950/30 px-4 py-2.5 text-sm font-medium text-emerald-700 dark:text-emerald-400">
+            <CheckCircle className="h-4 w-4 shrink-0" />
+            {ledgerSaveMessage}
+          </div>
+        )}
+
         {/* --- Tabs Control Bar --- */}
         <div className="flex overflow-x-auto gap-1 border-b border-border pb-1 shrink-0">
           {[
@@ -954,16 +1099,7 @@ export function AccountantPortal() {
                     <div
                       onClick={() => {
                         setEditingLedgerId(null);
-                        setLedgerForm({
-                          date: new Date().toISOString().split('T')[0],
-                          type: 'Income',
-                          category: 'Tuition Fee',
-                          description: '',
-                          amount: '',
-                          paymentMode: 'UPI',
-                          referenceNumber: '',
-                          attachment: null
-                        });
+                        setLedgerForm(defaultLedgerForm('Income', 'Tuition Fee'));
                         setShowAddLedgerModal(true);
                       }}
                       className="flex flex-col items-center justify-center p-5 border border-border bg-secondary/10 rounded-2xl cursor-pointer hover:scale-105 hover:bg-secondary/35 shadow-sm hover:shadow-md transition-all duration-200 gap-3"
@@ -978,16 +1114,7 @@ export function AccountantPortal() {
                     <div
                       onClick={() => {
                         setEditingLedgerId(null);
-                        setLedgerForm({
-                          date: new Date().toISOString().split('T')[0],
-                          type: 'Expense',
-                          category: 'Utilities',
-                          description: '',
-                          amount: '',
-                          paymentMode: 'UPI',
-                          referenceNumber: '',
-                          attachment: null
-                        });
+                        setLedgerForm(defaultLedgerForm('Expense', 'Utilities'));
                         setShowAddLedgerModal(true);
                       }}
                       className="flex flex-col items-center justify-center p-5 border border-border bg-secondary/10 rounded-2xl cursor-pointer hover:scale-105 hover:bg-secondary/35 shadow-sm hover:shadow-md transition-all duration-200 gap-3"
@@ -1244,7 +1371,7 @@ export function AccountantPortal() {
                   </div>
 
                   <button
-                    onClick={() => { setEditingLedgerId(null); setShowAddLedgerModal(true); }}
+                    onClick={() => { setEditingLedgerId(null); setLedgerForm(defaultLedgerForm()); setShowAddLedgerModal(true); }}
                     className="flex items-center justify-center gap-2 px-4 py-2 bg-primary text-primary-foreground font-semibold rounded-xl text-sm transition-all hover:opacity-90 active:scale-95 shadow-sm"
                   >
                     <Plus className="h-4 w-4" /> Add Voucher Transaction
@@ -1259,7 +1386,6 @@ export function AccountantPortal() {
                         <th className="px-4 py-3">Voucher No</th>
                         <th className="px-4 py-3">Date</th>
                         <th className="px-4 py-3">Category</th>
-                        <th className="px-4 py-3 text-center">Uniform Size</th>
                         <th className="px-4 py-3">Description</th>
                         <th className="px-4 py-3 text-right text-green-600">Credit (Income)</th>
                         <th className="px-4 py-3 text-right text-red-500">Debit (Expense)</th>
@@ -1304,20 +1430,27 @@ export function AccountantPortal() {
                             )}
                           </td>
                           <td className="px-4 py-3">
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center gap-2">
                               <button
-                                onClick={() => setViewingLedgerRow(row)}
-                                className="text-primary hover:text-primary/70 p-1 transition-colors"
+                                onClick={() => { setViewingLedgerRow(row); setShowLedgerAudit(false); setLedgerAuditLog([]); }}
+                                className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs font-semibold text-primary hover:bg-primary/10 transition-colors"
                                 title="View entry"
                               >
-                                <Eye className="h-4 w-4" />
+                                <Eye className="h-3.5 w-3.5" /> View
                               </button>
                               <button
                                 onClick={() => openEditLedger(row)}
-                                className="text-muted-foreground hover:text-foreground p-1 transition-colors"
+                                className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs font-semibold text-foreground hover:bg-secondary transition-colors"
                                 title="Edit entry"
                               >
-                                <Edit2 className="h-4 w-4" />
+                                <Edit2 className="h-3.5 w-3.5" /> Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteLedger(row)}
+                                className="flex items-center gap-1 rounded-lg border border-destructive/30 px-2 py-1 text-xs font-semibold text-destructive hover:bg-destructive/10 transition-colors"
+                                title="Delete entry"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" /> Delete
                               </button>
                             </div>
                           </td>
@@ -1876,7 +2009,7 @@ export function AccountantPortal() {
       {/* ========================================================================= */}
       {showAddLedgerModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
-          <form onSubmit={handleAddTransactionSubmit} className="bg-card border border-border rounded-2xl w-full max-w-lg p-6 shadow-xl space-y-4">
+          <form onSubmit={handleAddTransactionSubmit} className="bg-card border border-border rounded-2xl w-full max-w-lg p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center border-b border-border pb-3">
               <h3 className="font-bold text-foreground">{editingLedgerId ? 'Edit Voucher Transaction' : 'Record Voucher Transaction'}</h3>
               <button type="button" onClick={closeLedgerModal} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
@@ -1907,8 +2040,7 @@ export function AccountantPortal() {
               </div>
 
               <div>
-                
-                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Category</label>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">{ledgerForm.type === 'Income' ? 'Income Category / Source' : 'Expense Category'}</label>
                 <select
                   value={ledgerForm.category}
                   onChange={(e) => setLedgerForm(prev => ({ ...prev, category: e.target.value }))}
@@ -1925,9 +2057,11 @@ export function AccountantPortal() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Amount (?)</label>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Amount (₹)</label>
                 <input
                   type="number"
+                  min="0.01"
+                  step="0.01"
                   placeholder="e.g. 5000"
                   value={ledgerForm.amount}
                   onChange={(e) => setLedgerForm(prev => ({ ...prev, amount: e.target.value }))}
@@ -1949,8 +2083,57 @@ export function AccountantPortal() {
                   <option value="Cheque">Cheque</option>
                 </select>
               </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Reference Number (optional)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. TXN12345"
+                  value={ledgerForm.referenceNumber}
+                  onChange={(e) => setLedgerForm(prev => ({ ...prev, referenceNumber: e.target.value }))}
+                  className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Branch</label>
+                {isSuperAdmin ? (
+                  <select
+                    value={ledgerForm.branchId}
+                    onChange={(e) => setLedgerForm(prev => ({ ...prev, branchId: e.target.value }))}
+                    className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
+                    required
+                  >
+                    <option value="">Select branch</option>
+                    {branches.filter(b => b.status === 'Active').map(b => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={getBranchName(ledgerForm.branchId) || ledgerForm.branchId}
+                    disabled
+                    title="Admins and Accountants can only record or edit entries for their own branch."
+                    className="w-full rounded-xl border border-input bg-secondary/40 px-3 py-2.5 text-sm text-muted-foreground cursor-not-allowed"
+                  />
+                )}
+              </div>
+
+              {ledgerForm.type === 'Expense' && (
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Vendor / Payee</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. ABC Stationery"
+                    value={ledgerForm.vendorName}
+                    onChange={(e) => setLedgerForm(prev => ({ ...prev, vendorName: e.target.value }))}
+                    className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
+                  />
+                </div>
+              )}
             </div>
-            
+
             <div>
               <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Description / Remarks</label>
               <input
@@ -1963,28 +2146,61 @@ export function AccountantPortal() {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Bill / Receipt Attachment (optional)</label>
+              <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Notes (optional)</label>
+              <textarea
+                rows={2}
+                placeholder="Any additional notes for this entry"
+                value={ledgerForm.notes}
+                onChange={(e) => setLedgerForm(prev => ({ ...prev, notes: e.target.value }))}
+                className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none resize-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">
+                {ledgerForm.type === 'Income' ? 'Receipt Attachment' : 'Invoice Attachment'} (PDF/JPG/PNG, optional)
+              </label>
               <input
                 type="file"
-                onChange={(e) => setLedgerForm(prev => ({ ...prev, attachment: e.target.files?.[0] || null }))}
+                accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                onChange={(e) => setLedgerForm(prev => ({ ...prev, attachment: e.target.files?.[0] || null, removeAttachment: false }))}
                 className="w-full text-sm"
               />
-              {editingLedgerId && (
+              {ledgerForm.attachment && (
+                <p className="mt-1.5 text-xs text-emerald-600 dark:text-emerald-400">New file selected: {ledgerForm.attachment.name} — replaces the current attachment on save.</p>
+              )}
+              {editingLedgerId && !ledgerForm.attachment && (
                 (() => {
                   const current = ledger.find((row) => row.id === editingLedgerId);
-                  return current?.attachmentPath ? (
-                    <p className="mt-1.5 text-xs text-muted-foreground">
-                      Current: {current.attachmentName || 'attached file'} —{' '}
-                      <button type="button" onClick={() => handleDeleteAttachment(editingLedgerId)} className="text-red-500 hover:underline">remove</button>
-                    </p>
-                  ) : null;
+                  if (!current?.attachmentPath) return null;
+                  return (
+                    <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <a href={getFileUrl(current.attachmentPath)} target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">
+                        Download current: {current.attachmentName || 'attached file'}
+                      </a>
+                      <label className={`flex items-center gap-1.5 cursor-pointer ${ledgerForm.removeAttachment ? 'text-red-500 font-semibold' : 'text-muted-foreground'}`}>
+                        <input
+                          type="checkbox"
+                          checked={ledgerForm.removeAttachment}
+                          onChange={(e) => setLedgerForm(prev => ({ ...prev, removeAttachment: e.target.checked }))}
+                        />
+                        Remove attachment on save
+                      </label>
+                    </div>
+                  );
                 })()
               )}
             </div>
 
             <div className="flex justify-end gap-3 pt-3">
               <button type="button" onClick={closeLedgerModal} className="rounded-xl border border-border px-5 py-2 text-sm font-medium hover:bg-secondary">Cancel</button>
-              <button type="submit" className="rounded-xl bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">{editingLedgerId ? 'Save Changes' : 'Confirm Entry'}</button>
+              <button
+                type="submit"
+                disabled={isSavingLedger}
+                className="rounded-xl bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSavingLedger ? 'Saving...' : editingLedgerId ? 'Save Changes' : 'Confirm Entry'}
+              </button>
             </div>
           </form>
         </div>
@@ -1992,7 +2208,7 @@ export function AccountantPortal() {
 
       {viewingLedgerRow && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
-          <div className="bg-card border border-border rounded-2xl w-full max-w-lg p-6 shadow-xl space-y-4">
+          <div className="bg-card border border-border rounded-2xl w-full max-w-lg p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center border-b border-border pb-3">
               <h3 className="font-bold text-foreground">Voucher {viewingLedgerRow.voucherNumber}</h3>
               <button type="button" onClick={() => setViewingLedgerRow(null)} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
@@ -2004,18 +2220,70 @@ export function AccountantPortal() {
               <div><p className="text-xs uppercase text-muted-foreground">Amount</p><p className="font-semibold text-foreground">{formatIndianCurrency(viewingLedgerRow.amount)}</p></div>
               <div><p className="text-xs uppercase text-muted-foreground">Payment Mode</p><p className="font-semibold text-foreground">{viewingLedgerRow.paymentMode}</p></div>
               <div><p className="text-xs uppercase text-muted-foreground">Reference No.</p><p className="font-semibold text-foreground">{viewingLedgerRow.referenceNumber || '—'}</p></div>
+              <div><p className="text-xs uppercase text-muted-foreground">Branch</p><p className="font-semibold text-foreground">{getBranchName(viewingLedgerRow.branchId) || viewingLedgerRow.branchId}</p></div>
+              {viewingLedgerRow.type === 'Expense' && (
+                <div><p className="text-xs uppercase text-muted-foreground">Vendor / Payee</p><p className="font-semibold text-foreground">{viewingLedgerRow.vendorName || '—'}</p></div>
+              )}
               <div><p className="text-xs uppercase text-muted-foreground">Entered By</p><p className="font-semibold text-foreground">{viewingLedgerRow.enteredBy}</p></div>
               <div><p className="text-xs uppercase text-muted-foreground">Running Balance</p><p className="font-semibold text-foreground">{formatIndianCurrency(viewingLedgerRow.runningBalance)}</p></div>
               <div className="col-span-2"><p className="text-xs uppercase text-muted-foreground">Description</p><p className="font-semibold text-foreground">{viewingLedgerRow.description}</p></div>
+              {viewingLedgerRow.notes && (
+                <div className="col-span-2"><p className="text-xs uppercase text-muted-foreground">Notes</p><p className="font-semibold text-foreground">{viewingLedgerRow.notes}</p></div>
+              )}
               {viewingLedgerRow.attachmentPath && (
                 <div className="col-span-2">
                   <p className="text-xs uppercase text-muted-foreground">Attachment</p>
                   <a href={getFileUrl(viewingLedgerRow.attachmentPath)} target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">{viewingLedgerRow.attachmentName || 'View Bill'}</a>
                 </div>
               )}
+              {viewingLedgerRow.updatedAt && (
+                <div className="col-span-2 pt-1 border-t border-border/60">
+                  <p className="text-xs text-muted-foreground">Last edited by {viewingLedgerRow.updatedBy || 'Unknown'} on {new Date(viewingLedgerRow.updatedAt).toLocaleString('en-IN')}</p>
+                </div>
+              )}
             </div>
+
+            <div>
+              <button
+                type="button"
+                onClick={() => openLedgerAuditLog(viewingLedgerRow.id)}
+                className="text-xs font-semibold text-primary hover:underline"
+              >
+                {showLedgerAudit ? 'Hide edit history' : 'View edit history'}
+              </button>
+              {showLedgerAudit && (
+                <div className="mt-2 max-h-48 overflow-y-auto space-y-2 rounded-xl border border-border bg-secondary/30 p-3">
+                  {loadingLedgerAudit ? (
+                    <p className="text-xs text-muted-foreground">Loading history…</p>
+                  ) : ledgerAuditLog.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No edits have been made to this record yet.</p>
+                  ) : (
+                    ledgerAuditLog.map((entry) => (
+                      <div key={entry.id} className="text-xs border-b border-border/50 pb-1.5 last:border-0 last:pb-0">
+                        <p className="font-semibold text-foreground">
+                          {entry.action === 'DELETE' ? 'Deleted by' : 'Edited by'} {entry.editedByName} ({entry.editedByRole}) — {new Date(entry.editedAt).toLocaleString('en-IN')}
+                        </p>
+                        {entry.action === 'DELETE' && entry.previousValues && (
+                          <p className="text-muted-foreground">
+                            Removed {entry.previousValues.type} of {formatIndianCurrency(entry.previousValues.amount || 0)} ({entry.previousValues.category})
+                          </p>
+                        )}
+                        {entry.action !== 'DELETE' && entry.previousValues && entry.updatedValues && (
+                          <p className="text-muted-foreground">
+                            Amount: {formatIndianCurrency(entry.previousValues.amount || 0)} → {formatIndianCurrency(entry.updatedValues.amount || 0)}
+                            {entry.previousValues.category !== entry.updatedValues.category ? ` • Category: ${entry.previousValues.category} → ${entry.updatedValues.category}` : ''}
+                          </p>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className="flex justify-end gap-3 pt-3 border-t border-border">
               <button type="button" onClick={() => setViewingLedgerRow(null)} className="rounded-xl border border-border px-5 py-2 text-sm font-medium hover:bg-secondary">Close</button>
+              <button type="button" onClick={() => handleDeleteLedger(viewingLedgerRow)} className="rounded-xl border border-destructive/40 px-5 py-2 text-sm font-semibold text-destructive hover:bg-destructive/10">Delete</button>
               <button type="button" onClick={() => { const row = viewingLedgerRow; setViewingLedgerRow(null); openEditLedger(row); }} className="rounded-xl bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">Edit</button>
             </div>
           </div>

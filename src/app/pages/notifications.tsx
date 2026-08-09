@@ -405,7 +405,7 @@ export function NotificationsPage() {
                       </Badge>
                     </div>
                     <CardDescription>{notification.message}</CardDescription>
-                    <p className="text-xs text-muted-foreground">{notification.description}</p>
+                    <p className="whitespace-pre-line text-xs text-muted-foreground">{notification.description}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     {notification.type === 'info' && <Info className="h-5 w-5 text-primary" />}
@@ -518,6 +518,7 @@ export function NotificationsPage() {
                       </Badge>
                     </div>
                     <CardDescription>{notification.message}</CardDescription>
+                    <p className="whitespace-pre-line text-xs text-muted-foreground">{notification.description}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     {notification.type === 'info' && <Info className="h-5 w-5 text-primary" />}
