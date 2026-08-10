@@ -1679,7 +1679,7 @@ export function AccountantPortal() {
                                 }}
                                 className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-700 hover:bg-amber-100 font-bold rounded-lg text-xs"
                               >
-                                ðŸ“¦ Allocate Kit
+                                📦 Allocate Kit
                               </button>
                             </td>
                           </tr>

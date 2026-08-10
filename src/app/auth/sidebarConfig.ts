@@ -118,7 +118,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
     return [
       { label: 'Overview',  items: allowed.filter((i) => i.module === 'dashboard') },
       { label: 'People',    items: allowed.filter((i) => (['student_management', 'teacher_management', 'parent_management', 'class_allocation'] as Module[]).includes(i.module)) },
-      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar'] as Module[]).includes(i.module)) },
+      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar', 'school_exam_schedules'] as Module[]).includes(i.module)) },
       { label: 'Finance',   items: allowed.filter((i) => (['fee_management', 'expense_management', 'inventory'] as Module[]).includes(i.module)) },
       { label: 'More',      items: allowed.filter((i) => (['event_management', 'notification_center', 'reports_analytics'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);

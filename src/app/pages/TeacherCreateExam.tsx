@@ -9,17 +9,28 @@ import { updateExamStatus } from '../lib/examService';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../lib/apiClient';
 import { BOARDS } from '../lib/classConstants';
-import { getTeacherAllocationsShape, useClasses } from '../lib/classService';
+import { getClassesForTeacher, useClasses } from '../lib/classService';
 
 export function TeacherCreateExam() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [classesState, setClassesState] = React.useState<string[]>(user?.assignedClassIds ?? []);
-  const [allocMap, setAllocMap] = React.useState<Record<string, { subjects: string[]; batches: string[] }>>({});
+  const isTeacherOnly = user?.role === 'teacher';
+
+  // Derived directly from the reactive `classes` list on every render — no
+  // effect + conditional setState in between, which is what let the batch
+  // list silently go stale ("not getting everytime"): a re-render that saw
+  // zero batches used to skip the update entirely and keep whatever list was
+  // already in state instead of clearing it.
+  const allClasses = useClasses();
+  const teacherBatches = React.useMemo(
+    () => (user?.id ? getClassesForTeacher(user.id, user.branchId) : []),
+    [user?.id, user?.branchId, allClasses]
+  );
+  const [selectedBatchId, setSelectedBatchId] = React.useState('');
 
   const [name, setName] = React.useState('');
   const [subject, setSubject] = React.useState('');
-  const [className, setClassName] = React.useState(classesState[0] ?? '');
+  const [className, setClassName] = React.useState('');
   const [batch, setBatch] = React.useState('');
   const [date, setDate] = React.useState('');
   const [maxMarks, setMaxMarks] = React.useState<number>(100);
@@ -49,28 +60,18 @@ export function TeacherCreateExam() {
   }, [attendanceStudents, attendanceStatuses]);
   const canSubmitAttendance = attendanceSummary.total > 0 && attendanceSummary.remaining === 0;
 
-  const batchesForClass = allocMap[className]?.batches || BOARDS;
-
-  React.useEffect(() => {
-    if (!classesState.includes(className) && classesState.length > 0) setClassName(classesState[0]);
-  }, [classesState, className]);
-
-  React.useEffect(() => {
-    if (batchesForClass.length > 0 && !batchesForClass.includes(batch)) setBatch(batchesForClass[0]);
-  }, [className, batchesForClass, batch]);
-
-  // Batch-based class restructuring: classes/subjects/boards used to come from
-  // GET /api/allocations?teacherId=; now derived from the `classes` table
-  // (batches) via getTeacherAllocationsShape, same shape as before. Depending
-  // on the reactive `allClasses` list (not just user.id) means this recomputes
-  // live if a batch's teacher assignment changes.
-  const allClasses = useClasses();
-  React.useEffect(() => {
-    if (!user?.id) return;
-    const data = getTeacherAllocationsShape(user.id, user.branchId);
-    if (data.classes.length) setClassesState(data.classes);
-    if (data.allocations) setAllocMap(data.allocations);
-  }, [user?.id, user?.branchId, allClasses]);
+  // Selecting a batch fills in Class/Board/Subject from that batch's own
+  // record; all three stay freely editable afterward (Class in particular is
+  // a plain text field so a typo'd/renamed batch never blocks exam creation).
+  function handleBatchChange(batchId: string) {
+    setSelectedBatchId(batchId);
+    const row = teacherBatches.find((b) => String(b.id) === batchId);
+    if (row) {
+      setClassName(row.className);
+      setBatch(row.board || '');
+      setSubject(row.subject || '');
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -100,9 +101,11 @@ export function TeacherCreateExam() {
       }
     }
 
-    // Enforce teacher can only create for assigned classes
-    if (!classesState.includes(className)) {
-      setError('You are not assigned to the selected class');
+    // Enforce teacher can only create for one of their own assigned batches
+    // (the class name itself is free text now, so batch selection — not a
+    // text match — is what proves the exam belongs to this teacher).
+    if (isTeacherOnly && !selectedBatchId) {
+      setError('Please select one of your assigned batches.');
       return;
     }
 
@@ -247,22 +250,32 @@ export function TeacherCreateExam() {
             <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. Mathematics" className="mt-1 w-full rounded-md border px-3 py-2" />
           </div>
 
+          {isTeacherOnly && (
+            <div>
+              <label className="block text-sm font-medium text-muted-foreground">Batch</label>
+              <select value={selectedBatchId} onChange={(e) => handleBatchChange(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
+                <option value="">
+                  {teacherBatches.length === 0 ? 'No batches assigned yet' : 'Select a batch…'}
+                </option>
+                {teacherBatches.map((b) => (
+                  <option key={b.id} value={String(b.id)}>{b.className}{b.board ? ` (${b.board})` : ''}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-muted-foreground">Picking a batch fills in Class and Board below — you can still edit them.</p>
+            </div>
+          )}
+
           <div>
             <label className="block text-sm font-medium text-muted-foreground">Class</label>
-            <select value={className} onChange={(e) => setClassName(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
-              {classesState.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <input value={className} onChange={(e) => setClassName(e.target.value)} placeholder="e.g. 10th" className="mt-1 w-full rounded-md border px-3 py-2" />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-muted-foreground">Board</label>
-            {batchesForClass.length > 0 ? (
-              <select value={batch} onChange={(e)=>setBatch(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
-                {batchesForClass.map((b)=> <option key={b} value={b}>{b}</option>)}
-              </select>
-            ) : (
-              <input value={batch} onChange={(e) => setBatch(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2" />
-            )}
+            <select value={batch} onChange={(e) => setBatch(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
+              <option value="">Select board…</option>
+              {BOARDS.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
           </div>
 
           <div>
@@ -326,6 +339,7 @@ export function TeacherCreateExam() {
               setError(null);
               if (!name || !subject || !className || !date || !maxMarks) { setError('Please fill required fields before saving draft'); return; }
               if (passingMarks < 0 || passingMarks > maxMarks) { setError('Passing marks must be between 0 and maximum marks'); return; }
+              if (isTeacherOnly && !selectedBatchId) { setError('Please select one of your assigned batches.'); return; }
               try {
                 const draft = await saveExamAPI({ name, subject, className, batch, date, maxMarks, passingMarks, description, attachment, status: 'draft', createdBy: user?.id });
                 if (!draft?.name) {

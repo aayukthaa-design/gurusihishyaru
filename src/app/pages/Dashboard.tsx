@@ -1289,19 +1289,24 @@ export function Dashboard() {
           </div>
         ) : (
           <>
-            <div className="rounded-2xl border border-border bg-card p-5">
-              <h3 className="text-sm font-semibold mb-2">Upcoming School Exams</h3>
-              <div className="space-y-2 text-sm text-muted-foreground">
-                {adminSchoolExams.length === 0 && <div className="text-sm text-muted-foreground">No upcoming school exams</div>}
-                {adminSchoolExams.map((exam) => (
-                  <div key={exam.id} className="flex items-center justify-between gap-2">
-                    <span>{exam.studentName} · {exam.examName}</span>
-                    <span className="text-xs text-primary">{exam.startDate}</span>
-                  </div>
-                ))}
+            {/* Super Admin has no school_exam_schedules module access (day-to-day
+                tracking is an Admin operation) — the "View schedules" link below
+                would 403 for them, so this card is Admin-only. */}
+            {!isSuperAdmin && (
+              <div className="rounded-2xl border border-border bg-card p-5">
+                <h3 className="text-sm font-semibold mb-2">Upcoming School Exams</h3>
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  {adminSchoolExams.length === 0 && <div className="text-sm text-muted-foreground">No upcoming school exams</div>}
+                  {adminSchoolExams.map((exam) => (
+                    <div key={exam.id} className="flex items-center justify-between gap-2">
+                      <span>{exam.studentName} · {exam.examName}</span>
+                      <span className="text-xs text-primary">{exam.startDate}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3"><Link to="/school-exam-schedules" className="text-xs text-primary">View schedules</Link></div>
               </div>
-              <div className="mt-3"><Link to="/school-exam-schedules" className="text-xs text-primary">View schedules</Link></div>
-            </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
               {branchAwareStats.map((s) => (

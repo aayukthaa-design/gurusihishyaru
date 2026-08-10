@@ -99,8 +99,14 @@ export function Homework() {
   useEffect(() => {
     if (user?.role === 'teacher') {
       const data = getTeacherAllocationsShape(user.id, user.branchId);
-      if (data && data.classes && data.classes.length > 0) {
-        setTeacherAllocations(data);
+      // Always set this, even when data.classes is empty — an unset
+      // teacherAllocations (vs. one holding an empty array) is what the class/
+      // board/subject dropdowns below use to tell "no batches assigned yet"
+      // apart from "still loading", so a teacher with zero assigned batches
+      // must not fall through to the unscoped CLASS_OPTIONS/BATCH_OPTIONS/
+      // SUBJECT_OPTIONS lists (which the backend would reject anyway).
+      setTeacherAllocations(data);
+      if (data.classes.length > 0) {
         const defaultClass = data.classes[0];
         setSelectedClass(defaultClass);
 
@@ -127,6 +133,14 @@ export function Homework() {
 
   // Active student list for selected class (Teacher only)
   const studentsInClass = useMemo(() => getStudentsForClass(selectedClass, user?.branchId), [selectedClass, user?.branchId]);
+
+  // A teacher-only account may only assign homework to a batch actually
+  // assigned to them (enforced server-side too) — once teacherAllocations has
+  // loaded, an empty classes list means there is genuinely nothing this
+  // teacher can pick, so the form should say so instead of falling back to
+  // the branch-wide CLASS_OPTIONS list and letting them submit into a
+  // guaranteed 403.
+  const isUnassignedTeacher = user?.role === 'teacher' && !!teacherAllocations && teacherAllocations.classes.length === 0;
 
   // Load submissions when active homework changes
   useEffect(() => {
@@ -268,6 +282,12 @@ export function Homework() {
 
     if (!title.trim() || !subject || !dueDate || !selectedClass) {
       setError('Please fill in all required fields.');
+      setIsLoading(false);
+      return;
+    }
+
+    if (isUnassignedTeacher) {
+      setError('No batch has been assigned yet — ask your Admin to assign you a batch before you can assign homework.');
       setIsLoading(false);
       return;
     }
@@ -474,17 +494,21 @@ export function Homework() {
               </div>
 
               <form onSubmit={handleAssignHomework} className="space-y-4">
+                {isUnassignedTeacher && (
+                  <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                    No batch has been assigned yet — ask your Admin to assign you a batch before you can assign homework.
+                  </div>
+                )}
                 <div className="grid gap-4 sm:grid-cols-3">
                   <label className="grid gap-2 text-sm font-semibold">
                     <span>Class *</span>
                     <select
                       value={selectedClass}
                       onChange={(e) => handleClassChange(e.target.value)}
-                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                      disabled={isUnassignedTeacher}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary disabled:opacity-50"
                     >
-                      {teacherAllocations?.classes?.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      )) || CLASS_OPTIONS.map((option) => (
+                      {(user?.role === 'teacher' ? teacherAllocations?.classes ?? [] : CLASS_OPTIONS).map((option) => (
                         <option key={option} value={option}>{option}</option>
                       ))}
                     </select>
@@ -495,11 +519,10 @@ export function Homework() {
                     <select
                       value={batch}
                       onChange={(e) => setBatch(e.target.value)}
-                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                      disabled={isUnassignedTeacher}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary disabled:opacity-50"
                     >
-                      {teacherAllocations?.allocations[selectedClass]?.batches?.map((b) => (
-                        <option key={b} value={b}>{b}</option>
-                      )) || BATCH_OPTIONS.map((option) => (
+                      {(user?.role === 'teacher' ? teacherAllocations?.allocations[selectedClass]?.batches ?? [] : BATCH_OPTIONS).map((option) => (
                         <option key={option} value={option}>{option}</option>
                       ))}
                     </select>
@@ -510,11 +533,10 @@ export function Homework() {
                     <select
                       value={subject}
                       onChange={(e) => setSubject(e.target.value)}
-                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                      disabled={isUnassignedTeacher}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary disabled:opacity-50"
                     >
-                      {teacherAllocations?.allocations[selectedClass]?.subjects?.map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                      )) || SUBJECT_OPTIONS.map((option) => (
+                      {(user?.role === 'teacher' ? teacherAllocations?.allocations[selectedClass]?.subjects ?? [] : SUBJECT_OPTIONS).map((option) => (
                         <option key={option} value={option}>{option}</option>
                       ))}
                     </select>
@@ -656,7 +678,7 @@ export function Homework() {
                   )}
                   <button
                     type="submit"
-                    disabled={isLoading}
+                    disabled={isLoading || isUnassignedTeacher}
                     className="inline-flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
                   >
                     {isLoading ? 'Saving...' : editingHomeworkId ? 'Save Changes' : 'Assign Homework'}
@@ -668,20 +690,26 @@ export function Homework() {
             {/* Teacher Sidebar Details */}
             <div className="rounded-3xl border border-border bg-card p-6 shadow-sm space-y-4 h-fit">
               <h3 className="text-base font-bold text-foreground">Selected Allocation Summary</h3>
-              <div className="space-y-3">
-                <div className="rounded-2xl border bg-background p-3.5 text-sm">
-                  <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Class Selected</p>
-                  <p className="mt-1 font-bold text-foreground">{selectedClass}</p>
+              {isUnassignedTeacher ? (
+                <div className="rounded-2xl border bg-background p-3.5 text-sm text-muted-foreground">
+                  Nothing to summarize yet — you have no assigned batch.
                 </div>
-                <div className="rounded-2xl border bg-background p-3.5 text-sm">
-                  <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Subject & Board</p>
-                  <p className="mt-1 font-bold text-foreground">{subject} · {batch}</p>
+              ) : (
+                <div className="space-y-3">
+                  <div className="rounded-2xl border bg-background p-3.5 text-sm">
+                    <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Class Selected</p>
+                    <p className="mt-1 font-bold text-foreground">{selectedClass}</p>
+                  </div>
+                  <div className="rounded-2xl border bg-background p-3.5 text-sm">
+                    <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Subject & Board</p>
+                    <p className="mt-1 font-bold text-foreground">{subject} · {batch}</p>
+                  </div>
+                  <div className="rounded-2xl border bg-background p-3.5 text-sm">
+                    <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Students Enrolled</p>
+                    <p className="mt-1 font-bold text-foreground">{studentsInClass.length} students</p>
+                  </div>
                 </div>
-                <div className="rounded-2xl border bg-background p-3.5 text-sm">
-                  <p className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Students Enrolled</p>
-                  <p className="mt-1 font-bold text-foreground">{studentsInClass.length} students</p>
-                </div>
-              </div>
+              )}
             </div>
           </div>
         )}

@@ -68,6 +68,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'materials',               // oversight of all teachers' uploaded materials
       'lesson_plan',              // oversight of all teachers' lesson plans
       'holiday_calendar',
+      'school_exam_schedules',   // the dashboard's own "Upcoming School Exams" card links here
     ],
     permissions: ['create', 'read', 'update', 'delete', 'export'],
   },
