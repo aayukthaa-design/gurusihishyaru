@@ -17,7 +17,7 @@ import {
   subscribeAdmissions,
   type AdmissionRecord,
 } from '../lib/admissionService';
-import { UserPlus, Users, CheckCircle, Clock, ArrowRight, XCircle, FileCheck2, Plus, Edit2 } from 'lucide-react';
+import { UserPlus, Clock, ArrowRight, XCircle, FileCheck2, Plus, Edit2 } from 'lucide-react';
 import { WhatsAppButton } from '../components/WhatsAppButton';
 import { composeWhatsAppMessage, getWhatsAppBusinessName } from '../lib/whatsapp';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
@@ -151,7 +151,7 @@ export function AdmissionCRM() {
               <ArrowRight className="h-3.5 w-3.5" />
             </button>
           ))}
-          {admission.status !== 'Rejected' && admission.status !== 'Enrolled' && (
+          {admission.status !== 'Rejected' && admission.status !== 'Admitted' && (
             <button
               type="button"
               onClick={() => applyAdmissionWorkflowAction(admission.id, 'reject')}
@@ -192,9 +192,9 @@ export function AdmissionCRM() {
 
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
           <StatsCard title="Total Applications" value={String(stats.total)} change="Live workflow" changeType="positive" icon={UserPlus} iconColor="bg-primary" />
-          <StatsCard title="In Progress" value={String(stats.inProgress)} change="Current stage" changeType="positive" icon={Clock} iconColor="bg-chart-4" />
-          <StatsCard title="Approved" value={String(stats.approved)} change="Ready for enrollment" changeType="positive" icon={CheckCircle} iconColor="bg-chart-3" />
-          <StatsCard title="Enrolled" value={String(stats.enrolled)} change="Student management updated" changeType="positive" icon={FileCheck2} iconColor="bg-accent" />
+          <StatsCard title="In Progress" value={String(stats.inProgress)} change="Enquiry or Updated" changeType="positive" icon={Clock} iconColor="bg-chart-4" />
+          <StatsCard title="Admitted" value={String(stats.admitted)} change="In the Fees module" changeType="positive" icon={FileCheck2} iconColor="bg-accent" />
+          <StatsCard title="Rejected" value={String(stats.rejected)} change="Not proceeding" changeType="negative" icon={XCircle} iconColor="bg-destructive" />
         </div>
 
         <DataTable columns={columns} data={filteredAdmissions} />

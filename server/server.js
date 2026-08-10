@@ -265,13 +265,204 @@ async function sendSchoolExamUploadNotification(db, schedule, uploader) {
     ? `${uploader.name} uploaded a school exam schedule for ${schedule.studentName}`
     : `New school exam schedule uploaded for ${schedule.studentName}`;
   const message = `${uploaderLabel} uploaded a school exam schedule. Student: ${schedule.studentName}. Batch: ${schedule.schoolClass || '—'}. Exam: ${schedule.examName}. ${formatReminderDate(schedule.startDate)} to ${formatReminderDate(schedule.endDate)}.`;
+
+  const branchRow = schedule.branchId ? await db.get('SELECT name FROM branches WHERE id = ?', schedule.branchId) : null;
+  // Real, readable body instead of the old unresolved `schoolExamScheduleId:N`
+  // pointer — nothing ever parsed that pointer back into content, so it just
+  // rendered as literal text in the Notification Center.
+  const descriptionLines = [
+    `Teacher: ${schedule.teacherName || uploaderLabel}`,
+    `Branch: ${branchRow?.name || schedule.branchId || '—'}`,
+    `Batch: ${schedule.schoolClass || '—'}`,
+    `Title: ${schedule.examName}`,
+    `Start Date: ${formatReminderDate(schedule.startDate)}`,
+    `End Date: ${formatReminderDate(schedule.endDate)}`,
+  ];
+  if (schedule.attachmentName) descriptionLines.push(`Attachment: ${schedule.attachmentName}`);
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, attachmentPath, attachmentName, attachmentSize)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(), title, message, descriptionLines.join('\n'), 'info', 'high',
+    JSON.stringify(['admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    uploader.name, uploader.id, uploader.role, 'school_exam_schedule_uploaded', 'Admin', 'admin',
+    schedule.branchId || null, 'unread', 0, new Date().toISOString(),
+    schedule.attachmentPath || null, schedule.attachmentName || null, schedule.attachmentSize || null
+  );
+}
+
+// "Homework uploaded" notification to the branch's Admin (and, via
+// matchesUserScope's super_admin bypass, Super Admin) — mirrors
+// sendSchoolExamUploadNotification's shape above. Fires once per POST
+// /api/homework, after the row is committed, so a failed notification insert
+// never blocks or rolls back the homework upload itself (caller awaits this
+// but the homework row is already saved by the time it runs).
+async function sendHomeworkUploadNotification(db, homework, uploader, firstAttachment) {
+  if (!homework?.id) return;
+  const branchRow = homework.branchId ? await db.get('SELECT name FROM branches WHERE id = ?', homework.branchId) : null;
+  const title = `Homework Uploaded — ${homework.className}`;
+  const message = `${uploader.name} uploaded homework "${homework.title}" for ${homework.className}.`;
+  const submittedAt = new Date();
+  const descriptionLines = [
+    `Teacher: ${uploader.name}`,
+    `Branch: ${branchRow?.name || homework.branchId || '—'}`,
+    `Batch: ${homework.className}`,
+    `Title: ${homework.title}`,
+    `Uploaded: ${formatAttendanceDate(submittedAt.toISOString())} ${formatTime12h(submittedAt)}`,
+  ];
+  if (firstAttachment) descriptionLines.push(`Attachment: ${firstAttachment.originalname}`);
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, attachmentPath, attachmentName, attachmentSize)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(), title, message, descriptionLines.join('\n'), 'info', 'medium',
+    JSON.stringify(['admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    uploader.name, uploader.id, uploader.role, 'homework_uploaded', 'Admin', 'admin',
+    homework.branchId || null, 'unread', 0, submittedAt.toISOString(),
+    firstAttachment ? `/uploads/${firstAttachment.filename}` : null,
+    firstAttachment ? firstAttachment.originalname : null,
+    firstAttachment ? firstAttachment.size : null
+  );
+}
+
+// "Fee approval requested" (new fee assignment) / "Fee modified and sent for
+// approval" (edit of an existing fee_records row) — same notification shape,
+// distinguished only by whether the request already has a feeRecordId. Goes
+// to Super Admin only; nothing is written to fee_records until they act.
+async function sendFeeApprovalRequestedNotification(db, request, requester) {
+  const branchRow = request.branchId ? await db.get('SELECT name FROM branches WHERE id = ?', request.branchId) : null;
+  const requestedAt = new Date(request.requestedAt);
+  const title = `Fee Approval Requested — ${request.studentName}`;
+  const message = `${requester.name} requested a fee change for ${request.studentName} (${request.className}). Proposed: ₹${request.newAmount}.`;
+  const descriptionLines = [
+    `Admin: ${requester.name}`,
+    `Branch: ${branchRow?.name || request.branchId || '—'}`,
+    `Student: ${request.studentName}`,
+    `Batch: ${request.className}`,
+    `Current Fee: ${request.oldAmount != null ? `₹${request.oldAmount}` : 'Not set'}`,
+    `Proposed Fee: ₹${request.newAmount}`,
+    `Effective Date: ${request.dueDate || '—'}`,
+    `Requested: ${formatAttendanceDate(request.requestedAt)} ${formatTime12h(requestedAt)}`,
+  ];
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, feeApprovalRequestId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(), title, message, descriptionLines.join('\n'), 'info', 'high',
+    JSON.stringify(['super_admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    requester.name, requester.id, requester.role,
+    request.feeRecordId ? 'fee_modified_for_approval' : 'fee_approval_requested',
+    'Super Admin', 'super_admin', request.branchId || null, 'unread', 0, request.requestedAt, request.id
+  );
+}
+
+// Fires two rows on Approve — a confirmation back to the requesting admin,
+// and a separate notice to the student's parent(s) — both share
+// notificationType 'fee_approved' but are scoped to different recipients via
+// userIds vs studentIds+roles, same targeting mechanism matchesUserScope
+// already uses everywhere else (see line ~412-414).
+async function sendFeeApprovedNotification(db, request, approver) {
+  const branchRow = request.branchId ? await db.get('SELECT name FROM branches WHERE id = ?', request.branchId) : null;
+  const branchName = branchRow?.name || request.branchId || '—';
+  const now = new Date().toISOString();
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, feeApprovalRequestId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(),
+    `Fee Approved — ${request.studentName}`,
+    `${approver.name} approved the fee change for ${request.studentName}. New fee: ₹${request.newAmount}.`,
+    [`Student: ${request.studentName}`, `Batch: ${request.className}`, `Branch: ${branchName}`, `Approved Fee: ₹${request.newAmount}`, `Approved By: ${approver.name}`].join('\n'),
+    'success', 'medium', JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([request.requestedBy]), JSON.stringify([]),
+    approver.name, approver.id, approver.role, 'fee_approved', 'Admin', 'admin', request.branchId || null, 'unread', 0, now, request.id
+  );
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, feeApprovalRequestId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(),
+    'Fee Update',
+    `The fee for ${request.studentName} has been fixed at ₹${request.newAmount}, effective ${request.dueDate || 'immediately'}.`,
+    [`Student: ${request.studentName}`, `Batch: ${request.className}`, `Fee: ₹${request.newAmount}`, `Effective: ${request.dueDate || '—'}`].join('\n'),
+    'info', 'medium', JSON.stringify(['parent']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([request.studentId]),
+    approver.name, approver.id, approver.role, 'fee_approved', 'Parent', 'parent', request.branchId || null, 'unread', 0, now, request.id
+  );
+
+  // "When a fee is assigned, notify Super Admin" — only for a brand-new
+  // assignment (feeRecordId was null going in), not every subsequent edit of
+  // an already-assigned fee; the two notifications above already cover the
+  // admin-confirmation and parent-notice side of every approval regardless.
+  if (!request.feeRecordId) {
+    await db.run(
+      `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, feeApprovalRequestId)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      newNotificationId(),
+      `Fee Assigned — ${request.studentName}`,
+      `A fee was assigned to ${request.studentName} (${request.className}, ${branchName}): ₹${request.newAmount}.`,
+      [`Student: ${request.studentName}`, `Batch: ${request.className}`, `Branch: ${branchName}`, `Fee: ₹${request.newAmount}`, `Approved By: ${approver.name}`].join('\n'),
+      'info', 'low', JSON.stringify(['super_admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+      approver.name, approver.id, approver.role, 'fee_assigned', 'Super Admin', 'super_admin', request.branchId || null, 'unread', 0, now, request.id
+    );
+  }
+}
+
+// Fires on Reject — confirms to the requesting admin only; fee_records is
+// never touched by a rejection, so "no financial records are modified" holds
+// by construction (the approve/reject handlers are the only writers, and
+// reject never calls the INSERT/UPDATE branch).
+async function sendFeeRejectedNotification(db, request, rejector) {
+  const branchRow = request.branchId ? await db.get('SELECT name FROM branches WHERE id = ?', request.branchId) : null;
+  const now = new Date().toISOString();
+  const descriptionLines = [
+    `Student: ${request.studentName}`,
+    `Batch: ${request.className}`,
+    `Branch: ${branchRow?.name || request.branchId || '—'}`,
+    `Proposed Fee: ₹${request.newAmount}`,
+    `Rejected By: ${rejector.name}`,
+  ];
+  if (request.rejectionReason) descriptionLines.push(`Reason: ${request.rejectionReason}`);
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, feeApprovalRequestId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(),
+    `Fee Request Rejected — ${request.studentName}`,
+    `${rejector.name} rejected the proposed fee change for ${request.studentName}. Existing fee remains unchanged.`,
+    descriptionLines.join('\n'),
+    'warning', 'medium', JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([request.requestedBy]), JSON.stringify([]),
+    rejector.name, rejector.id, rejector.role, 'fee_rejected', 'Admin', 'admin', request.branchId || null, 'unread', 0, now, request.id
+  );
+}
+
+// Mirrors the "new assignment" half of sendFeeApprovedNotification above —
+// used only by the Super Admin direct-write path in POST /api/fees/records
+// (the one path where a first-time fee assignment doesn't already go through
+// an approval, so nothing else would ever notify the parent about it).
+async function sendFeeAssignedNotification(db, feeRecord, assignerName) {
+  const branchRow = feeRecord.branchId ? await db.get('SELECT name FROM branches WHERE id = ?', feeRecord.branchId) : null;
+  const branchName = branchRow?.name || feeRecord.branchId || '—';
+  const now = new Date().toISOString();
+
   await db.run(
     `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    newNotificationId(), title, message, `schoolExamScheduleId:${schedule.id}`, 'info', 'high',
-    JSON.stringify(['admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
-    uploader.name, uploader.id, uploader.role, 'school_exam_schedule_uploaded', 'Admin', 'admin',
-    schedule.branchId || null, 'unread', 0, new Date().toISOString()
+    newNotificationId(),
+    'Fee Update',
+    `The fee for ${feeRecord.studentName} has been fixed at ₹${feeRecord.totalAmount}, effective ${feeRecord.dueDate || 'immediately'}.`,
+    [`Student: ${feeRecord.studentName}`, `Batch: ${feeRecord.className}`, `Fee: ₹${feeRecord.totalAmount}`, `Effective: ${feeRecord.dueDate || '—'}`].join('\n'),
+    'info', 'medium', JSON.stringify(['parent']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([feeRecord.studentId]),
+    assignerName, null, 'super_admin', 'fee_approved', 'Parent', 'parent', feeRecord.branchId || null, 'unread', 0, now
+  );
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(),
+    `Fee Assigned — ${feeRecord.studentName}`,
+    `A fee was assigned to ${feeRecord.studentName} (${feeRecord.className}, ${branchName}): ₹${feeRecord.totalAmount}.`,
+    [`Student: ${feeRecord.studentName}`, `Batch: ${feeRecord.className}`, `Branch: ${branchName}`, `Fee: ₹${feeRecord.totalAmount}`, `Assigned By: ${assignerName}`].join('\n'),
+    'info', 'low', JSON.stringify(['super_admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    assignerName, null, 'super_admin', 'fee_assigned', 'Super Admin', 'super_admin', feeRecord.branchId || null, 'unread', 0, now
   );
 }
 
@@ -414,6 +605,10 @@ function mapRowToNotification(row) {
     senderId: row.senderId,
     senderRole: row.senderRole,
     audience: row.audience,
+    attachmentPath: row.attachmentPath,
+    attachmentName: row.attachmentName,
+    attachmentSize: row.attachmentSize,
+    feeApprovalRequestId: row.feeApprovalRequestId,
     notificationType: row.notificationType,
     recipient: row.recipient,
     recipientRole: row.recipientRole,
@@ -594,6 +789,21 @@ async function initDb() {
   // label back from the resolved roles/branchId/teacherIds/classNames. Null
   // for system-generated notifications, which don't go through the composer.
   try { await db.exec("ALTER TABLE notifications ADD COLUMN audience TEXT;"); } catch (e) {}
+  // Additive: lets a homework/exam-schedule upload notification carry a real,
+  // directly-downloadable file reference instead of just describing the
+  // upload in text. Same /uploads path convention as every other attachment
+  // in this app (homework.attachments, exams/events/school_exam_schedules'
+  // attachmentPath) — the Notification Center reuses the existing
+  // getFileUrl() download helper against this path, no new file storage or
+  // download route needed.
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN attachmentPath TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN attachmentName TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN attachmentSize INTEGER;"); } catch (e) {}
+  // Links a "fee approval requested" notification back to the pending row in
+  // fee_approval_requests, so the Notification Center's Approve/Reject
+  // buttons know which request they're acting on without parsing anything
+  // out of the description text.
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN feeApprovalRequestId TEXT;"); } catch (e) {}
 
   const allocationCount = await db.get('SELECT COUNT(1) as c FROM allocations');
   if (allocationCount.c === 0) {
@@ -707,6 +917,14 @@ async function initDb() {
       address TEXT
     );
   `);
+  // Links a student row back to the admissions enquiry it came from, so
+  // marking an admission "Admitted" can check "does a student for this
+  // enquiry already exist" before creating one — without this, re-running
+  // the transition (or a second admin clicking it) would create a duplicate
+  // student every time. Null for every student added directly via Student
+  // Management (no admissions record involved) or created before this column
+  // existed — those are unaffected, this is purely additive.
+  try { await db.exec("ALTER TABLE students ADD COLUMN admissionId TEXT;"); } catch (e) {}
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS parent_student (
@@ -1621,6 +1839,39 @@ async function initDb() {
       status TEXT DEFAULT 'Pending',
       createdAt TEXT,
       updatedAt TEXT
+    );
+
+    -- Mandatory Super Admin sign-off on any admin/accountant-initiated fee
+    -- amount (new assignment or edit of an existing fee_records row).
+    -- Purely additive: fee_records/fee_structures are never written by an
+    -- admin or accountant directly anymore (see POST/PUT /api/fees/records
+    -- below) — they only get touched once a request here is Approved, which
+    -- is what keeps "reports reflect the approved amount" true without
+    -- reports needing any changes of their own.
+    CREATE TABLE IF NOT EXISTS fee_approval_requests (
+      id TEXT PRIMARY KEY,
+      studentId TEXT,
+      studentName TEXT,
+      className TEXT,
+      branchId TEXT,
+      feeRecordId INTEGER,
+      feeType TEXT,
+      academicYear TEXT,
+      month TEXT,
+      oldAmount REAL,
+      newAmount REAL,
+      dueDate TEXT,
+      status TEXT DEFAULT 'Pending',
+      requestedBy TEXT,
+      requestedByName TEXT,
+      requestedAt TEXT,
+      approvedBy TEXT,
+      approvedByName TEXT,
+      approvedAt TEXT,
+      rejectedBy TEXT,
+      rejectedByName TEXT,
+      rejectedAt TEXT,
+      rejectionReason TEXT
     );
 
     CREATE TABLE IF NOT EXISTS fee_payments (
@@ -2767,13 +3018,18 @@ async function main() {
 
   // ─── Admissions CRM ─────────────────────────────────────────────────────────
 
+  // Simplified from the old 7-stage chain (submit/verify/schedule/complete/
+  // approve/enroll/reject) down to the 3 statuses the CRM now exposes.
+  // Existing admissions already sitting in one of the old intermediate
+  // stages (e.g. "Interview Scheduled") are never rewritten — that text
+  // stays exactly as historical record — but the workflow only ever offers
+  // 'update'/'admit'/'reject' as actions going forward, and any status that
+  // isn't literally 'Enquiry' is treated as being at the "Updated" stage for
+  // the purpose of deciding what action to offer next (see
+  // getAdmissionWorkflowActions in admissionService.ts).
   const ADMISSION_WORKFLOW_NEXT = {
-    submit: 'Application Submitted',
-    verify: 'Document Verification',
-    schedule: 'Interview Scheduled',
-    complete: 'Interview Completed',
-    approve: 'Approved',
-    enroll: 'Enrolled',
+    update: 'Updated',
+    admit: 'Admitted',
     reject: 'Rejected',
   };
 
@@ -2840,7 +3096,56 @@ async function main() {
       if (!nextStatus) return res.status(400).json({ error: 'Unknown workflow action' });
       const existing = await db.get('SELECT * FROM admissions WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'Admission not found' });
+      // An admin may only act on admissions in their own branch — the GET
+      // list already filters to this, but nothing previously stopped a
+      // direct PATCH call from reaching another branch's record.
+      if (!req.user.roles.includes('super_admin') && existing.branchId && existing.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'You can only manage admissions in your own branch.' });
+      }
+
+      // Admitted is the entry point into the Fees module: reuse an existing
+      // student record if one already links to this admission (covers a
+      // second click, or the reverse StudentManagement.tsx path that already
+      // flips an admission to Admitted after manually adding a student —
+      // see enrollAdmissionByApplicantName) or matches this applicant by
+      // name within the same branch (same convention that reverse path
+      // already used); only create a new one if neither is found. Resolved
+      // — and validated — before the status UPDATE commits, so a rejected
+      // "Admitted" attempt (e.g. missing contact number) never leaves the
+      // admission stuck in a status with no student behind it.
+      let student = null;
+      if (nextStatus === 'Admitted') {
+        student = await db.get('SELECT * FROM students WHERE admissionId = ?', existing.id);
+        if (!student) {
+          student = await db.get(
+            'SELECT * FROM students WHERE branchId = ? AND LOWER(fullName) = LOWER(?)',
+            existing.branchId, existing.applicantName
+          );
+        }
+        if (!student && !existing.contactNumber) {
+          return res.status(400).json({ error: 'This enquiry has no contact number on file — add one before marking it Admitted (a primary parent mobile is required to create the student record).' });
+        }
+      }
+
       await db.run('UPDATE admissions SET status=?, updatedAt=? WHERE id=?', nextStatus, new Date().toISOString(), req.params.id);
+
+      if (nextStatus === 'Admitted') {
+        if (student) {
+          if (!student.admissionId) await db.run('UPDATE students SET admissionId = ? WHERE id = ?', existing.id, student.id);
+        } else {
+          const nameParts = existing.applicantName.trim().split(/\s+/);
+          const firstName = nameParts[0] || existing.applicantName;
+          const lastName = nameParts.slice(1).join(' ') || '-';
+          await createStudentRecord(db, {
+            firstName, lastName,
+            className: existing.grade || '',
+            admissionDate: new Date().toISOString().slice(0, 10),
+            primaryParentMobile: existing.contactNumber,
+            parentEmail: existing.email || '',
+          }, existing.branchId, { skipAutoFeeGeneration: true, admissionId: existing.id });
+        }
+      }
+
       const row = await db.get('SELECT * FROM admissions WHERE id = ?', req.params.id);
       res.json(row);
     } catch (err) {
@@ -3839,6 +4144,7 @@ async function main() {
       if (created) {
         created.attachments = JSON.parse(created.attachments || '[]');
       }
+      await sendHomeworkUploadNotification(db, created, { id: req.user.sub, name: req.user.name, role: req.user.roles?.[0] || 'teacher' }, fileList[0] || null);
       res.json(created);
     } catch (err) {
       console.error(err);
@@ -4314,6 +4620,96 @@ async function main() {
     }
   });
 
+  // Shared by POST /api/students (manual "Add Student") and the Admission
+  // CRM's Admitted transition below — same insert, same parent find-or-link,
+  // same "New Student Admitted" notification either way, so the two entry
+  // points can never silently diverge in behavior. `skipAutoFeeGeneration`
+  // exists only for the Admitted path: the brief for that flow requires the
+  // student to start as "Fee Not Assigned" even when a fee_structures
+  // template already exists for their class/branch, whereas the original
+  // manual-add behavior (auto-apply a matching structure immediately) stays
+  // exactly as it was for every other caller.
+  async function createStudentRecord(db, s, branchId, { skipAutoFeeGeneration = false, admissionId = null } = {}) {
+    const now = new Date().toISOString();
+    const studentId = s.id || `STU${Date.now()}`;
+
+    const stmt = await db.prepare(`
+      INSERT INTO students (
+        id, firstName, lastName, fullName, gender, dob, className, batch, branchId,
+        rollNumber, admissionNumber, admissionDate, status, fatherName, motherName,
+        primaryParentName, relationship, fatherMobile, motherMobile, primaryParentMobile,
+        parentEmail, guardianName, guardianMobile, address, admissionId
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `);
+    await stmt.run(
+      studentId, s.firstName, s.lastName, `${s.firstName} ${s.lastName}`, s.gender || 'Male', s.dob || '',
+      s.className || '', s.batch || '', branchId, s.rollNumber || '', s.admissionNumber || '',
+      s.admissionDate || now.split('T')[0], s.status || 'Active', s.fatherName || '', s.motherName || '',
+      s.primaryParentName || '', s.relationship || '', s.fatherMobile || '', s.motherMobile || '',
+      s.primaryParentMobile, s.parentEmail || '', s.guardianName || '', s.guardianMobile || '', s.address || '', admissionId
+    );
+    await stmt.finalize();
+
+    // Find or create parent account
+    let parent = await db.get('SELECT * FROM parents WHERE mobile = ?', s.primaryParentMobile);
+    let parentId;
+    if (parent) {
+      parentId = parent.id;
+    } else {
+      parentId = `PAR${Date.now()}`;
+      const parts = (s.primaryParentName || 'Parent').split(' ');
+      const fName = parts[0];
+      const lName = parts.slice(1).join(' ') || 'User';
+      const tempPassword = 'Password@123'; // Temporary password
+
+      await db.run(`
+        INSERT INTO parents (id, firstName, lastName, mobile, email, password, branchId, status, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?)
+      `, parentId, fName, lName, s.primaryParentMobile, s.parentEmail || '', tempPassword, branchId, now);
+    }
+
+    // Link parent to student
+    await db.run(`
+      INSERT OR IGNORE INTO parent_student (parentId, studentId)
+      VALUES (?, ?)
+    `, parentId, studentId);
+
+    const saved = await db.get('SELECT * FROM students WHERE id = ?', studentId);
+
+    // Auto-generate fee records for the new student from any fee structure(s)
+    // already configured for their class/branch — previously a student only
+    // ever got a fee record if someone remembered to run "Generate for class"
+    // again after they were admitted, so newly admitted students were
+    // invisible on the Fees page until then.
+    if (saved.className && !skipAutoFeeGeneration) {
+      const matchingStructures = await db.all(
+        'SELECT * FROM fee_structures WHERE className = ? AND branchId = ?',
+        saved.className, branchId
+      );
+      for (const structure of matchingStructures) {
+        const status = feeRecordStatus(structure.amount, 0, structure.dueDate);
+        await db.run(`
+          INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt)
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
+        `, saved.id, saved.fullName, saved.className, branchId, structure.feeType, structure.academicYear, structure.amount, structure.dueDate, status, now, now);
+      }
+    }
+
+    // Notify accountants (and admins) so a newly admitted student's uniform/
+    // materials allocation doesn't get missed — surfaces in their Notifications
+    // and in the Accountant Portal's pending-allocations list. Also the exact
+    // mechanism that satisfies "notify the branch Accountant and Super Admin
+    // when a student becomes Admitted" for the Admission CRM path below —
+    // roles already covers both, branchId already scopes it correctly.
+    const notifId = newNotificationId();
+    await db.run(`
+      INSERT INTO notifications (id, title, message, description, type, priority, roles, branchId, status, createdAt)
+      VALUES (?, ?, ?, ?, 'info', 'medium', '["accountant","admin","super_admin"]', ?, 'unread', ?)
+    `, notifId, 'New Student Admitted', `${saved.fullName} was admitted to ${saved.className || 'a class'} — inventory allocation pending.`, `Admission notification for branch ${branchId}`, branchId, now);
+
+    return saved;
+  }
+
   app.post('/api/students', async (req, res) => {
     if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -4340,82 +4736,8 @@ async function main() {
       s.primaryParentMobile = String(s.primaryParentMobile);
       s.guardianMobile = s.guardianMobile != null ? String(s.guardianMobile) : s.guardianMobile;
 
-      const now = new Date().toISOString();
-      const studentId = s.id || `STU${Date.now()}`;
       const branchId = resolveBranchId(req, s.branchId) || 'branch_main';
-
-      // Save student
-      const stmt = await db.prepare(`
-        INSERT INTO students (
-          id, firstName, lastName, fullName, gender, dob, className, batch, branchId,
-          rollNumber, admissionNumber, admissionDate, status, fatherName, motherName,
-          primaryParentName, relationship, fatherMobile, motherMobile, primaryParentMobile,
-          parentEmail, guardianName, guardianMobile, address
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `);
-      await stmt.run(
-        studentId, s.firstName, s.lastName, `${s.firstName} ${s.lastName}`, s.gender || 'Male', s.dob || '',
-        s.className || '', s.batch || '', branchId, s.rollNumber || '', s.admissionNumber || '',
-        s.admissionDate || now.split('T')[0], s.status || 'Active', s.fatherName || '', s.motherName || '',
-        s.primaryParentName || '', s.relationship || '', s.fatherMobile || '', s.motherMobile || '',
-        s.primaryParentMobile, s.parentEmail || '', s.guardianName || '', s.guardianMobile || '', s.address || ''
-      );
-      await stmt.finalize();
-
-      // Find or create parent account
-      let parent = await db.get('SELECT * FROM parents WHERE mobile = ?', s.primaryParentMobile);
-      let parentId;
-      if (parent) {
-        parentId = parent.id;
-      } else {
-        parentId = `PAR${Date.now()}`;
-        const parts = (s.primaryParentName || 'Parent').split(' ');
-        const fName = parts[0];
-        const lName = parts.slice(1).join(' ') || 'User';
-        const tempPassword = 'Password@123'; // Temporary password
-
-        await db.run(`
-          INSERT INTO parents (id, firstName, lastName, mobile, email, password, branchId, status, createdAt)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?)
-        `, parentId, fName, lName, s.primaryParentMobile, s.parentEmail || '', tempPassword, branchId, now);
-      }
-
-      // Link parent to student
-      await db.run(`
-        INSERT OR IGNORE INTO parent_student (parentId, studentId)
-        VALUES (?, ?)
-      `, parentId, studentId);
-
-      const saved = await db.get('SELECT * FROM students WHERE id = ?', studentId);
-
-      // Auto-generate fee records for the new student from any fee structure(s)
-      // already configured for their class/branch — previously a student only
-      // ever got a fee record if someone remembered to run "Generate for class"
-      // again after they were admitted, so newly admitted students were
-      // invisible on the Fees page until then.
-      if (saved.className) {
-        const matchingStructures = await db.all(
-          'SELECT * FROM fee_structures WHERE className = ? AND branchId = ?',
-          saved.className, branchId
-        );
-        for (const structure of matchingStructures) {
-          const status = feeRecordStatus(structure.amount, 0, structure.dueDate);
-          await db.run(`
-            INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt)
-            VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
-          `, saved.id, saved.fullName, saved.className, branchId, structure.feeType, structure.academicYear, structure.amount, structure.dueDate, status, now, now);
-        }
-      }
-
-      // Notify accountants (and admins) so a newly admitted student's uniform/
-      // materials allocation doesn't get missed — surfaces in their Notifications
-      // and in the Accountant Portal's pending-allocations list.
-      const notifId = newNotificationId();
-      await db.run(`
-        INSERT INTO notifications (id, title, message, description, type, priority, roles, branchId, status, createdAt)
-        VALUES (?, ?, ?, ?, 'info', 'medium', '["accountant","admin","super_admin"]', ?, 'unread', ?)
-      `, notifId, 'New Student Admitted', `${saved.fullName} was admitted to ${saved.className || 'a class'} — inventory allocation pending.`, `Admission notification for branch ${branchId}`, branchId, now);
-
+      const saved = await createStudentRecord(db, s, branchId);
       res.json(saved);
     } catch (err) {
       console.error(err);
@@ -6942,6 +7264,51 @@ async function main() {
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });
 
+  // Creates a new Pending request, or — per the "don't create multiple active
+  // requests for the same student" requirement — refreshes the one already
+  // pending for this exact target (same feeRecordId when editing, same
+  // studentId+feeType+month "new assignment" slot otherwise) instead of
+  // inserting a second one. Returns the row either way.
+  // Returns { request, isNew } — isNew tells the caller whether to notify
+  // Super Admin. Editing an already-pending request must NOT fire another
+  // notification each time (that would leave a trail of stale duplicate
+  // cards, one per edit, all pointing at the same request); Super Admin
+  // sees the current numbers regardless of how many times it was refined
+  // before they act, since the Approve/Reject buttons always act on the
+  // request's live current state, not on whatever the notification text said.
+  async function upsertPendingFeeApprovalRequest(db, input) {
+    const existing = input.feeRecordId
+      ? await db.get(`SELECT * FROM fee_approval_requests WHERE feeRecordId = ? AND status = 'Pending'`, input.feeRecordId)
+      : await db.get(
+          `SELECT * FROM fee_approval_requests WHERE studentId = ? AND feeType = ? AND IFNULL(month,'') = IFNULL(?,'') AND feeRecordId IS NULL AND status = 'Pending'`,
+          input.studentId, input.feeType, input.month || null
+        );
+    const now = new Date().toISOString();
+    if (existing) {
+      await db.run(
+        `UPDATE fee_approval_requests SET newAmount=?, dueDate=?, requestedBy=?, requestedByName=?, requestedAt=? WHERE id=?`,
+        input.newAmount, input.dueDate, input.requestedBy, input.requestedByName, now, existing.id
+      );
+      return { request: await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', existing.id), isNew: false };
+    }
+    const id = `FEEREQ-${crypto.randomUUID()}`;
+    await db.run(
+      `INSERT INTO fee_approval_requests (id, studentId, studentName, className, branchId, feeRecordId, feeType, academicYear, month, oldAmount, newAmount, dueDate, status, requestedBy, requestedByName, requestedAt)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      id, input.studentId, input.studentName, input.className, input.branchId, input.feeRecordId || null,
+      input.feeType, input.academicYear || '', input.month || null, input.oldAmount ?? null, input.newAmount,
+      input.dueDate || '', 'Pending', input.requestedBy, input.requestedByName, now
+    );
+    return { request: await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', id), isNew: true };
+  }
+
+  // Assigning a fee to a student no longer writes fee_records directly for an
+  // admin/accountant caller — it opens a Pending fee_approval_requests row
+  // and notifies Super Admin instead; fee_records only gains a row once that
+  // request is Approved (see POST /api/fee-approval-requests/:id/approve).
+  // Super Admin is exempt (they're the approver — nobody sits above them to
+  // sign off on their own change), so their calls keep the original
+  // immediate-write behavior unchanged.
   app.post('/api/fees/records', async (req, res) => {
     if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -6952,6 +7319,24 @@ async function main() {
       const student = await db.get('SELECT * FROM students WHERE id = ?', body.studentId);
       if (!student) return res.status(404).json({ error: 'Student not found' });
       const branchId = resolveBranchId(req, student.branchId) || student.branchId;
+
+      if (!req.user.roles.includes('super_admin')) {
+        const { request, isNew } = await upsertPendingFeeApprovalRequest(db, {
+          studentId: student.id, studentName: student.fullName, className: student.className, branchId,
+          feeRecordId: null, feeType: body.feeType, academicYear: body.academicYear || '', month: body.month || null,
+          oldAmount: null, newAmount: Number(body.totalAmount), dueDate: body.dueDate || '',
+          requestedBy: req.user.sub, requestedByName: req.user.name,
+        });
+        if (isNew) await sendFeeApprovalRequestedNotification(db, request, { id: req.user.sub, name: req.user.name, role: req.user.roles[0] || 'admin' });
+        return res.status(202).json({ pendingApproval: true, request });
+      }
+
+      // "Fee assigned" notifications only fire for a genuinely first-time
+      // assignment, not every subsequent fee added for a student who already
+      // has one — checked before the insert below so it reflects the state
+      // that existed the moment this request landed.
+      const priorRecord = await db.get('SELECT 1 FROM fee_records WHERE studentId = ?', student.id);
+
       const now = new Date().toISOString();
       const status = feeRecordStatus(Number(body.totalAmount), 0, body.dueDate);
       const result = await db.run(`
@@ -6959,7 +7344,8 @@ async function main() {
         VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)
       `, student.id, student.fullName, student.className, branchId, body.feeType, body.academicYear || '', Number(body.totalAmount), body.dueDate || '', status, body.month || null, now, now);
       const created = await db.get('SELECT * FROM fee_records WHERE id = ?', result.lastID);
-      res.status(201).json(created);
+      if (!priorRecord) await sendFeeAssignedNotification(db, created, req.user.name);
+      res.status(201).json({ pendingApproval: false, record: created });
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });
 
@@ -6967,6 +7353,9 @@ async function main() {
   // of a recurring monthly fee) is very often not the same as the rest of their
   // class, so this lets staff override just totalAmount/dueDate for that one record
   // without touching the class-wide fee_structures template everyone else uses.
+  // Same approval gate as the create path above: a non-super_admin edit opens a
+  // Pending request against this exact record and the existing amount stays
+  // active in fee_records — "keep ₹20,000 active" — until Super Admin approves.
   app.put('/api/fees/records/:id', async (req, res) => {
     if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -6978,6 +7367,19 @@ async function main() {
         return res.status(400).json({ error: `Amount can't be less than the ${existing.paidAmount} already paid.` });
       }
       const dueDate = body.dueDate ?? existing.dueDate;
+
+      if (!req.user.roles.includes('super_admin')) {
+        const branchId = resolveBranchId(req, existing.branchId) || existing.branchId;
+        const { request, isNew } = await upsertPendingFeeApprovalRequest(db, {
+          studentId: existing.studentId, studentName: existing.studentName, className: existing.className, branchId,
+          feeRecordId: existing.id, feeType: existing.feeType, academicYear: existing.academicYear, month: existing.month,
+          oldAmount: existing.totalAmount, newAmount: totalAmount, dueDate,
+          requestedBy: req.user.sub, requestedByName: req.user.name,
+        });
+        if (isNew) await sendFeeApprovalRequestedNotification(db, request, { id: req.user.sub, name: req.user.name, role: req.user.roles[0] || 'admin' });
+        return res.status(202).json({ pendingApproval: true, request });
+      }
+
       const feeType = body.feeType ?? existing.feeType;
       const now = new Date().toISOString();
       const status = feeRecordStatus(totalAmount, existing.paidAmount, dueDate);
@@ -6986,7 +7388,85 @@ async function main() {
         totalAmount, dueDate, feeType, status, now, req.params.id
       );
       const updated = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
-      res.json(updated);
+      res.json({ pendingApproval: false, record: updated });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Branch-scoped list of fee approval requests — Admin/accountant see only
+  // their own branch's requests, Super Admin sees every branch (matches
+  // resolveBranchId's existing super_admin passthrough used everywhere else).
+  app.get('/api/fee-approval-requests', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const conditions = [];
+      const params = [];
+      if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      if (req.query.status) { conditions.push('status = ?'); params.push(req.query.status); }
+      const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await db.all(`SELECT * FROM fee_approval_requests ${whereClause} ORDER BY requestedAt DESC`, ...params);
+      res.json(rows);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Approve: only now does the proposed amount actually reach fee_records —
+  // insert for a brand-new assignment (feeRecordId was null), update for an
+  // edit of an existing record. Whichever branch runs, it reuses the exact
+  // same write shape as the original (pre-approval-gate) POST/PUT handlers
+  // above, so collection/reports keep reading fee_records exactly as before.
+  app.post('/api/fee-approval-requests/:id/approve', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const request = await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', req.params.id);
+      if (!request) return res.status(404).json({ error: 'Fee approval request not found' });
+      if (request.status !== 'Pending') return res.status(409).json({ error: `This request was already ${request.status.toLowerCase()}.` });
+
+      const now = new Date().toISOString();
+      if (request.feeRecordId) {
+        const existing = await db.get('SELECT * FROM fee_records WHERE id = ?', request.feeRecordId);
+        if (existing) {
+          const status = feeRecordStatus(request.newAmount, existing.paidAmount, request.dueDate || existing.dueDate);
+          await db.run(
+            'UPDATE fee_records SET totalAmount=?, dueDate=?, status=?, updatedAt=? WHERE id=?',
+            request.newAmount, request.dueDate || existing.dueDate, status, now, request.feeRecordId
+          );
+        }
+      } else {
+        const status = feeRecordStatus(request.newAmount, 0, request.dueDate);
+        await db.run(`
+          INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt)
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)
+        `, request.studentId, request.studentName, request.className, request.branchId, request.feeType, request.academicYear, request.newAmount, request.dueDate, status, request.month, now, now);
+      }
+
+      await db.run(
+        'UPDATE fee_approval_requests SET status=?, approvedBy=?, approvedByName=?, approvedAt=? WHERE id=?',
+        'Approved', req.user.sub, req.user.name, now, request.id
+      );
+      const updatedRequest = await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', request.id);
+      await sendFeeApprovedNotification(db, updatedRequest, { id: req.user.sub, name: req.user.name, role: 'super_admin' });
+      res.json(updatedRequest);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Reject: fee_records is never touched here — the existing amount (or "no
+  // record yet" for a new assignment) simply stays exactly as it was.
+  app.post('/api/fee-approval-requests/:id/reject', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const request = await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', req.params.id);
+      if (!request) return res.status(404).json({ error: 'Fee approval request not found' });
+      if (request.status !== 'Pending') return res.status(409).json({ error: `This request was already ${request.status.toLowerCase()}.` });
+
+      const now = new Date().toISOString();
+      const reason = (req.body?.reason || '').toString().slice(0, 500);
+      await db.run(
+        'UPDATE fee_approval_requests SET status=?, rejectedBy=?, rejectedByName=?, rejectedAt=?, rejectionReason=? WHERE id=?',
+        'Rejected', req.user.sub, req.user.name, now, reason, request.id
+      );
+      const updatedRequest = await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', request.id);
+      await sendFeeRejectedNotification(db, updatedRequest, { id: req.user.sub, name: req.user.name, role: 'super_admin' });
+      res.json(updatedRequest);
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { useBranches } from '../lib/branchService';
+import { useBranches, getBranchName } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
 import { useStudents, refreshStudents } from '../lib/studentService';
 import {
@@ -131,6 +131,46 @@ export function FeeManagement() {
     });
   }, [students, records, branchFilter, user?.role]);
 
+  // Every admitted student (status === 'Active' — the same definition the
+  // rest of this page already uses, including students that predate this
+  // table and never went through the Admission CRM at all) with a fee status
+  // derived from their fee_records, not stored anywhere of its own — so an
+  // approval, a payment, or a brand-new assignment all show up here the
+  // moment the underlying data changes, with no separate sync step.
+  const admittedStudentsWithFeeStatus = useMemo(() => {
+    const totalsByStudent = new Map<string, { total: number; paid: number }>();
+    records.forEach((r) => {
+      const agg = totalsByStudent.get(r.studentId) || { total: 0, paid: 0 };
+      agg.total += r.totalAmount;
+      agg.paid += r.paidAmount;
+      totalsByStudent.set(r.studentId, agg);
+    });
+    return students
+      .filter((s) => s.status === 'Active')
+      .filter((s) => (user?.role === 'super_admin' ? (!branchFilter || s.branchId === branchFilter) : true))
+      .map((s) => {
+        const agg = totalsByStudent.get(s.id);
+        let feeStatus: 'Fee Not Assigned' | 'Fee Assigned' | 'Partially Paid' | 'Fully Paid';
+        if (!agg || agg.total <= 0) feeStatus = 'Fee Not Assigned';
+        else if (agg.paid <= 0) feeStatus = 'Fee Assigned';
+        else if (agg.paid >= agg.total) feeStatus = 'Fully Paid';
+        else feeStatus = 'Partially Paid';
+        return { student: s, feeStatus };
+      })
+      .sort((a, b) => a.student.fullName.localeCompare(b.student.fullName));
+  }, [students, records, branchFilter, user?.role]);
+
+  const [studentFeeStatusFilter, setStudentFeeStatusFilter] = useState<'All' | 'Fee Not Assigned' | 'Fee Assigned' | 'Partially Paid' | 'Fully Paid'>('All');
+  const visibleAdmittedStudents = useMemo(
+    () => admittedStudentsWithFeeStatus.filter((row) => studentFeeStatusFilter === 'All' || row.feeStatus === studentFeeStatusFilter),
+    [admittedStudentsWithFeeStatus, studentFeeStatusFilter]
+  );
+
+  function openAssignFeeFor(studentId: string) {
+    setIndividualForm((f) => ({ ...f, studentId }));
+    setShowIndividual(true);
+  }
+
   async function handleCreateStructure(e: React.FormEvent) {
     e.preventDefault();
     if (!structureForm.amount || !structureForm.dueDate) {
@@ -216,7 +256,7 @@ export function FeeManagement() {
     setIsAddingIndividual(true);
     setError(null);
     try {
-      await createSingleFeeRecordAPI({
+      const result = await createSingleFeeRecordAPI({
         studentId: individualForm.studentId,
         feeType: individualForm.feeType,
         totalAmount: Number(individualForm.amount),
@@ -224,7 +264,10 @@ export function FeeManagement() {
         academicYear: new Date().getFullYear().toString(),
         month: individualForm.month || undefined,
       }, user);
-      setSuccess('Individual fee record created.');
+      // Admin/accountant: nothing is live yet — it's a Pending request until
+      // Super Admin approves it (see fee_approval_requests). Super Admin's
+      // own calls still apply immediately, same as before this workflow existed.
+      setSuccess(result.pendingApproval ? 'Fee request sent for Super Admin approval.' : 'Individual fee record created.');
       setIndividualForm({ studentId: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', month: '' });
       setIndividualSearch('');
       const statsResult = await fetchFeeStats(user);
@@ -264,8 +307,12 @@ export function FeeManagement() {
       }
       setIsSavingEdit(true);
       setError(null);
-      await updateFeeRecordAPI(editingRecord.id, { totalAmount: amount, dueDate: editDueDate }, user);
-      setSuccess(`Fee updated for ${editingRecord.studentName}.`);
+      const result = await updateFeeRecordAPI(editingRecord.id, { totalAmount: amount, dueDate: editDueDate }, user);
+      // The existing amount stays active until Super Admin approves the change
+      // (Super Admin's own edits still apply immediately, as before).
+      setSuccess(result.pendingApproval
+        ? `Fee change for ${editingRecord.studentName} sent for Super Admin approval — the current amount stays active until then.`
+        : `Fee updated for ${editingRecord.studentName}.`);
       const statsResult = await fetchFeeStats(user);
       setStats(statsResult);
       setEditingRecord(null);
@@ -525,6 +572,76 @@ export function FeeManagement() {
                     Add Fee for Student
                   </button>
                 </form>
+              </div>
+            )}
+          </div>
+        )}
+
+        {isAccountantOrAdmin && (
+          <div className="rounded-2xl border border-border bg-card shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
+              <div className="flex items-center gap-2">
+                <UserPlus className="h-4 w-4 text-muted-foreground" />
+                <span className="font-semibold text-foreground">Admitted Students ({admittedStudentsWithFeeStatus.length})</span>
+              </div>
+              <select
+                value={studentFeeStatusFilter}
+                onChange={(e) => setStudentFeeStatusFilter(e.target.value as typeof studentFeeStatusFilter)}
+                className="rounded-xl border border-input bg-input-background px-3 py-1.5 text-xs focus:outline-none focus:border-primary"
+              >
+                <option value="All">All fee statuses</option>
+                <option value="Fee Not Assigned">Fee Not Assigned</option>
+                <option value="Fee Assigned">Fee Assigned</option>
+                <option value="Partially Paid">Partially Paid</option>
+                <option value="Fully Paid">Fully Paid</option>
+              </select>
+            </div>
+            {admittedStudentsWithFeeStatus.length === 0 ? (
+              <p className="border-t border-border px-6 py-8 text-center text-sm text-muted-foreground">No admitted students yet.</p>
+            ) : (
+              <div className="overflow-x-auto border-t border-border">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                      <th className="px-6 py-3 font-medium">Student Name</th>
+                      {user?.role === 'super_admin' && <th className="px-4 py-3 font-medium">Branch</th>}
+                      <th className="px-4 py-3 font-medium">Batch</th>
+                      <th className="px-4 py-3 font-medium">Admission Date</th>
+                      <th className="px-4 py-3 font-medium">Fee Status</th>
+                      <th className="px-6 py-3 font-medium text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {visibleAdmittedStudents.map(({ student, feeStatus }) => (
+                      <tr key={student.id} className="hover:bg-secondary/30">
+                        <td className="px-6 py-3 font-medium text-foreground">{student.fullName}</td>
+                        {user?.role === 'super_admin' && <td className="px-4 py-3 text-muted-foreground">{getBranchName(student.branchId)}</td>}
+                        <td className="px-4 py-3 text-muted-foreground">{student.className || '—'}</td>
+                        <td className="px-4 py-3 text-muted-foreground">{student.admissionDate || '—'}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                            feeStatus === 'Fee Not Assigned' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                            : feeStatus === 'Fee Assigned' ? 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+                            : feeStatus === 'Partially Paid' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                            : 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+                          }`}>
+                            {feeStatus}
+                          </span>
+                        </td>
+                        <td className="px-6 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => openAssignFeeFor(student.id)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            {feeStatus === 'Fee Not Assigned' ? 'Assign Fee' : 'Add / Edit Fee'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>

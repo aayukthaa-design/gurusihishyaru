@@ -1,16 +1,15 @@
 import type { User } from '../auth/types';
-import { addNotification } from './notificationService';
 import { apiFetch } from './apiClient';
 
-export type AdmissionStatus =
-  | 'Enquiry'
-  | 'Application Submitted'
-  | 'Document Verification'
-  | 'Interview Scheduled'
-  | 'Interview Completed'
-  | 'Approved'
-  | 'Enrolled'
-  | 'Rejected';
+// Simplified to 3 working statuses (+ terminal Rejected). Existing admission
+// rows created before this simplification may still literally hold one of
+// the old intermediate values ('Application Submitted', 'Document
+// Verification', 'Interview Scheduled', 'Interview Completed', 'Approved')
+// — that text is never rewritten (preserves history), so this type stays
+// widened to `string` for the raw value while every helper below treats
+// anything that isn't 'Enquiry'/'Admitted'/'Rejected' as being at the
+// "Updated" stage.
+export type AdmissionStatus = 'Enquiry' | 'Updated' | 'Admitted' | 'Rejected' | (string & {});
 
 export interface AdmissionRecord {
   id: string;
@@ -88,106 +87,74 @@ export async function updateAdmission(
   }
 }
 
-async function updateStatus(admissionId: string, action: 'submit' | 'verify' | 'schedule' | 'complete' | 'approve' | 'enroll' | 'reject') {
+async function updateStatus(admissionId: string, action: 'update' | 'admit' | 'reject') {
   try {
     const res = await apiFetch(`/api/admissions/${admissionId}/action`, { method: 'PATCH', body: { action } });
     if (res.ok) {
       await refreshAdmissions();
+      return true;
     }
+    const err = await res.json().catch(() => ({}));
+    if (err.error) alert(err.error);
   } catch (err) {
     console.error('updateStatus error:', err);
   }
+  return false;
 }
 
-export function submitAdmissionApplication(admissionId: string) {
-  void updateStatus(admissionId, 'submit');
-}
-
-export function verifyAdmissionDocuments(admissionId: string) {
-  void updateStatus(admissionId, 'verify');
-}
-
-export function scheduleAdmissionInterview(admissionId: string) {
-  void updateStatus(admissionId, 'schedule');
-}
-
-export function completeAdmissionInterview(admissionId: string) {
-  void updateStatus(admissionId, 'complete');
-}
-
-export function approveAdmission(admissionId: string) {
-  void updateStatus(admissionId, 'approve');
+/** Enquiry -> Updated: replaces the old submit/verify/schedule/complete/approve chain. */
+export function markAdmissionUpdated(admissionId: string) {
+  void updateStatus(admissionId, 'update');
 }
 
 export function rejectAdmission(admissionId: string) {
   void updateStatus(admissionId, 'reject');
 }
 
-export function enrollAdmission(admissionId: string) {
-  void updateStatus(admissionId, 'enroll');
+// Marks Admitted. This is now the entry point into the Fees module — the
+// server reuses (or creates, dedup-checked) the linked student record and
+// sends the branch-Accountant/Super-Admin notification, so nothing further
+// needs to happen client-side beyond refreshing the admissions list.
+export function markAdmissionAdmitted(admissionId: string) {
+  void updateStatus(admissionId, 'admit');
 }
 
+// Kept for the reverse direction: StudentManagement.tsx calls this after an
+// admin manually adds/edits a student, to flip a name-matched admission to
+// Admitted too. The server-side Admitted handler's own dedup check (match by
+// admissionId, then by name+branch) means this never creates a duplicate
+// student even though the student here was already created independently.
 export function enrollAdmissionByApplicantName(applicantName: string) {
   const target = admissionState.find((record) => record.applicantName.toLowerCase() === applicantName.toLowerCase());
   if (!target) {
     return undefined;
   }
 
-  void updateStatus(target.id, 'enroll');
+  void updateStatus(target.id, 'admit');
   return target.id;
 }
 
 export function getAdmissionWorkflowActions(status: AdmissionStatus) {
   switch (status) {
     case 'Enquiry':
-      return [{ label: 'Submit Application', action: 'submit' as const }];
-    case 'Application Submitted':
-      return [{ label: 'Verify Documents', action: 'verify' as const }];
-    case 'Document Verification':
-      return [{ label: 'Schedule Interview', action: 'schedule' as const }];
-    case 'Interview Scheduled':
-      return [{ label: 'Complete Interview', action: 'complete' as const }];
-    case 'Interview Completed':
-      return [{ label: 'Approve', action: 'approve' as const }];
-    case 'Approved':
-      return [{ label: 'Enroll Student', action: 'enroll' as const }];
-    default:
+      return [{ label: 'Mark Updated', action: 'update' as const }, { label: 'Mark Admitted', action: 'admit' as const }];
+    case 'Admitted':
+    case 'Rejected':
       return [];
+    default:
+      // Anything else (an "Updated" row, or a legacy in-progress status from
+      // before this simplification) can go straight to Admitted.
+      return [{ label: 'Mark Admitted', action: 'admit' as const }];
   }
 }
 
-export function applyAdmissionWorkflowAction(admissionId: string, action: 'submit' | 'verify' | 'schedule' | 'complete' | 'approve' | 'enroll' | 'reject') {
+export function applyAdmissionWorkflowAction(admissionId: string, action: 'update' | 'admit' | 'reject') {
   switch (action) {
-    case 'submit':
-      submitAdmissionApplication(admissionId);
+    case 'update':
+      markAdmissionUpdated(admissionId);
       break;
-    case 'verify':
-      verifyAdmissionDocuments(admissionId);
-      break;
-    case 'schedule':
-      scheduleAdmissionInterview(admissionId);
-      break;
-    case 'complete':
-      completeAdmissionInterview(admissionId);
-      break;
-    case 'approve':
-      approveAdmission(admissionId);
-      break;
-    case 'enroll':
-      enrollAdmission(admissionId);
-      const target = admissionState.find((record) => record.id === admissionId);
-      if (target) {
-        addNotification({
-          title: 'New Student Admission',
-          message: `${target.applicantName} • Class ${target.grade.replace('Grade ', '')} • Inventory Allocation Pending`,
-          description: `Inventory Allocation Pending for newly enrolled student: ${target.applicantName} (${target.id}). Click details to allocate uniforms, notebooks, bags etc.`,
-          type: 'info',
-          roles: ['accountant', 'admin', 'super_admin'],
-          recipient: 'Accountant',
-          branchId: target.branchId,
-          notificationType: 'Admission'
-        });
-      }
+    case 'admit':
+      markAdmissionAdmitted(admissionId);
       break;
     case 'reject':
       rejectAdmission(admissionId);
@@ -198,9 +165,10 @@ export function applyAdmissionWorkflowAction(admissionId: string, action: 'submi
 export function getAdmissionStats(records: AdmissionRecord[]) {
   return {
     total: records.length,
-    inProgress: records.filter((record) => !['Rejected', 'Enrolled'].includes(record.status)).length,
-    approved: records.filter((record) => record.status === 'Approved').length,
-    enrolled: records.filter((record) => record.status === 'Enrolled').length,
+    // Anything that isn't Admitted/Rejected — covers 'Enquiry', 'Updated',
+    // and any legacy in-progress status from before the simplification.
+    inProgress: records.filter((record) => !['Rejected', 'Admitted'].includes(record.status)).length,
+    admitted: records.filter((record) => record.status === 'Admitted').length,
     rejected: records.filter((record) => record.status === 'Rejected').length,
   };
 }
@@ -209,22 +177,16 @@ export function getAdmissionStatusColor(status: AdmissionStatus) {
   switch (status) {
     case 'Enquiry':
       return 'bg-slate-100 text-slate-700 dark:bg-slate-900/40 dark:text-slate-300';
-    case 'Application Submitted':
-      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
-    case 'Document Verification':
-      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
-    case 'Interview Scheduled':
-      return 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300';
-    case 'Interview Completed':
-      return 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300';
-    case 'Approved':
-      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
-    case 'Enrolled':
+    case 'Admitted':
       return 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400';
     case 'Rejected':
       return 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300';
+    case 'Updated':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
     default:
-      return 'bg-secondary text-muted-foreground';
+      // Legacy in-progress status text (e.g. 'Interview Scheduled') from
+      // before the simplification — shown with the same styling as 'Updated'.
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
   }
 }
 

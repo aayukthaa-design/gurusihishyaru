@@ -169,30 +169,90 @@ export interface SingleFeeRecordInput {
   month?: string;
 }
 
-export async function createSingleFeeRecordAPI(input: SingleFeeRecordInput, user: any): Promise<FeeRecord> {
+/** A pending/approved/rejected Super Admin sign-off on a fee amount — see fee_approval_requests. */
+export interface FeeApprovalRequest {
+  id: string;
+  studentId: string;
+  studentName: string;
+  className: string;
+  branchId: string;
+  /** Null when this request is for a brand-new fee assignment (nothing to update yet); set when editing an existing record. */
+  feeRecordId: number | null;
+  feeType: string;
+  academicYear: string;
+  month?: string | null;
+  /** Null when there's no existing fee for this student yet. */
+  oldAmount: number | null;
+  newAmount: number;
+  dueDate: string;
+  status: 'Pending' | 'Approved' | 'Rejected';
+  requestedBy: string;
+  requestedByName: string;
+  requestedAt: string;
+  approvedBy?: string | null;
+  approvedByName?: string | null;
+  approvedAt?: string | null;
+  rejectedBy?: string | null;
+  rejectedByName?: string | null;
+  rejectedAt?: string | null;
+  rejectionReason?: string | null;
+}
+
+/** For admin/accountant, creating or editing a fee amount opens a pending request instead of writing fee_records directly — Super Admin only. */
+export type FeeRecordWriteResult =
+  | { pendingApproval: true; request: FeeApprovalRequest }
+  | { pendingApproval: false; record: FeeRecord };
+
+export async function createSingleFeeRecordAPI(input: SingleFeeRecordInput, user: any): Promise<FeeRecordWriteResult> {
   const res = await apiFetch('/api/fees/records', { method: 'POST', body: input });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || 'Failed to create fee record');
   }
-  const created = await res.json();
+  const result = await res.json();
   await refreshFeeRecords(user);
-  return created;
+  return result;
 }
 
 export async function updateFeeRecordAPI(
   recordId: number,
   updates: { totalAmount?: number; dueDate?: string },
   user: any
-): Promise<FeeRecord> {
+): Promise<FeeRecordWriteResult> {
   const res = await apiFetch(`/api/fees/records/${recordId}`, { method: 'PUT', body: updates });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || 'Failed to update fee record');
   }
-  const updated = await res.json();
+  const result = await res.json();
   await refreshFeeRecords(user);
-  return updated;
+  return result;
+}
+
+/** Branch-scoped for admin/accountant; every branch for Super Admin — same as every other list endpoint in this app. */
+export async function fetchFeeApprovalRequestsAPI(status?: 'Pending' | 'Approved' | 'Rejected'): Promise<FeeApprovalRequest[]> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : '';
+  const res = await apiFetch(`/api/fee-approval-requests${query}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function approveFeeApprovalRequestAPI(requestId: string): Promise<FeeApprovalRequest> {
+  const res = await apiFetch(`/api/fee-approval-requests/${requestId}/approve`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to approve fee request');
+  }
+  return res.json();
+}
+
+export async function rejectFeeApprovalRequestAPI(requestId: string, reason?: string): Promise<FeeApprovalRequest> {
+  const res = await apiFetch(`/api/fee-approval-requests/${requestId}/reject`, { method: 'POST', body: { reason } });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to reject fee request');
+  }
+  return res.json();
 }
 
 export async function recordFeePaymentAPI(

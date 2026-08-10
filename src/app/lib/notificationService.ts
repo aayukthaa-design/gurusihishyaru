@@ -31,6 +31,12 @@ export interface AppNotification {
   senderRole?: string | null;
   /** Literal composer audience key (e.g. "branch_teachers") — set only for composer-driven sends. */
   audience?: string | null;
+  /** Set on homework_uploaded / school_exam_schedule_uploaded notifications — same /uploads path convention as every other attachment, downloadable via getFileUrl(). */
+  attachmentPath?: string | null;
+  attachmentName?: string | null;
+  attachmentSize?: number | null;
+  /** Set on fee_approval_requested / fee_modified_for_approval notifications — the fee_approval_requests row this notification is about. */
+  feeApprovalRequestId?: string | null;
   notificationType?: string;
   recipient?: string;
   recipientRole?: string;

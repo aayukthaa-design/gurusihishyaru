@@ -1,4 +1,4 @@
-import { Bell, Check, Clock3, FileDown, Info, MailOpen, MessageCircle, Search, Trash2, Plus, Send } from 'lucide-react';
+import { Bell, Check, Clock3, FileDown, Info, MailOpen, MessageCircle, Search, Trash2, Plus, Send, ThumbsUp, ThumbsDown } from 'lucide-react';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
@@ -26,6 +26,8 @@ import {
 } from '../lib/notificationService';
 import { useAuth } from '../auth/AuthContext';
 import { sendBirthdayWhatsAppWish } from '../lib/birthdayService';
+import { getFileUrl } from '../lib/apiClient';
+import { fetchFeeApprovalRequestsAPI, approveFeeApprovalRequestAPI, rejectFeeApprovalRequestAPI } from '../lib/feeService';
 import type { Role } from '../auth/types';
 
 function formatDateTime(value?: string | null) {
@@ -155,6 +157,49 @@ export function NotificationsPage() {
     const detail = await fetchNotificationReads(id);
     setReadsDetail(detail);
     setLoadingReads(false);
+  };
+
+  // Which fee_approval_requests are still Pending — Approve/Reject only
+  // render on a notification while its request is in this set, so the
+  // buttons disappear once someone (possibly in another tab) has already
+  // acted on it, instead of allowing a stale card to double-submit.
+  const [pendingFeeRequestIds, setPendingFeeRequestIds] = React.useState<Set<string>>(new Set());
+  const [feeActionError, setFeeActionError] = React.useState<string | null>(null);
+  const [feeActionBusyId, setFeeActionBusyId] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (auth.user?.role !== 'super_admin') return;
+    void fetchFeeApprovalRequestsAPI('Pending').then((requests) => {
+      setPendingFeeRequestIds(new Set(requests.map((r) => r.id)));
+    });
+  }, [auth.user?.role, notifications]);
+
+  const handleApproveFee = async (requestId: string) => {
+    setFeeActionError(null);
+    setFeeActionBusyId(requestId);
+    try {
+      await approveFeeApprovalRequestAPI(requestId);
+      setPendingFeeRequestIds((prev) => { const next = new Set(prev); next.delete(requestId); return next; });
+      await refreshNotifications(auth.user);
+    } catch (err: any) {
+      setFeeActionError(err?.message || 'Failed to approve fee request.');
+    } finally {
+      setFeeActionBusyId(null);
+    }
+  };
+
+  const handleRejectFee = async (requestId: string) => {
+    setFeeActionError(null);
+    setFeeActionBusyId(requestId);
+    try {
+      await rejectFeeApprovalRequestAPI(requestId);
+      setPendingFeeRequestIds((prev) => { const next = new Set(prev); next.delete(requestId); return next; });
+      await refreshNotifications(auth.user);
+    } catch (err: any) {
+      setFeeActionError(err?.message || 'Failed to reject fee request.');
+    } finally {
+      setFeeActionBusyId(null);
+    }
   };
 
   const handleSendBirthdayWish = (notification: { studentIds?: string[]; teacherIds?: string[] }) => {
@@ -382,6 +427,9 @@ export function NotificationsPage() {
 
       {mailbox === 'inbox' && (
       <>
+      {feeActionError && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">{feeActionError}</div>
+      )}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold">Active Notifications</h3>
@@ -450,6 +498,38 @@ export function NotificationsPage() {
                       <MessageCircle className="mr-1 h-3.5 w-3.5" />
                       Send Wishes
                     </Button>
+                  )}
+                  {notification.attachmentPath && (
+                    <Button size="sm" variant="outline" asChild>
+                      <a href={getFileUrl(notification.attachmentPath, notification.attachmentName || undefined)} target="_blank" rel="noreferrer">
+                        <FileDown className="mr-1 h-3.5 w-3.5" />
+                        Download File
+                      </a>
+                    </Button>
+                  )}
+                  {notification.feeApprovalRequestId && pendingFeeRequestIds.has(notification.feeApprovalRequestId) && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-emerald-500 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/20"
+                        disabled={feeActionBusyId === notification.feeApprovalRequestId}
+                        onClick={() => handleApproveFee(notification.feeApprovalRequestId!)}
+                      >
+                        <ThumbsUp className="mr-1 h-3.5 w-3.5" />
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-red-500 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
+                        disabled={feeActionBusyId === notification.feeApprovalRequestId}
+                        onClick={() => handleRejectFee(notification.feeApprovalRequestId!)}
+                      >
+                        <ThumbsDown className="mr-1 h-3.5 w-3.5" />
+                        Reject
+                      </Button>
+                    </>
                   )}
                   {isUnreadForMe(notification) && notification.status !== 'scheduled' && (
                     <Button size="sm" variant="ghost" onClick={() => markNotificationAsRead(notification.id, auth.user ?? undefined)}>
@@ -544,6 +624,38 @@ export function NotificationsPage() {
                       <Check className="mr-1 h-3 w-3" />
                       Restore
                     </Button>
+                  )}
+                  {notification.attachmentPath && (
+                    <Button size="sm" variant="outline" asChild>
+                      <a href={getFileUrl(notification.attachmentPath, notification.attachmentName || undefined)} target="_blank" rel="noreferrer">
+                        <FileDown className="mr-1 h-3.5 w-3.5" />
+                        Download File
+                      </a>
+                    </Button>
+                  )}
+                  {notification.feeApprovalRequestId && pendingFeeRequestIds.has(notification.feeApprovalRequestId) && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-emerald-500 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/20"
+                        disabled={feeActionBusyId === notification.feeApprovalRequestId}
+                        onClick={() => handleApproveFee(notification.feeApprovalRequestId!)}
+                      >
+                        <ThumbsUp className="mr-1 h-3.5 w-3.5" />
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-red-500 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
+                        disabled={feeActionBusyId === notification.feeApprovalRequestId}
+                        onClick={() => handleRejectFee(notification.feeApprovalRequestId!)}
+                      >
+                        <ThumbsDown className="mr-1 h-3.5 w-3.5" />
+                        Reject
+                      </Button>
+                    </>
                   )}
                 </div>
                 <div className="space-y-1 text-right">
