@@ -30,6 +30,7 @@ export interface TeacherRecord {
   status: 'Active' | 'Inactive' | 'Pending Approval';
   profilePhoto?: string;
   role: 'teacher';
+  roles: string[];
 }
 
 interface TeacherFormPayload {
@@ -85,6 +86,7 @@ function mapApiTeacher(row: any): TeacherRecord {
     status: row.status === 'Inactive' || row.status === 'Pending Approval' ? row.status : 'Active',
     profilePhoto: row.profilePhoto || '',
     role: 'teacher',
+    roles: Array.isArray(row.roles) ? row.roles : ['teacher'],
   };
 }
 
@@ -202,4 +204,60 @@ export function getTeachersForBranch(branchId?: string) {
 
 export function getTeacherById(id: string) {
   return getTeachers().find((teacher) => teacher.id === id);
+}
+
+// ─── Teacher → Admin role-change requests ──────────────────────────────────
+// Admins have no direct way to change a user's roles — this opens a request
+// that Super Admin approves/rejects from the Notification Center, mirroring
+// feeService.ts's fee-approval-request wrappers.
+
+export interface RoleChangeRequest {
+  id: string;
+  userId: string;
+  userName: string;
+  branchId: string | null;
+  addRole: string;
+  status: 'Pending' | 'Approved' | 'Rejected';
+  requestedBy: string;
+  requestedByName: string;
+  requestedAt: string;
+  approvedBy?: string | null;
+  approvedByName?: string | null;
+  approvedAt?: string | null;
+  rejectedBy?: string | null;
+  rejectedByName?: string | null;
+  rejectedAt?: string | null;
+  rejectionReason?: string | null;
+}
+
+export async function requestRoleChangeAPI(userId: string): Promise<RoleChangeRequest> {
+  const res = await apiFetch('/api/role-change-requests', { method: 'POST', body: { userId } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Failed to request Admin access');
+  return data.request;
+}
+
+export async function fetchRoleChangeRequestsAPI(status?: 'Pending' | 'Approved' | 'Rejected'): Promise<RoleChangeRequest[]> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : '';
+  const res = await apiFetch(`/api/role-change-requests${query}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function approveRoleChangeRequestAPI(requestId: string): Promise<RoleChangeRequest> {
+  const res = await apiFetch(`/api/role-change-requests/${requestId}/approve`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to approve role change request');
+  }
+  return res.json();
+}
+
+export async function rejectRoleChangeRequestAPI(requestId: string, reason?: string): Promise<RoleChangeRequest> {
+  const res = await apiFetch(`/api/role-change-requests/${requestId}/reject`, { method: 'POST', body: { reason } });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to reject role change request');
+  }
+  return res.json();
 }

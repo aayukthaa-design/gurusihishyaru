@@ -99,6 +99,17 @@ function newNotificationId() {
   return `NOTIF-${crypto.randomUUID()}`;
 }
 
+// Mirrors the frontend's ROLE_PRIORITY (src/app/auth/rbac.ts) — the array
+// order of a multi-role user's `roles` matters because `roles[0]` is read
+// throughout this file and the frontend as "the" primary role (mapUserRow,
+// deriveNotificationUser's fallback, etc). Sorting here whenever roles are
+// written keeps roles[0] deterministic instead of depending on whatever
+// order checkboxes happened to be toggled in.
+const ROLE_PRIORITY = ['super_admin', 'admin', 'accountant', 'teacher', 'parent'];
+function sortRoles(roles) {
+  return [...roles].sort((a, b) => ROLE_PRIORITY.indexOf(a) - ROLE_PRIORITY.indexOf(b));
+}
+
 function computeSchoolExamStatus(startDate, endDate, referenceDate = new Date()) {
   if (!startDate || !endDate) return 'Upcoming';
   const today = referenceDate.toISOString().slice(0, 10);
@@ -434,6 +445,67 @@ async function sendFeeRejectedNotification(db, request, rejector) {
   );
 }
 
+// Notifies Super Admin that a branch admin wants to grant a teacher Admin
+// access — nothing on the user's roles changes until Approve is clicked
+// (see POST /api/role-change-requests/:id/approve).
+async function sendRoleChangeRequestedNotification(db, request, requester) {
+  const branchRow = request.branchId ? await db.get('SELECT name FROM branches WHERE id = ?', request.branchId) : null;
+  const title = `Admin Access Requested — ${request.userName}`;
+  const message = `${requester.name} requested Admin access for ${request.userName}.`;
+  const descriptionLines = [
+    `Requested By: ${requester.name}`,
+    `Branch: ${branchRow?.name || request.branchId || '—'}`,
+    `Teacher: ${request.userName}`,
+    `Requested: ${formatAttendanceDate(request.requestedAt)} ${formatTime12h(new Date(request.requestedAt))}`,
+  ];
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, roleChangeRequestId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(), title, message, descriptionLines.join('\n'), 'info', 'high',
+    JSON.stringify(['super_admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    requester.name, requester.id, requester.role, 'role_change_requested',
+    'Super Admin', 'super_admin', request.branchId || null, 'unread', 0, request.requestedAt, request.id
+  );
+}
+
+// Fires on Approve — confirms back to the requesting admin. The promoted
+// user only sees the effect next time their menu/permissions are evaluated
+// (their existing session token still has the old roles until they log in
+// again), same as any other role change.
+async function sendRoleChangeApprovedNotification(db, request, approver) {
+  const now = new Date().toISOString();
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, roleChangeRequestId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(),
+    `Admin Access Approved — ${request.userName}`,
+    `${approver.name} approved Admin access for ${request.userName}.`,
+    [`Teacher: ${request.userName}`, `Approved By: ${approver.name}`].join('\n'),
+    'success', 'medium', JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([request.requestedBy]), JSON.stringify([]),
+    approver.name, approver.id, approver.role, 'role_change_approved', 'Admin', 'admin', request.branchId || null, 'unread', 0, now, request.id
+  );
+}
+
+// Fires on Reject — confirms to the requesting admin only; the user's roles
+// are never touched by a rejection.
+async function sendRoleChangeRejectedNotification(db, request, rejector) {
+  const now = new Date().toISOString();
+  const descriptionLines = [`Teacher: ${request.userName}`, `Rejected By: ${rejector.name}`];
+  if (request.rejectionReason) descriptionLines.push(`Reason: ${request.rejectionReason}`);
+
+  await db.run(
+    `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, roleChangeRequestId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    newNotificationId(),
+    `Admin Access Request Rejected — ${request.userName}`,
+    `${rejector.name} rejected the Admin access request for ${request.userName}.`,
+    descriptionLines.join('\n'),
+    'warning', 'medium', JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([request.requestedBy]), JSON.stringify([]),
+    rejector.name, rejector.id, rejector.role, 'role_change_rejected', 'Admin', 'admin', request.branchId || null, 'unread', 0, now, request.id
+  );
+}
+
 // Mirrors the "new assignment" half of sendFeeApprovedNotification above —
 // used only by the Super Admin direct-write path in POST /api/fees/records
 // (the one path where a first-time fee assignment doesn't already go through
@@ -609,6 +681,7 @@ function mapRowToNotification(row) {
     attachmentName: row.attachmentName,
     attachmentSize: row.attachmentSize,
     feeApprovalRequestId: row.feeApprovalRequestId,
+    roleChangeRequestId: row.roleChangeRequestId,
     notificationType: row.notificationType,
     recipient: row.recipient,
     recipientRole: row.recipientRole,
@@ -804,6 +877,9 @@ async function initDb() {
   // buttons know which request they're acting on without parsing anything
   // out of the description text.
   try { await db.exec("ALTER TABLE notifications ADD COLUMN feeApprovalRequestId TEXT;"); } catch (e) {}
+  // Same linkage, for the Notification Center's Approve/Reject on a
+  // teacher->admin role-change request (see role_change_requests).
+  try { await db.exec("ALTER TABLE notifications ADD COLUMN roleChangeRequestId TEXT;"); } catch (e) {}
 
   const allocationCount = await db.get('SELECT COUNT(1) as c FROM allocations');
   if (allocationCount.c === 0) {
@@ -1874,6 +1950,29 @@ async function initDb() {
       rejectionReason TEXT
     );
 
+    -- A branch admin has no direct way to change any user's roles (PUT
+    -- /api/users/:id is super_admin-only) — this is the request half of a
+    -- teacher->admin promotion, mirroring fee_approval_requests above:
+    -- nothing on the users table changes until a super_admin approves.
+    CREATE TABLE IF NOT EXISTS role_change_requests (
+      id TEXT PRIMARY KEY,
+      userId TEXT,
+      userName TEXT,
+      branchId TEXT,
+      addRole TEXT,
+      status TEXT DEFAULT 'Pending',
+      requestedBy TEXT,
+      requestedByName TEXT,
+      requestedAt TEXT,
+      approvedBy TEXT,
+      approvedByName TEXT,
+      approvedAt TEXT,
+      rejectedBy TEXT,
+      rejectedByName TEXT,
+      rejectedAt TEXT,
+      rejectionReason TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS fee_payments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       feeRecordId INTEGER,
@@ -2440,7 +2539,7 @@ async function main() {
       await db.run(
         `INSERT INTO users (id, name, email, mobile, passwordHash, roles, branchId, status, mustChangePassword, createdAt, updatedAt)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', 1, ?, ?)`,
-        id, body.name, body.email || null, body.mobile, passwordHash, JSON.stringify(body.roles), branchId, now, now
+        id, body.name, body.email || null, body.mobile, passwordHash, JSON.stringify(sortRoles(body.roles)), branchId, now, now
       );
       const row = await db.get('SELECT * FROM users WHERE id = ?', id);
       res.status(201).json(mapUserRow(row));
@@ -2462,7 +2561,7 @@ async function main() {
       const name = body.name ?? existing.name;
       const email = body.email ?? existing.email;
       const mobile = body.mobile ?? existing.mobile;
-      const roles = Array.isArray(body.roles) ? body.roles : parseJsonList(existing.roles);
+      const roles = sortRoles(Array.isArray(body.roles) ? body.roles : parseJsonList(existing.roles));
       const branchId = roles.includes('super_admin') ? null : (body.branchId ?? existing.branchId);
       const status = body.status ?? existing.status;
       await db.run(
@@ -7466,6 +7565,111 @@ async function main() {
       );
       const updatedRequest = await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', request.id);
       await sendFeeRejectedNotification(db, updatedRequest, { id: req.user.sub, name: req.user.name, role: 'super_admin' });
+      res.json(updatedRequest);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // A branch admin has no direct way to change a user's roles — this opens a
+  // Pending request and notifies Super Admin instead of touching the users
+  // table. Only ever proposes adding 'admin' to an existing teacher, mirroring
+  // the one workflow the UI actually exposes (Request Admin Access on
+  // Teacher Management); reuses any request already Pending for this teacher
+  // instead of stacking duplicates, same as upsertPendingFeeApprovalRequest.
+  app.post('/api/role-change-requests', async (req, res) => {
+    if (!req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const userId = req.body?.userId;
+      if (!userId) return res.status(400).json({ error: 'userId is required' });
+      const target = await db.get('SELECT * FROM users WHERE id = ?', userId);
+      if (!target) return res.status(404).json({ error: 'User not found' });
+      if (target.branchId !== req.user.branchId) return res.status(403).json({ error: 'You can only request this for a teacher in your own branch.' });
+      const targetRoles = parseJsonList(target.roles);
+      if (!targetRoles.includes('teacher')) return res.status(400).json({ error: 'Only teachers can be proposed for Admin access.' });
+      if (targetRoles.includes('admin')) return res.status(409).json({ error: `${target.name} already has Admin access.` });
+
+      const existing = await db.get(`SELECT * FROM role_change_requests WHERE userId = ? AND addRole = 'admin' AND status = 'Pending'`, userId);
+      const now = new Date().toISOString();
+      let request;
+      if (existing) {
+        request = existing;
+      } else {
+        const id = `ROLEREQ-${crypto.randomUUID()}`;
+        await db.run(
+          `INSERT INTO role_change_requests (id, userId, userName, branchId, addRole, status, requestedBy, requestedByName, requestedAt)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+          id, target.id, target.name, target.branchId || null, 'admin', 'Pending', req.user.sub, req.user.name, now
+        );
+        request = await db.get('SELECT * FROM role_change_requests WHERE id = ?', id);
+        await sendRoleChangeRequestedNotification(db, request, { id: req.user.sub, name: req.user.name, role: 'admin' });
+      }
+      res.status(202).json({ pendingApproval: true, request });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Branch-scoped list — Admin sees only their own branch's requests, Super
+  // Admin sees every branch (matches resolveBranchId's existing super_admin
+  // passthrough used everywhere else).
+  app.get('/api/role-change-requests', async (req, res) => {
+    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      const conditions = [];
+      const params = [];
+      if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      if (req.query.status) { conditions.push('status = ?'); params.push(req.query.status); }
+      const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await db.all(`SELECT * FROM role_change_requests ${whereClause} ORDER BY requestedAt DESC`, ...params);
+      res.json(rows);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Approve: only now does the target user's roles actually change. Roles
+  // are re-sorted by ROLE_PRIORITY on write so roles[0] (read as "the"
+  // primary role throughout this file and the frontend) is always the
+  // highest-priority role the user holds, not just whichever one happened
+  // to be first before this request.
+  app.post('/api/role-change-requests/:id/approve', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const request = await db.get('SELECT * FROM role_change_requests WHERE id = ?', req.params.id);
+      if (!request) return res.status(404).json({ error: 'Role change request not found' });
+      if (request.status !== 'Pending') return res.status(409).json({ error: `This request was already ${request.status.toLowerCase()}.` });
+
+      const target = await db.get('SELECT * FROM users WHERE id = ?', request.userId);
+      if (!target) return res.status(404).json({ error: 'User not found' });
+      const targetRoles = parseJsonList(target.roles);
+      if (!targetRoles.includes(request.addRole)) {
+        const nextRoles = sortRoles([...targetRoles, request.addRole]);
+        await db.run('UPDATE users SET roles=?, updatedAt=? WHERE id=?', JSON.stringify(nextRoles), new Date().toISOString(), target.id);
+      }
+
+      const now = new Date().toISOString();
+      await db.run(
+        'UPDATE role_change_requests SET status=?, approvedBy=?, approvedByName=?, approvedAt=? WHERE id=?',
+        'Approved', req.user.sub, req.user.name, now, request.id
+      );
+      const updatedRequest = await db.get('SELECT * FROM role_change_requests WHERE id = ?', request.id);
+      await sendRoleChangeApprovedNotification(db, updatedRequest, { id: req.user.sub, name: req.user.name, role: 'super_admin' });
+      res.json(updatedRequest);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
+  // Reject: the user's roles are never touched here.
+  app.post('/api/role-change-requests/:id/reject', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const request = await db.get('SELECT * FROM role_change_requests WHERE id = ?', req.params.id);
+      if (!request) return res.status(404).json({ error: 'Role change request not found' });
+      if (request.status !== 'Pending') return res.status(409).json({ error: `This request was already ${request.status.toLowerCase()}.` });
+
+      const now = new Date().toISOString();
+      const reason = (req.body?.reason || '').toString().slice(0, 500);
+      await db.run(
+        'UPDATE role_change_requests SET status=?, rejectedBy=?, rejectedByName=?, rejectedAt=?, rejectionReason=? WHERE id=?',
+        'Rejected', req.user.sub, req.user.name, now, reason, request.id
+      );
+      const updatedRequest = await db.get('SELECT * FROM role_change_requests WHERE id = ?', request.id);
+      await sendRoleChangeRejectedNotification(db, updatedRequest, { id: req.user.sub, name: req.user.name, role: 'super_admin' });
       res.json(updatedRequest);
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });

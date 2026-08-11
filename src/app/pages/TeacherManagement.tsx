@@ -7,7 +7,7 @@ import {
   Phone, Mail, Award, GraduationCap, Cake,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
-import { useTeachers, refreshTeachers } from '../lib/teacherService';
+import { useTeachers, refreshTeachers, fetchRoleChangeRequestsAPI, requestRoleChangeAPI } from '../lib/teacherService';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -264,10 +264,31 @@ export function TeacherManagement() {
   const [panel, setPanel] = useState<'none' | 'add' | { type: 'edit' | 'view'; id: string }>('none');
   const [formError, setFormError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [pendingAdminRequestIds, setPendingAdminRequestIds] = useState<Set<string>>(new Set());
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     void refreshTeachers(user?.role === 'super_admin' ? branchFilter || undefined : user?.branchId);
   }, [user?.role, user?.branchId, branchFilter]);
+
+  const loadPendingAdminRequests = () => {
+    if (user?.role !== 'admin') return;
+    void fetchRoleChangeRequestsAPI('Pending').then((requests) => {
+      setPendingAdminRequestIds(new Set(requests.map((r) => r.userId)));
+    });
+  };
+  useEffect(loadPendingAdminRequests, [user?.role]);
+
+  const handleRequestAdminAccess = async (id: string) => {
+    try {
+      await requestRoleChangeAPI(id);
+      setToast('✓ Admin access request sent to Super Admin');
+      loadPendingAdminRequests();
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : 'Failed to request Admin access');
+    }
+    setTimeout(() => setToast(null), 4000);
+  };
 
   const filtered = filterByBranch(teachers, user, branchFilter).filter((teacher) => {
     const matchesSearch = `${teacher.firstName} ${teacher.lastName} ${teacher.subjects} ${teacher.email}`.toLowerCase().includes(search.toLowerCase());
@@ -323,6 +344,12 @@ export function TeacherManagement() {
   return (
     <div className="flex-1 bg-background">
       <Header title="Teacher Management" />
+
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3 rounded-2xl bg-primary px-5 py-3 text-sm font-medium text-primary-foreground shadow-xl">
+          {toast}
+        </div>
+      )}
 
       <div className="max-w-6xl mx-auto p-6 space-y-6">
 
@@ -430,6 +457,17 @@ export function TeacherManagement() {
                           <button onClick={() => handleApprove(t.id)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-green-700 bg-green-100 hover:bg-green-200 dark:bg-green-900/40 dark:text-green-400" title="Approve teacher">
                             Approve
                           </button>
+                        )}
+                        {user?.role === 'admin' && t.status === 'Active' && !t.roles.includes('admin') && (
+                          pendingAdminRequestIds.has(t.id) ? (
+                            <span className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-100 dark:bg-amber-900/40 dark:text-amber-400" title="Waiting on Super Admin">
+                              Admin Access Pending
+                            </span>
+                          ) : (
+                            <button onClick={() => handleRequestAdminAccess(t.id)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-sky-700 bg-sky-100 hover:bg-sky-200 dark:bg-sky-900/40 dark:text-sky-400" title="Request Admin access for this teacher">
+                              Request Admin Access
+                            </button>
+                          )
                         )}
                         <button onClick={() => setPanel({ type: 'view', id: t.id })} className="rounded-lg p-1.5 hover:bg-secondary" title="View">
                           <Eye className="h-4 w-4 text-primary" />

@@ -28,6 +28,7 @@ import { useAuth } from '../auth/AuthContext';
 import { sendBirthdayWhatsAppWish } from '../lib/birthdayService';
 import { getFileUrl } from '../lib/apiClient';
 import { fetchFeeApprovalRequestsAPI, approveFeeApprovalRequestAPI, rejectFeeApprovalRequestAPI } from '../lib/feeService';
+import { fetchRoleChangeRequestsAPI, approveRoleChangeRequestAPI, rejectRoleChangeRequestAPI } from '../lib/teacherService';
 import type { Role } from '../auth/types';
 
 function formatDateTime(value?: string | null) {
@@ -199,6 +200,47 @@ export function NotificationsPage() {
       setFeeActionError(err?.message || 'Failed to reject fee request.');
     } finally {
       setFeeActionBusyId(null);
+    }
+  };
+
+  // Which role_change_requests are still Pending — same "buttons disappear
+  // once acted on, even from another tab" behavior as pendingFeeRequestIds.
+  const [pendingRoleRequestIds, setPendingRoleRequestIds] = React.useState<Set<string>>(new Set());
+  const [roleActionError, setRoleActionError] = React.useState<string | null>(null);
+  const [roleActionBusyId, setRoleActionBusyId] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (auth.user?.role !== 'super_admin') return;
+    void fetchRoleChangeRequestsAPI('Pending').then((requests) => {
+      setPendingRoleRequestIds(new Set(requests.map((r) => r.id)));
+    });
+  }, [auth.user?.role, notifications]);
+
+  const handleApproveRole = async (requestId: string) => {
+    setRoleActionError(null);
+    setRoleActionBusyId(requestId);
+    try {
+      await approveRoleChangeRequestAPI(requestId);
+      setPendingRoleRequestIds((prev) => { const next = new Set(prev); next.delete(requestId); return next; });
+      await refreshNotifications(auth.user);
+    } catch (err: any) {
+      setRoleActionError(err?.message || 'Failed to approve role change request.');
+    } finally {
+      setRoleActionBusyId(null);
+    }
+  };
+
+  const handleRejectRole = async (requestId: string) => {
+    setRoleActionError(null);
+    setRoleActionBusyId(requestId);
+    try {
+      await rejectRoleChangeRequestAPI(requestId);
+      setPendingRoleRequestIds((prev) => { const next = new Set(prev); next.delete(requestId); return next; });
+      await refreshNotifications(auth.user);
+    } catch (err: any) {
+      setRoleActionError(err?.message || 'Failed to reject role change request.');
+    } finally {
+      setRoleActionBusyId(null);
     }
   };
 
@@ -430,6 +472,9 @@ export function NotificationsPage() {
       {feeActionError && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">{feeActionError}</div>
       )}
+      {roleActionError && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">{roleActionError}</div>
+      )}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold">Active Notifications</h3>
@@ -525,6 +570,30 @@ export function NotificationsPage() {
                         className="border-red-500 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
                         disabled={feeActionBusyId === notification.feeApprovalRequestId}
                         onClick={() => handleRejectFee(notification.feeApprovalRequestId!)}
+                      >
+                        <ThumbsDown className="mr-1 h-3.5 w-3.5" />
+                        Reject
+                      </Button>
+                    </>
+                  )}
+                  {notification.roleChangeRequestId && pendingRoleRequestIds.has(notification.roleChangeRequestId) && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-emerald-500 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/20"
+                        disabled={roleActionBusyId === notification.roleChangeRequestId}
+                        onClick={() => handleApproveRole(notification.roleChangeRequestId!)}
+                      >
+                        <ThumbsUp className="mr-1 h-3.5 w-3.5" />
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-red-500 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
+                        disabled={roleActionBusyId === notification.roleChangeRequestId}
+                        onClick={() => handleRejectRole(notification.roleChangeRequestId!)}
                       >
                         <ThumbsDown className="mr-1 h-3.5 w-3.5" />
                         Reject
@@ -651,6 +720,30 @@ export function NotificationsPage() {
                         className="border-red-500 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
                         disabled={feeActionBusyId === notification.feeApprovalRequestId}
                         onClick={() => handleRejectFee(notification.feeApprovalRequestId!)}
+                      >
+                        <ThumbsDown className="mr-1 h-3.5 w-3.5" />
+                        Reject
+                      </Button>
+                    </>
+                  )}
+                  {notification.roleChangeRequestId && pendingRoleRequestIds.has(notification.roleChangeRequestId) && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-emerald-500 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/20"
+                        disabled={roleActionBusyId === notification.roleChangeRequestId}
+                        onClick={() => handleApproveRole(notification.roleChangeRequestId!)}
+                      >
+                        <ThumbsUp className="mr-1 h-3.5 w-3.5" />
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-red-500 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
+                        disabled={roleActionBusyId === notification.roleChangeRequestId}
+                        onClick={() => handleRejectRole(notification.roleChangeRequestId!)}
                       >
                         <ThumbsDown className="mr-1 h-3.5 w-3.5" />
                         Reject

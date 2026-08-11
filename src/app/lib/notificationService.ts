@@ -37,6 +37,8 @@ export interface AppNotification {
   attachmentSize?: number | null;
   /** Set on fee_approval_requested / fee_modified_for_approval notifications — the fee_approval_requests row this notification is about. */
   feeApprovalRequestId?: string | null;
+  /** Set on role_change_requested notifications — the role_change_requests row this notification is about. */
+  roleChangeRequestId?: string | null;
   notificationType?: string;
   recipient?: string;
   recipientRole?: string;
