@@ -6,6 +6,7 @@ import { useBranches, getBranchName, filterByBranch } from '../lib/branchService
 import { enrollAdmissionByApplicantName } from '../lib/admissionService';
 import { useStudents, addStudentAPI, updateStudentAPI, deleteStudentAPI, refreshStudents } from '../lib/studentService';
 import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
+import { BOARDS } from '../lib/classConstants';
 import {
   Users, Plus, Search, Eye, Edit2, Trash2, ChevronRight,
   X, GraduationCap, Phone, MapPin, CalendarDays, Mail,
@@ -152,7 +153,10 @@ function StudentForm({
         </div>
         <div>
           <label className="mb-1.5 block text-sm font-medium text-foreground">Board</label>
-          <input value={selectedBatch?.board || form.batch || ''} readOnly placeholder="Set by the selected batch" className="field bg-muted" />
+          <select value={form.batch || selectedBatch?.board || ''} onChange={(e) => set('batch', e.target.value)} className="field">
+            <option value="">Select board…</option>
+            {BOARDS.map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>
         </div>
         <div>
           <label className="mb-1.5 block text-sm font-medium text-foreground">Admission Date <span className="text-destructive">*</span></label>

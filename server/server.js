@@ -6498,6 +6498,17 @@ async function main() {
     if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
     if (req.params.id === 'branch_main') return res.status(400).json({ error: 'The Main branch cannot be deleted' });
     try {
+      // Users keep a plain branchId FK with no cascade — deleting a branch that
+      // still has staff/students on it silently orphans their branchId, which
+      // then never matches any branch-filter dropdown (those only list rows
+      // still in this table). They stop appearing in filtered views without
+      // any error, which is exactly how one such orphaned admin account went
+      // undetected. Block the delete instead of letting that happen again.
+      const { userCount } = await db.get('SELECT COUNT(*) as userCount FROM users WHERE branchId = ?', req.params.id);
+      const { studentCount } = await db.get('SELECT COUNT(*) as studentCount FROM students WHERE branchId = ?', req.params.id);
+      if (userCount > 0 || studentCount > 0) {
+        return res.status(400).json({ error: `Cannot delete: ${userCount} user(s) and ${studentCount} student(s) are still assigned to this branch. Reassign them first.` });
+      }
       await db.run('DELETE FROM branches WHERE id = ?', req.params.id);
       res.json({ success: true });
     } catch (error) { console.error('Delete branch error:', error); res.status(500).json({ error: 'Failed to delete branch' }); }
