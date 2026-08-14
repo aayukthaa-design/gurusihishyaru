@@ -244,6 +244,21 @@ export function SpecialClasses() {
     }
   };
 
+  const handlePermanentDeleteClick = async (id: number) => {
+    if (!confirm('Permanently delete this cancelled class? This removes it and its attendance records for good.')) return;
+    try {
+      const res = await apiFetch(`/api/special-classes/${id}/permanent`, { method: 'DELETE' });
+      if (res.ok) {
+        loadClasses();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to delete');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   // Open Attendance modal
   const openAttendanceModal = async (c: SpecialClass) => {
     setSelectedClass(c);
@@ -481,23 +496,34 @@ export function SpecialClasses() {
                   </div>
 
                   <div className="px-5 py-4 border-t border-border bg-muted/20 flex flex-wrap items-center justify-between gap-3">
-                    {user?.role === 'teacher' && c.status !== 'Cancelled' && (
+                    {user?.role === 'teacher' && (
                       <div className="flex items-center gap-2 w-full justify-between">
-                        <button
-                          onClick={() => openAttendanceModal(c)}
-                          className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-green-700"
-                        >
-                          <CheckCircle2 className="h-3.5 w-3.5" /> Mark Attendance
-                        </button>
+                        {c.status !== 'Cancelled' ? (
+                          <>
+                            <button
+                              onClick={() => openAttendanceModal(c)}
+                              className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-green-700"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" /> Mark Attendance
+                            </button>
 
-                        <div className="flex items-center gap-1.5">
-                          <button onClick={() => handleEditClick(c)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-secondary/40 text-muted-foreground">
-                            <Edit2 className="h-3.5 w-3.5" />
-                          </button>
-                          <button onClick={() => handleCancelClick(c.id)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-red-50 text-red-500">
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
+                            <div className="flex items-center gap-1.5">
+                              <button onClick={() => handleEditClick(c)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-secondary/40 text-muted-foreground">
+                                <Edit2 className="h-3.5 w-3.5" />
+                              </button>
+                              <button onClick={() => handleCancelClick(c.id)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-red-50 text-red-500">
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-xs text-muted-foreground">Cancelled</span>
+                            <button onClick={() => handlePermanentDeleteClick(c.id)} className="p-1.5 rounded-lg border border-red-300 bg-card hover:bg-red-100 text-red-600" title="Delete permanently">
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     )}
 
@@ -509,14 +535,20 @@ export function SpecialClasses() {
                         >
                           <Download className="h-3.5 w-3.5" /> Export PDF
                         </button>
-                        <div className="flex items-center gap-1.5">
-                          <button onClick={() => handleEditClick(c)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-secondary/40 text-muted-foreground">
-                            <Edit2 className="h-3.5 w-3.5" />
-                          </button>
-                          <button onClick={() => handleCancelClick(c.id)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-red-50 text-red-500">
+                        {c.status !== 'Cancelled' ? (
+                          <div className="flex items-center gap-1.5">
+                            <button onClick={() => handleEditClick(c)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-secondary/40 text-muted-foreground">
+                              <Edit2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button onClick={() => handleCancelClick(c.id)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-red-50 text-red-500">
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button onClick={() => handlePermanentDeleteClick(c.id)} className="p-1.5 rounded-lg border border-red-300 bg-card hover:bg-red-100 text-red-600" title="Delete permanently">
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
-                        </div>
+                        )}
                       </div>
                     )}
 
@@ -528,7 +560,7 @@ export function SpecialClasses() {
                         >
                           <Download className="h-3.5 w-3.5" /> Export PDF
                         </button>
-                        {c.status !== 'Cancelled' && (
+                        {c.status !== 'Cancelled' ? (
                           <div className="flex items-center gap-1.5">
                             <button onClick={() => handleEditClick(c)} className="p-1.5 rounded-lg border border-border bg-card hover:bg-secondary/40 text-muted-foreground">
                               <Edit2 className="h-3.5 w-3.5" />
@@ -537,6 +569,10 @@ export function SpecialClasses() {
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
                           </div>
+                        ) : (
+                          <button onClick={() => handlePermanentDeleteClick(c.id)} className="p-1.5 rounded-lg border border-red-300 bg-card hover:bg-red-100 text-red-600" title="Delete permanently">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
                         )}
                       </div>
                     )}

@@ -1,8 +1,8 @@
 import { Header } from '../components/Header';
 import { StatsCard } from '../components/StatsCard';
 import { DataTable } from '../components/DataTable';
-import { GraduationCap, Award, TrendingUp, BookOpen } from 'lucide-react';
-import { subscribeExams, Exam } from '../lib/examService';
+import { GraduationCap, Award, TrendingUp, BookOpen, Trash2 } from 'lucide-react';
+import { subscribeExams, deleteExamAPI, Exam } from '../lib/examService';
 import { subscribeMarks, refreshMarks, MarkRecord } from '../lib/examMarksService';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
@@ -31,6 +31,15 @@ function ExamsList() {
     const unsubMarks = subscribeMarks((items) => setMarks(items));
     return () => { unsub(); unsubMarks(); };
   }, []);
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this exam? This also removes its attendance and marks.')) return;
+    try {
+      await deleteExamAPI(id);
+    } catch (err) {
+      alert('Failed to delete exam');
+    }
+  };
 
   const gradeDistribution = React.useMemo(() => {
     const counts: Record<string, number> = {};
@@ -61,6 +70,13 @@ function ExamsList() {
                 ) : (
                   <Link to={`/exams/${exam.id}/attendance`} className="text-xs text-primary">Complete Attendance first</Link>
                 )}
+                <button
+                  onClick={() => handleDelete(String(exam.id))}
+                  className="p-1.5 rounded-lg border border-border bg-card hover:bg-red-50 text-red-500"
+                  title="Delete exam"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
           ))}

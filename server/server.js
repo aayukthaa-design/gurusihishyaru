@@ -2814,6 +2814,25 @@ async function main() {
     }
   });
 
+  app.delete('/api/exams/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const exam = await db.get('SELECT * FROM exams WHERE id = ?', req.params.id);
+      if (!exam) return res.status(404).json({ error: 'Exam not found' });
+
+      if (exam.attachmentPath && fs.existsSync(exam.attachmentPath)) {
+        try { fs.unlinkSync(exam.attachmentPath); } catch (e) {}
+      }
+      await db.run('DELETE FROM exam_marks WHERE examId = ?', req.params.id);
+      await db.run('DELETE FROM exam_attendance WHERE examId = ?', req.params.id);
+      await db.run('DELETE FROM exams WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Delete exam error:', err);
+      res.status(500).json({ error: 'Failed to delete exam' });
+    }
+  });
+
   // ─── Exam Marks ─────────────────────────────────────────────────────────────
 
   function gradeFromPercentage(p) {
@@ -5204,14 +5223,22 @@ async function main() {
   // Access is derived from the verified JWT (req.user.roles/sub), never from a
   // client-supplied role/teacherId param — a teacher can only ever see or fetch
   // their own uploads, with no exceptions, per the isolation requirement.
-  function materialAccessAllowed(req, material) {
+  async function materialAccessAllowed(req, material) {
     const roles = req.user.roles || [];
     if (roles.includes('super_admin')) return true;
     if (roles.includes('teacher') && material.teacherId === req.user.sub) return true;
     if ((roles.includes('admin') || roles.includes('accountant')) && material.branchId === (req.user.branchId || null)) return true;
     if (roles.includes('parent')) {
-      const classNames = parseArrayParam(req.query.classNames || req.body?.classNames);
-      if (material.branchId === (req.user.branchId || null) && classNames.includes(material.className)) return true;
+      if (material.branchId !== (req.user.branchId || null)) return false;
+      // Derived server-side from the parent's own linked students, never from a
+      // client-supplied classNames param — a parent could otherwise pass any
+      // className and download materials outside their own children's classes.
+      const row = await db.get(
+        `SELECT 1 FROM parent_student ps JOIN students s ON s.id = ps.studentId
+         WHERE ps.parentId = ? AND s.className = ? LIMIT 1`,
+        req.user.sub, material.className
+      );
+      if (row) return true;
     }
     return false;
   }
@@ -5291,7 +5318,7 @@ async function main() {
     try {
       const material = await db.get('SELECT * FROM materials WHERE id = ?', req.params.id);
       if (!material) return res.status(404).json({ error: 'Material not found' });
-      if (!materialAccessAllowed(req, material)) return res.status(403).json({ error: 'Forbidden' });
+      if (!(await materialAccessAllowed(req, material))) return res.status(403).json({ error: 'Forbidden' });
 
       const filePath = path.join(PRIVATE_UPLOAD_DIR, material.storedFileName);
       if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
@@ -6069,6 +6096,30 @@ async function main() {
         INSERT INTO notifications (id, title, message, type, priority, roles, branchId, classNames, status, createdAt)
         VALUES (?, ?, ?, 'warning', 'high', '["parent","admin","super_admin","teacher"]', ?, ?, 'unread', ?)
       `, notifId, notifTitle, notifMsg, cls.branchId, JSON.stringify([cls.className]), now);
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Permanent removal — distinct from the DELETE route above, which only ever
+  // soft-cancels (keeps history + notifies parents). Only allowed once a class
+  // is already Cancelled, so this can't be used to skip that notification step.
+  app.delete('/api/special-classes/:id/permanent', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { id } = req.params;
+      const cls = await db.get('SELECT * FROM special_classes WHERE id = ?', id);
+      if (!cls) return res.status(404).json({ error: 'Class not found' });
+      if (cls.status !== 'Cancelled') return res.status(400).json({ error: 'Only cancelled classes can be permanently deleted' });
+
+      if (cls.attachmentPath && fs.existsSync(cls.attachmentPath)) {
+        try { fs.unlinkSync(cls.attachmentPath); } catch (e) {}
+      }
+      await db.run('DELETE FROM bonus_attendance WHERE specialClassId = ?', id);
+      await db.run('DELETE FROM special_classes WHERE id = ?', id);
 
       res.json({ success: true });
     } catch (err) {

@@ -103,6 +103,12 @@ export async function updateExamStatus(id: string, status: Exam['status']): Prom
   }
 }
 
+export async function deleteExamAPI(id: string): Promise<void> {
+  const res = await apiFetch(`/api/exams/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Delete failed');
+  await refreshExams();
+}
+
 export function subscribeExams(listener: (exams: Exam[]) => void): () => void {
   return store.subscribe(listener);
 }

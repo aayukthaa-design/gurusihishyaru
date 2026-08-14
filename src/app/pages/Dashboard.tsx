@@ -26,7 +26,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { addTeacher, getTeachersForBranch, useTeachers, refreshTeachers } from '../lib/teacherService';
-import { addClass, getClassesForBranch } from '../lib/classService';
+import { addClass, getClassesForBranch, getClassesForTeacher, useClasses } from '../lib/classService';
 import { BOARDS } from '../lib/classConstants';
 import { addNotification } from '../lib/notificationService';
 import { useSchoolExamSchedules } from '../lib/schoolExamScheduleService';
@@ -213,8 +213,17 @@ export function Dashboard() {
   }, [branchFilter, isTeacher, user]);
 
 
-  // Teacher-specific values — must be declared before effects that reference them
-  const myClasses: string[] = user?.assignedClassIds ?? [];
+  // Teacher-specific values — must be declared before effects that reference them.
+  // Derived from actual class-teacher assignments (classService), not
+  // user.assignedClassIds — the login response never populates that field, so
+  // every consumer reading it (this widget, exams filter, notifications
+  // filter, school exam schedules filter) was silently empty for every teacher.
+  const allClasses = useClasses();
+  const myClasses: string[] = React.useMemo(() => {
+    if (!user?.id) return [];
+    const rows = getClassesForTeacher(user.id, user.branchId);
+    return Array.from(new Set(rows.map((r) => r.className)));
+  }, [user?.id, user?.branchId, allClasses]);
   const todayISO = new Date().toISOString().slice(0, 10);
 
   const { actions } = isSuperAdmin
@@ -1271,6 +1280,11 @@ export function Dashboard() {
             <div className="rounded-2xl border border-border bg-card p-5">
               <h3 className="text-sm font-semibold mb-2">Daily Submission Status</h3>
               <div className="space-y-2">
+                {myClasses.length === 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    No classes assigned to you yet — ask an admin to assign your classes to see submission status here.
+                  </p>
+                )}
                 {myClasses.map((c) => (
                   <div key={c} className="flex items-center justify-between">
                     <div>
