@@ -3,19 +3,34 @@ import { apiFetch } from './apiClient';
 
 export type FeeStatus = 'Pending' | 'Partially Paid' | 'Paid' | 'Overdue';
 
-export interface FeeStructure {
+/** Discount + category + duration fields shared by fee structures, records, and approval requests. */
+export interface FeeDiscountFields {
+  /** Total fee before discount, as entered by staff. */
+  originalAmount: number;
+  discountPercent: number;
+  /** originalAmount * discountPercent / 100 — always server-computed, never trust a client-sent value. */
+  discountAmount: number;
+  /** Free-text, e.g. "Tuition", "CBSE Batch", "Crash Course". */
+  category: string;
+  /** Fee period this charge covers, e.g. '2026-06-01' to '2026-08-31'. */
+  startDate: string;
+  endDate: string;
+}
+
+export interface FeeStructure extends FeeDiscountFields {
   id: number;
   className: string;
   branchId: string;
   academicYear: string;
   feeType: string;
+  /** Final Amount (originalAmount - discountAmount) — unchanged meaning, existing readers keep working. */
   amount: number;
   dueDate: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface FeeRecord {
+export interface FeeRecord extends FeeDiscountFields {
   id: number;
   studentId: string;
   studentName: string;
@@ -23,6 +38,7 @@ export interface FeeRecord {
   branchId: string;
   feeType: string;
   academicYear: string;
+  /** Final Amount (originalAmount - discountAmount) — unchanged meaning, existing readers keep working. */
   totalAmount: number;
   paidAmount: number;
   dueDate: string;
@@ -138,7 +154,12 @@ export async function generateFeeRecordsAPI(structureId: number, user: any): Pro
 export interface MonthlyFeeGenerationInput {
   className: string;
   feeType: string;
-  amount: number;
+  /** Original Amount before discount — the server computes discountAmount/Final Amount from this + discountPercent. */
+  originalAmount: number;
+  discountPercent?: number;
+  category?: string;
+  startDate?: string;
+  endDate?: string;
   academicYear: string;
   startMonth: string; // 'YYYY-MM'
   months: number;
@@ -163,14 +184,19 @@ export async function generateMonthlyFeeRecordsAPI(
 export interface SingleFeeRecordInput {
   studentId: string;
   feeType: string;
-  totalAmount: number;
+  /** Original Amount before discount — the server computes discountAmount/Final Amount from this + discountPercent. */
+  originalAmount: number;
+  discountPercent?: number;
+  category?: string;
+  startDate?: string;
+  endDate?: string;
   dueDate: string;
   academicYear?: string;
   month?: string;
 }
 
 /** A pending/approved/rejected Super Admin sign-off on a fee amount — see fee_approval_requests. */
-export interface FeeApprovalRequest {
+export interface FeeApprovalRequest extends FeeDiscountFields {
   id: string;
   studentId: string;
   studentName: string;
@@ -183,6 +209,7 @@ export interface FeeApprovalRequest {
   month?: string | null;
   /** Null when there's no existing fee for this student yet. */
   oldAmount: number | null;
+  /** Final Amount being requested (originalAmount - discountAmount). */
   newAmount: number;
   dueDate: string;
   status: 'Pending' | 'Approved' | 'Rejected';
@@ -216,7 +243,7 @@ export async function createSingleFeeRecordAPI(input: SingleFeeRecordInput, user
 
 export async function updateFeeRecordAPI(
   recordId: number,
-  updates: { totalAmount?: number; dueDate?: string },
+  updates: { originalAmount?: number; discountPercent?: number; category?: string; startDate?: string; endDate?: string; dueDate?: string },
   user: any
 ): Promise<FeeRecordWriteResult> {
   const res = await apiFetch(`/api/fees/records/${recordId}`, { method: 'PUT', body: updates });

@@ -85,7 +85,6 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'homework',         // Assign homework
       'student_management', // Manage student records from teacher portal
       'student_progress', // View student progress
-      'timetable',        // View own timetable
       'notification_center', // Teacher-specific notifications
       'daily_submission', // Daily work report submission
       'special_classes',

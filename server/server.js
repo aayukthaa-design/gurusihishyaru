@@ -1481,6 +1481,53 @@ async function initDb() {
   try { await db.exec("ALTER TABLE timetable_entries ADD COLUMN endTime TEXT DEFAULT '';"); } catch (e) {}
   try { await db.exec("ALTER TABLE timetable_entries ADD COLUMN notes TEXT DEFAULT '';"); } catch (e) {}
 
+  // Two batches (classes rows) can share the same className across different
+  // boards (e.g. "10th" under CBSE and under State board) — the old
+  // UNIQUE(className, dayOfWeek, period) constraint meant saving a period for
+  // one silently overwrote the other's. Rebuild onto a classId-keyed
+  // constraint, same "detect old shape, rebuild" approach used for the users
+  // table above. Existing rows are best-effort backfilled to the one classes
+  // row matching their className+branchId; a row left with classId NULL
+  // (ambiguous historical data, or a batch since deleted) just won't collide
+  // with anything until it's re-saved from the UI, which fills classId in.
+  try {
+    const ttSchema = await db.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='timetable_entries'");
+    if (ttSchema && !/classId/i.test(ttSchema.sql)) {
+      await db.exec(`
+        CREATE TABLE timetable_entries_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          classId TEXT,
+          className TEXT NOT NULL,
+          dayOfWeek TEXT NOT NULL,
+          period TEXT NOT NULL,
+          subject TEXT,
+          teacherId TEXT,
+          teacherName TEXT,
+          room TEXT,
+          branchId TEXT,
+          createdAt TEXT,
+          updatedAt TEXT,
+          startTime TEXT DEFAULT '',
+          endTime TEXT DEFAULT '',
+          notes TEXT DEFAULT '',
+          UNIQUE(classId, dayOfWeek, period)
+        );
+        INSERT INTO timetable_entries_new (id, className, dayOfWeek, period, subject, teacherId, teacherName, room, branchId, createdAt, updatedAt, startTime, endTime, notes)
+          SELECT id, className, dayOfWeek, period, subject, teacherId, teacherName, room, branchId, createdAt, updatedAt, startTime, endTime, notes FROM timetable_entries;
+        DROP TABLE timetable_entries;
+        ALTER TABLE timetable_entries_new RENAME TO timetable_entries;
+      `);
+      const orphans = await db.all('SELECT id, className, branchId FROM timetable_entries WHERE classId IS NULL');
+      for (const row of orphans) {
+        const matches = await db.all('SELECT id FROM classes WHERE className = ? AND (branchId = ? OR ? IS NULL)', row.className, row.branchId, row.branchId);
+        if (matches.length === 1) {
+          await db.run('UPDATE timetable_entries SET classId = ? WHERE id = ?', matches[0].id, row.id);
+        }
+      }
+      console.log(`Migrated timetable_entries: added classId (backfilled ${orphans.length - (await db.get("SELECT COUNT(*) c FROM timetable_entries WHERE classId IS NULL")).c}/${orphans.length} rows unambiguously).`);
+    }
+  } catch (e) { console.error('timetable_entries classId migration failed:', e); }
+
   // Seed the one real branch that predates this table — its id must stay
   // 'branch_main' since it's already hardcoded onto existing users/students.
   try {
@@ -1873,6 +1920,21 @@ async function initDb() {
   // Populated only for recurring monthly fee records (e.g. '2026-07'), so each
   // month stays its own trackable/payable fee_records row instead of one lump sum.
   try { await db.exec("ALTER TABLE fee_records ADD COLUMN month TEXT;"); } catch (e) {}
+
+  // Discount + duration + category — purely additive. totalAmount/amount/
+  // newAmount keep meaning exactly what they always have (the Final Amount),
+  // so every existing reader (status calc, ledger, receipts, dashboard,
+  // reports, Parent Portal) keeps working untouched. originalAmount is
+  // backfilled from that same column for pre-existing rows below, so old
+  // records read as "0% discount on their existing amount" rather than blank.
+  for (const col of ['originalAmount REAL', 'discountPercent REAL DEFAULT 0', 'discountAmount REAL DEFAULT 0', 'category TEXT DEFAULT \'\'', 'startDate TEXT DEFAULT \'\'', 'endDate TEXT DEFAULT \'\'']) {
+    try { await db.exec(`ALTER TABLE fee_records ADD COLUMN ${col};`); } catch (e) {}
+    try { await db.exec(`ALTER TABLE fee_structures ADD COLUMN ${col};`); } catch (e) {}
+    try { await db.exec(`ALTER TABLE fee_approval_requests ADD COLUMN ${col};`); } catch (e) {}
+  }
+  try { await db.run('UPDATE fee_records SET originalAmount = totalAmount WHERE originalAmount IS NULL'); } catch (e) {}
+  try { await db.run('UPDATE fee_structures SET originalAmount = amount WHERE originalAmount IS NULL'); } catch (e) {}
+  try { await db.run('UPDATE fee_approval_requests SET originalAmount = newAmount WHERE originalAmount IS NULL'); } catch (e) {}
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS otp_codes (
@@ -2318,6 +2380,21 @@ async function main() {
       req.user.sub
     );
     return rows.map((r) => r.className).filter(Boolean);
+  }
+
+  // classId-scoped counterpart of getTeacherAssignedClassNames, used only by
+  // the timetable routes below — className alone can't disambiguate two
+  // batches on different boards that happen to share a name, so timetable
+  // scoping needs the actual classes.id, not just the className string.
+  async function getTeacherAssignedClassIds(req) {
+    const roles = req.user?.roles || [];
+    const isTeacherOnly = roles.includes('teacher') && !roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r));
+    if (!isTeacherOnly) return null;
+    const rows = await db.all(
+      "SELECT id FROM classes WHERE assignedTeacherId = ? AND status != 'Archived'",
+      req.user.sub
+    );
+    return rows.map((r) => r.id);
   }
 
   // email/mobile are no longer globally UNIQUE (dual-role accounts share an
@@ -2923,17 +3000,21 @@ async function main() {
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM timetable_entries WHERE 1=1';
       const params = [];
-      if (req.query.className) { query += ' AND className = ?'; params.push(req.query.className); }
+      // classId is the real scoping key (two batches on different boards can
+      // share a className) — className is accepted too for any older caller
+      // that still queries by it, but classId always wins when both are sent.
+      if (req.query.classId) { query += ' AND classId = ?'; params.push(req.query.classId); }
+      else if (req.query.className) { query += ' AND className = ?'; params.push(req.query.className); }
       if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
 
       // A teacher-only account only ever sees the timetable of batches
       // assigned to them.
-      const teacherClassNames = await getTeacherAssignedClassNames(req);
-      if (teacherClassNames) {
-        if (teacherClassNames.length === 0) return res.json([]);
-        if (req.query.className && !teacherClassNames.includes(req.query.className)) return res.json([]);
-        query += ` AND className IN (${teacherClassNames.map(() => '?').join(',')})`;
-        params.push(...teacherClassNames);
+      const teacherClassIds = await getTeacherAssignedClassIds(req);
+      if (teacherClassIds) {
+        if (teacherClassIds.length === 0) return res.json([]);
+        if (req.query.classId && !teacherClassIds.includes(req.query.classId)) return res.json([]);
+        query += ` AND classId IN (${teacherClassIds.map(() => '?').join(',')})`;
+        params.push(...teacherClassIds);
       }
 
       const rows = await db.all(query, ...params);
@@ -2947,8 +3028,8 @@ async function main() {
   // A teacher may only write timetable entries for a batch they're assigned to
   // (classes.assignedTeacherId); admin/super_admin remain unrestricted within
   // their existing branch scope.
-  async function isTeacherAssignedToClass(teacherId, className) {
-    const row = await db.get('SELECT assignedTeacherId FROM classes WHERE className = ?', className);
+  async function isTeacherAssignedToClass(teacherId, classId) {
+    const row = await db.get('SELECT assignedTeacherId FROM classes WHERE id = ?', classId);
     return Boolean(row && row.assignedTeacherId === teacherId);
   }
 
@@ -2962,29 +3043,29 @@ async function main() {
       const startTime = body.startTime || '';
       const endTime = body.endTime || '';
       const period = startTime && endTime ? `${startTime}-${endTime}` : body.period;
-      if (!body.className || !body.dayOfWeek || !period) {
-        return res.status(400).json({ error: 'className, dayOfWeek and a time range (period, or startTime+endTime) are required' });
+      if (!body.classId || !body.className || !body.dayOfWeek || !period) {
+        return res.status(400).json({ error: 'classId, className, dayOfWeek and a time range (period, or startTime+endTime) are required' });
       }
       if (isTeacher && !isStaffAdmin) {
-        const owns = await isTeacherAssignedToClass(req.user.sub, body.className);
+        const owns = await isTeacherAssignedToClass(req.user.sub, body.classId);
         if (!owns) return res.status(403).json({ error: 'You are not assigned to this batch.' });
       }
       const notes = body.notes || '';
       const branchId = resolveBranchId(req, body.branchId) || req.user?.branchId || null;
       const now = new Date().toISOString();
       await db.run(
-        `INSERT INTO timetable_entries (className, dayOfWeek, period, subject, teacherId, teacherName, room, branchId, createdAt, updatedAt, startTime, endTime, notes)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(className, dayOfWeek, period) DO UPDATE SET
+        `INSERT INTO timetable_entries (classId, className, dayOfWeek, period, subject, teacherId, teacherName, room, branchId, createdAt, updatedAt, startTime, endTime, notes)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(classId, dayOfWeek, period) DO UPDATE SET
            subject=excluded.subject, teacherId=excluded.teacherId, teacherName=excluded.teacherName,
            room=excluded.room, branchId=excluded.branchId, updatedAt=excluded.updatedAt,
            startTime=excluded.startTime, endTime=excluded.endTime, notes=excluded.notes`,
-        body.className, body.dayOfWeek, period, body.subject || '', body.teacherId || null, body.teacherName || null,
+        body.classId, body.className, body.dayOfWeek, period, body.subject || '', body.teacherId || null, body.teacherName || null,
         body.room || '', branchId, now, now, startTime, endTime, notes
       );
       const row = await db.get(
-        'SELECT * FROM timetable_entries WHERE className = ? AND dayOfWeek = ? AND period = ?',
-        body.className, body.dayOfWeek, period
+        'SELECT * FROM timetable_entries WHERE classId = ? AND dayOfWeek = ? AND period = ?',
+        body.classId, body.dayOfWeek, period
       );
       res.status(201).json(row);
     } catch (err) {
@@ -3000,9 +3081,9 @@ async function main() {
     if (!isStaffAdmin && !isTeacher) return res.status(403).json({ error: 'Forbidden' });
     try {
       if (isTeacher && !isStaffAdmin) {
-        const entry = await db.get('SELECT className FROM timetable_entries WHERE id = ?', req.params.id);
+        const entry = await db.get('SELECT classId FROM timetable_entries WHERE id = ?', req.params.id);
         if (!entry) return res.status(404).json({ error: 'Timetable entry not found.' });
-        const owns = await isTeacherAssignedToClass(req.user.sub, entry.className);
+        const owns = await isTeacherAssignedToClass(req.user.sub, entry.classId);
         if (!owns) return res.status(403).json({ error: 'You are not assigned to this batch.' });
       }
       await db.run('DELETE FROM timetable_entries WHERE id = ?', req.params.id);
@@ -6834,13 +6915,13 @@ async function main() {
   app.get('/api/inventory', async (req, res) => {
     try {
       const branchId = resolveBranchId(req, req.query.branchId);
-      let query = 'SELECT * FROM inventory_items';
+      const includeInactive = String(req.query.includeInactive || '') === 'true';
+      const clauses = [];
       const params = [];
-      if (branchId) {
-        query += ' WHERE branchId = ?';
-        params.push(branchId);
-      }
-      const rows = await db.all(query, ...params);
+      if (branchId) { clauses.push('branchId = ?'); params.push(branchId); }
+      if (!includeInactive) { clauses.push("status != 'Inactive'"); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows = await db.all(`SELECT * FROM inventory_items ${where}`, ...params);
       res.json(rows);
     } catch (err) {
       console.error(err);
@@ -7334,6 +7415,18 @@ async function main() {
     return 'Pending';
   }
 
+  // originalAmount/discountPercent are the two values staff actually enter;
+  // discountAmount and the Final Amount (still called totalAmount/amount/
+  // newAmount everywhere downstream) are always derived server-side so a
+  // tampered or stale client-computed number can never land in the DB.
+  function computeDiscount(originalAmount, discountPercent) {
+    const original = Number(originalAmount) || 0;
+    const percent = Math.max(0, Math.min(100, Number(discountPercent) || 0));
+    const discountAmount = Math.round((original * percent) / 100 * 100) / 100;
+    const finalAmount = Math.round((original - discountAmount) * 100) / 100;
+    return { originalAmount: original, discountPercent: percent, discountAmount, finalAmount };
+  }
+
   app.get('/api/fees/structures', async (req, res) => {
     if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -7351,15 +7444,20 @@ async function main() {
     if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
-      if (!body.className || !body.feeType || body.amount === undefined) {
-        return res.status(400).json({ error: 'className, feeType and amount are required' });
+      // originalAmount is the field the form now collects; `amount` is still
+      // accepted as a fallback so nothing else calling this endpoint breaks.
+      const originalAmountInput = body.originalAmount !== undefined ? body.originalAmount : body.amount;
+      if (!body.className || !body.feeType || originalAmountInput === undefined) {
+        return res.status(400).json({ error: 'className, feeType and originalAmount are required' });
       }
+      const { originalAmount, discountPercent, discountAmount, finalAmount } = computeDiscount(originalAmountInput, body.discountPercent);
       const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || null;
       const now = new Date().toISOString();
       const result = await db.run(`
-        INSERT INTO fee_structures (className, branchId, academicYear, feeType, amount, dueDate, createdAt, updatedAt)
-        VALUES (?,?,?,?,?,?,?,?)
-      `, body.className, branchId, body.academicYear || '', body.feeType, Number(body.amount), body.dueDate || '', now, now);
+        INSERT INTO fee_structures (className, branchId, academicYear, feeType, amount, dueDate, createdAt, updatedAt, originalAmount, discountPercent, discountAmount, category, startDate, endDate)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `, body.className, branchId, body.academicYear || '', body.feeType, finalAmount, body.dueDate || '', now, now,
+         originalAmount, discountPercent, discountAmount, body.category || '', body.startDate || '', body.endDate || '');
       const created = await db.get('SELECT * FROM fee_structures WHERE id = ?', result.lastID);
       res.status(201).json(created);
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
@@ -7371,12 +7469,18 @@ async function main() {
       const existing = await db.get('SELECT * FROM fee_structures WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'Fee structure not found' });
       const body = req.body || {};
+      const originalAmountInput = body.originalAmount !== undefined ? body.originalAmount : (body.amount !== undefined ? body.amount : existing.originalAmount);
+      const discountPercentInput = body.discountPercent !== undefined ? body.discountPercent : existing.discountPercent;
+      const { originalAmount, discountPercent, discountAmount, finalAmount } = computeDiscount(originalAmountInput, discountPercentInput);
       const now = new Date().toISOString();
       await db.run(`
-        UPDATE fee_structures SET className=?, academicYear=?, feeType=?, amount=?, dueDate=?, updatedAt=?
+        UPDATE fee_structures SET className=?, academicYear=?, feeType=?, amount=?, dueDate=?, updatedAt=?,
+          originalAmount=?, discountPercent=?, discountAmount=?, category=?, startDate=?, endDate=?
         WHERE id=?
       `, body.className ?? existing.className, body.academicYear ?? existing.academicYear, body.feeType ?? existing.feeType,
-         body.amount !== undefined ? Number(body.amount) : existing.amount, body.dueDate ?? existing.dueDate, now, req.params.id);
+         finalAmount, body.dueDate ?? existing.dueDate, now,
+         originalAmount, discountPercent, discountAmount, body.category ?? existing.category, body.startDate ?? existing.startDate, body.endDate ?? existing.endDate,
+         req.params.id);
       const updated = await db.get('SELECT * FROM fee_structures WHERE id = ?', req.params.id);
       res.json(updated);
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
@@ -7447,18 +7551,23 @@ async function main() {
     const now = new Date().toISOString();
     if (existing) {
       await db.run(
-        `UPDATE fee_approval_requests SET newAmount=?, dueDate=?, requestedBy=?, requestedByName=?, requestedAt=? WHERE id=?`,
-        input.newAmount, input.dueDate, input.requestedBy, input.requestedByName, now, existing.id
+        `UPDATE fee_approval_requests SET newAmount=?, dueDate=?, requestedBy=?, requestedByName=?, requestedAt=?,
+           originalAmount=?, discountPercent=?, discountAmount=?, category=?, startDate=?, endDate=? WHERE id=?`,
+        input.newAmount, input.dueDate, input.requestedBy, input.requestedByName, now,
+        input.originalAmount ?? input.newAmount, input.discountPercent ?? 0, input.discountAmount ?? 0,
+        input.category || '', input.startDate || '', input.endDate || '', existing.id
       );
       return { request: await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', existing.id), isNew: false };
     }
     const id = `FEEREQ-${crypto.randomUUID()}`;
     await db.run(
-      `INSERT INTO fee_approval_requests (id, studentId, studentName, className, branchId, feeRecordId, feeType, academicYear, month, oldAmount, newAmount, dueDate, status, requestedBy, requestedByName, requestedAt)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO fee_approval_requests (id, studentId, studentName, className, branchId, feeRecordId, feeType, academicYear, month, oldAmount, newAmount, dueDate, status, requestedBy, requestedByName, requestedAt, originalAmount, discountPercent, discountAmount, category, startDate, endDate)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       id, input.studentId, input.studentName, input.className, input.branchId, input.feeRecordId || null,
       input.feeType, input.academicYear || '', input.month || null, input.oldAmount ?? null, input.newAmount,
-      input.dueDate || '', 'Pending', input.requestedBy, input.requestedByName, now
+      input.dueDate || '', 'Pending', input.requestedBy, input.requestedByName, now,
+      input.originalAmount ?? input.newAmount, input.discountPercent ?? 0, input.discountAmount ?? 0,
+      input.category || '', input.startDate || '', input.endDate || ''
     );
     return { request: await db.get('SELECT * FROM fee_approval_requests WHERE id = ?', id), isNew: true };
   }
@@ -7474,18 +7583,24 @@ async function main() {
     if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
-      if (!body.studentId || !body.feeType || body.totalAmount === undefined) {
-        return res.status(400).json({ error: 'studentId, feeType and totalAmount are required' });
+      const originalAmountInput = body.originalAmount !== undefined ? body.originalAmount : body.totalAmount;
+      if (!body.studentId || !body.feeType || originalAmountInput === undefined) {
+        return res.status(400).json({ error: 'studentId, feeType and originalAmount are required' });
       }
       const student = await db.get('SELECT * FROM students WHERE id = ?', body.studentId);
       if (!student) return res.status(404).json({ error: 'Student not found' });
       const branchId = resolveBranchId(req, student.branchId) || student.branchId;
+      const { originalAmount, discountPercent, discountAmount, finalAmount } = computeDiscount(originalAmountInput, body.discountPercent);
+      const category = body.category || '';
+      const startDate = body.startDate || '';
+      const endDate = body.endDate || '';
 
       if (!req.user.roles.includes('super_admin')) {
         const { request, isNew } = await upsertPendingFeeApprovalRequest(db, {
           studentId: student.id, studentName: student.fullName, className: student.className, branchId,
           feeRecordId: null, feeType: body.feeType, academicYear: body.academicYear || '', month: body.month || null,
-          oldAmount: null, newAmount: Number(body.totalAmount), dueDate: body.dueDate || '',
+          oldAmount: null, newAmount: finalAmount, dueDate: body.dueDate || '',
+          originalAmount, discountPercent, discountAmount, category, startDate, endDate,
           requestedBy: req.user.sub, requestedByName: req.user.name,
         });
         if (isNew) await sendFeeApprovalRequestedNotification(db, request, { id: req.user.sub, name: req.user.name, role: req.user.roles[0] || 'admin' });
@@ -7499,11 +7614,12 @@ async function main() {
       const priorRecord = await db.get('SELECT 1 FROM fee_records WHERE studentId = ?', student.id);
 
       const now = new Date().toISOString();
-      const status = feeRecordStatus(Number(body.totalAmount), 0, body.dueDate);
+      const status = feeRecordStatus(finalAmount, 0, body.dueDate);
       const result = await db.run(`
-        INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt)
-        VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)
-      `, student.id, student.fullName, student.className, branchId, body.feeType, body.academicYear || '', Number(body.totalAmount), body.dueDate || '', status, body.month || null, now, now);
+        INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt, originalAmount, discountPercent, discountAmount, category, startDate, endDate)
+        VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)
+      `, student.id, student.fullName, student.className, branchId, body.feeType, body.academicYear || '', finalAmount, body.dueDate || '', status, body.month || null, now, now,
+         originalAmount, discountPercent, discountAmount, category, startDate, endDate);
       const created = await db.get('SELECT * FROM fee_records WHERE id = ?', result.lastID);
       if (!priorRecord) await sendFeeAssignedNotification(db, created, req.user.name);
       res.status(201).json({ pendingApproval: false, record: created });
@@ -7523,11 +7639,16 @@ async function main() {
       const existing = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
       if (!existing) return res.status(404).json({ error: 'Fee record not found' });
       const body = req.body || {};
-      const totalAmount = body.totalAmount !== undefined ? Number(body.totalAmount) : existing.totalAmount;
+      const originalAmountInput = body.originalAmount !== undefined ? body.originalAmount : (body.totalAmount !== undefined ? body.totalAmount : existing.originalAmount);
+      const discountPercentInput = body.discountPercent !== undefined ? body.discountPercent : existing.discountPercent;
+      const { originalAmount, discountPercent, discountAmount, finalAmount: totalAmount } = computeDiscount(originalAmountInput, discountPercentInput);
       if (totalAmount < existing.paidAmount) {
         return res.status(400).json({ error: `Amount can't be less than the ${existing.paidAmount} already paid.` });
       }
       const dueDate = body.dueDate ?? existing.dueDate;
+      const category = body.category ?? existing.category;
+      const startDate = body.startDate ?? existing.startDate;
+      const endDate = body.endDate ?? existing.endDate;
 
       if (!req.user.roles.includes('super_admin')) {
         const branchId = resolveBranchId(req, existing.branchId) || existing.branchId;
@@ -7535,6 +7656,7 @@ async function main() {
           studentId: existing.studentId, studentName: existing.studentName, className: existing.className, branchId,
           feeRecordId: existing.id, feeType: existing.feeType, academicYear: existing.academicYear, month: existing.month,
           oldAmount: existing.totalAmount, newAmount: totalAmount, dueDate,
+          originalAmount, discountPercent, discountAmount, category, startDate, endDate,
           requestedBy: req.user.sub, requestedByName: req.user.name,
         });
         if (isNew) await sendFeeApprovalRequestedNotification(db, request, { id: req.user.sub, name: req.user.name, role: req.user.roles[0] || 'admin' });
@@ -7545,8 +7667,10 @@ async function main() {
       const now = new Date().toISOString();
       const status = feeRecordStatus(totalAmount, existing.paidAmount, dueDate);
       await db.run(
-        'UPDATE fee_records SET totalAmount=?, dueDate=?, feeType=?, status=?, updatedAt=? WHERE id=?',
-        totalAmount, dueDate, feeType, status, now, req.params.id
+        `UPDATE fee_records SET totalAmount=?, dueDate=?, feeType=?, status=?, updatedAt=?,
+           originalAmount=?, discountPercent=?, discountAmount=?, category=?, startDate=?, endDate=? WHERE id=?`,
+        totalAmount, dueDate, feeType, status, now,
+        originalAmount, discountPercent, discountAmount, category, startDate, endDate, req.params.id
       );
       const updated = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
       res.json({ pendingApproval: false, record: updated });
@@ -7588,16 +7712,21 @@ async function main() {
         if (existing) {
           const status = feeRecordStatus(request.newAmount, existing.paidAmount, request.dueDate || existing.dueDate);
           await db.run(
-            'UPDATE fee_records SET totalAmount=?, dueDate=?, status=?, updatedAt=? WHERE id=?',
-            request.newAmount, request.dueDate || existing.dueDate, status, now, request.feeRecordId
+            `UPDATE fee_records SET totalAmount=?, dueDate=?, status=?, updatedAt=?,
+               originalAmount=?, discountPercent=?, discountAmount=?, category=?, startDate=?, endDate=? WHERE id=?`,
+            request.newAmount, request.dueDate || existing.dueDate, status, now,
+            request.originalAmount ?? request.newAmount, request.discountPercent ?? 0, request.discountAmount ?? 0,
+            request.category || '', request.startDate || '', request.endDate || '', request.feeRecordId
           );
         }
       } else {
         const status = feeRecordStatus(request.newAmount, 0, request.dueDate);
         await db.run(`
-          INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt)
-          VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)
-        `, request.studentId, request.studentName, request.className, request.branchId, request.feeType, request.academicYear, request.newAmount, request.dueDate, status, request.month, now, now);
+          INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt, originalAmount, discountPercent, discountAmount, category, startDate, endDate)
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)
+        `, request.studentId, request.studentName, request.className, request.branchId, request.feeType, request.academicYear, request.newAmount, request.dueDate, status, request.month, now, now,
+           request.originalAmount ?? request.newAmount, request.discountPercent ?? 0, request.discountAmount ?? 0,
+           request.category || '', request.startDate || '', request.endDate || '');
       }
 
       await db.run(
@@ -7745,12 +7874,16 @@ async function main() {
     try {
       const body = req.body || {};
       const { className, feeType, academicYear, startMonth } = body;
-      const amount = Number(body.amount);
+      const originalAmountInput = body.originalAmount !== undefined ? body.originalAmount : body.amount;
       const months = Math.max(1, Math.min(24, Number(body.months) || 12));
       const dueDay = Math.max(1, Math.min(28, Number(body.dueDay) || 5));
-      if (!className || !feeType || !amount || !startMonth || !/^\d{4}-\d{2}$/.test(startMonth)) {
-        return res.status(400).json({ error: 'className, feeType, amount and startMonth (YYYY-MM) are required' });
+      if (!className || !feeType || !originalAmountInput || !startMonth || !/^\d{4}-\d{2}$/.test(startMonth)) {
+        return res.status(400).json({ error: 'className, feeType, originalAmount and startMonth (YYYY-MM) are required' });
       }
+      const { originalAmount, discountPercent, discountAmount, finalAmount: amount } = computeDiscount(originalAmountInput, body.discountPercent);
+      const category = body.category || '';
+      const startDate = body.startDate || '';
+      const endDate = body.endDate || '';
       const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || null;
       const students = branchId
         ? await db.all('SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?', className, branchId, 'Active')
@@ -7774,9 +7907,10 @@ async function main() {
           const dueDate = `${month}-${String(dueDay).padStart(2, '0')}`;
           const status = feeRecordStatus(amount, 0, dueDate);
           const result = await db.run(`
-            INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt)
-            VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)
-          `, student.id, student.fullName, student.className, student.branchId || branchId, feeType, academicYear || '', amount, dueDate, status, month, now, now);
+            INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, month, createdAt, updatedAt, originalAmount, discountPercent, discountAmount, category, startDate, endDate)
+            VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)
+          `, student.id, student.fullName, student.className, student.branchId || branchId, feeType, academicYear || '', amount, dueDate, status, month, now, now,
+             originalAmount, discountPercent, discountAmount, category, startDate, endDate);
           createdIds.push(result.lastID);
         }
       }
@@ -7805,9 +7939,11 @@ async function main() {
         if (existing) continue;
         const status = feeRecordStatus(structure.amount, 0, structure.dueDate);
         const result = await db.run(`
-          INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt)
-          VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
-        `, student.id, student.fullName, student.className, structure.branchId, structure.feeType, structure.academicYear, structure.amount, structure.dueDate, status, now, now);
+          INSERT INTO fee_records (studentId, studentName, className, branchId, feeType, academicYear, totalAmount, paidAmount, dueDate, status, createdAt, updatedAt, originalAmount, discountPercent, discountAmount, category, startDate, endDate)
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?)
+        `, student.id, student.fullName, student.className, structure.branchId, structure.feeType, structure.academicYear, structure.amount, structure.dueDate, status, now, now,
+           structure.originalAmount ?? structure.amount, structure.discountPercent ?? 0, structure.discountAmount ?? 0,
+           structure.category || '', structure.startDate || '', structure.endDate || '');
         createdIds.push(result.lastID);
       }
       const rows = createdIds.length ? await db.all(`SELECT * FROM fee_records WHERE id IN (${createdIds.map(() => '?').join(',')})`, ...createdIds) : [];

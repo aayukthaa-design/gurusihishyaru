@@ -16,10 +16,12 @@ import {
   updateFeeRecordAPI,
   recordFeePaymentAPI,
   fetchFeeStats,
+  fetchFeePayments,
   FeeStats,
   FeeRecord,
+  FeePayment,
 } from '../lib/feeService';
-import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus, Pencil, CalendarClock } from 'lucide-react';
+import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus, Pencil, CalendarClock, History } from 'lucide-react';
 import { useClasses, getClassesForBranch } from '../lib/classService';
 
 function formatMonthLabel(month?: string | null): string {
@@ -33,6 +35,17 @@ function nextMonthValue(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
+
+/** Mirrors the server's computeDiscount() so the form shows the same numbers it's about to submit — the server always recomputes and persists these, this is purely a live preview. */
+function computeDiscountPreview(originalAmountInput: string, discountPercentInput: string) {
+  const originalAmount = Number(originalAmountInput) || 0;
+  const discountPercent = Math.max(0, Math.min(100, Number(discountPercentInput) || 0));
+  const discountAmount = Math.round(((originalAmount * discountPercent) / 100) * 100) / 100;
+  const finalAmount = Math.round((originalAmount - discountAmount) * 100) / 100;
+  return { discountAmount, finalAmount };
+}
+
+const CATEGORY_SUGGESTIONS = ['Tuition', 'CBSE Batch', 'State Batch', 'Crash Course', 'Special Coaching', 'Exam Preparation'];
 
 const STATUS_CONFIG = {
   Paid:            { icon: CheckCircle2, color: 'text-green-600 dark:text-green-400',  bg: 'bg-green-100 dark:bg-green-900/40' },
@@ -58,7 +71,7 @@ export function FeeManagement() {
   const [success, setSuccess] = useState<string | null>(null);
 
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'All' | 'Paid' | 'Pending' | 'Overdue'>('All');
+  const [filter, setFilter] = useState<'All' | 'Paid' | 'Pending' | 'Partial' | 'Overdue'>('All');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [showAll, setShowAll] = useState(false);
   useClasses();
@@ -71,26 +84,41 @@ export function FeeManagement() {
   const [isPaying, setIsPaying] = useState(false);
 
   const [showSetup, setShowSetup] = useState(false);
-  const [structureForm, setStructureForm] = useState({ className: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', academicYear: '' });
+  const [structureForm, setStructureForm] = useState({
+    className: '', feeType: FEE_TYPES[0], originalAmount: '', discountPercent: '', category: '',
+    startDate: '', endDate: '', dueDate: '', academicYear: '',
+  });
   const [isCreatingStructure, setIsCreatingStructure] = useState(false);
   const [isGenerating, setIsGenerating] = useState<number | null>(null);
 
   const [showMonthly, setShowMonthly] = useState(false);
   const [monthlyForm, setMonthlyForm] = useState({
-    className: '', feeType: 'Tuition', amount: '', academicYear: '',
+    className: '', feeType: 'Tuition', originalAmount: '', discountPercent: '', category: '',
+    startDate: '', endDate: '', academicYear: '',
     startMonth: nextMonthValue(), months: '12', dueDay: '5',
   });
   const [isGeneratingMonthly, setIsGeneratingMonthly] = useState(false);
 
   const [showIndividual, setShowIndividual] = useState(false);
   const [individualSearch, setIndividualSearch] = useState('');
-  const [individualForm, setIndividualForm] = useState({ studentId: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', month: '' });
+  const [individualForm, setIndividualForm] = useState({
+    studentId: '', feeType: FEE_TYPES[0], originalAmount: '', discountPercent: '', category: '',
+    startDate: '', endDate: '', dueDate: '', month: '',
+  });
   const [isAddingIndividual, setIsAddingIndividual] = useState(false);
 
   const [editingRecord, setEditingRecord] = useState<FeeRecord | null>(null);
-  const [editAmount, setEditAmount] = useState('');
+  const [editOriginalAmount, setEditOriginalAmount] = useState('');
+  const [editDiscountPercent, setEditDiscountPercent] = useState('');
+  const [editCategory, setEditCategory] = useState('');
+  const [editStartDate, setEditStartDate] = useState('');
+  const [editEndDate, setEditEndDate] = useState('');
   const [editDueDate, setEditDueDate] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  const [historyRecord, setHistoryRecord] = useState<FeeRecord | null>(null);
+  const [historyPayments, setHistoryPayments] = useState<FeePayment[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   function loadAll() {
     setIsLoading(true);
@@ -111,7 +139,7 @@ export function FeeManagement() {
 
   const filtered = useMemo(() => records.filter((record) => {
     const matchSearch = record.studentName.toLowerCase().includes(search.toLowerCase()) || record.studentId.toLowerCase().includes(search.toLowerCase());
-    const matchFilter = filter === 'All' || record.status === filter || (filter === 'Pending' && record.status === 'Partially Paid');
+    const matchFilter = filter === 'All' || record.status === filter || (filter === 'Partial' && record.status === 'Partially Paid');
     const matchesBranch = user?.role === 'super_admin' ? (!branchFilter || record.branchId === branchFilter) : true;
     return matchSearch && matchFilter && matchesBranch;
   }), [records, search, filter, branchFilter, user?.role]);
@@ -173,8 +201,8 @@ export function FeeManagement() {
 
   async function handleCreateStructure(e: React.FormEvent) {
     e.preventDefault();
-    if (!structureForm.amount || !structureForm.dueDate) {
-      setError('Amount and due date are required.');
+    if (!structureForm.originalAmount || !structureForm.dueDate) {
+      setError('Original amount and due date are required.');
       return;
     }
     setIsCreatingStructure(true);
@@ -183,12 +211,16 @@ export function FeeManagement() {
       await createFeeStructureAPI({
         className: structureForm.className,
         feeType: structureForm.feeType,
-        amount: Number(structureForm.amount),
+        originalAmount: Number(structureForm.originalAmount),
+        discountPercent: Number(structureForm.discountPercent) || 0,
+        category: structureForm.category,
+        startDate: structureForm.startDate,
+        endDate: structureForm.endDate,
         dueDate: structureForm.dueDate,
         academicYear: structureForm.academicYear || new Date().getFullYear().toString(),
       }, user);
       setSuccess('Fee structure created. Use "Generate for class" below to create records for students.');
-      setStructureForm({ className: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', academicYear: '' });
+      setStructureForm({ className: '', feeType: FEE_TYPES[0], originalAmount: '', discountPercent: '', category: '', startDate: '', endDate: '', dueDate: '', academicYear: '' });
     } catch (err: any) {
       setError(err.message || 'Failed to create fee structure.');
     } finally {
@@ -213,8 +245,8 @@ export function FeeManagement() {
 
   async function handleGenerateMonthly(e: React.FormEvent) {
     e.preventDefault();
-    if (!monthlyForm.amount || !monthlyForm.startMonth) {
-      setError('Monthly amount and start month are required.');
+    if (!monthlyForm.originalAmount || !monthlyForm.startMonth) {
+      setError('Monthly original amount and start month are required.');
       return;
     }
     setIsGeneratingMonthly(true);
@@ -223,7 +255,11 @@ export function FeeManagement() {
       const result = await generateMonthlyFeeRecordsAPI({
         className: monthlyForm.className,
         feeType: monthlyForm.feeType,
-        amount: Number(monthlyForm.amount),
+        originalAmount: Number(monthlyForm.originalAmount),
+        discountPercent: Number(monthlyForm.discountPercent) || 0,
+        category: monthlyForm.category,
+        startDate: monthlyForm.startDate,
+        endDate: monthlyForm.endDate,
         academicYear: monthlyForm.academicYear || new Date().getFullYear().toString(),
         startMonth: monthlyForm.startMonth,
         months: Number(monthlyForm.months) || 12,
@@ -249,8 +285,8 @@ export function FeeManagement() {
 
   async function handleAddIndividualFee(e: React.FormEvent) {
     e.preventDefault();
-    if (!individualForm.studentId || !individualForm.amount || !individualForm.dueDate) {
-      setError('Student, amount and due date are required.');
+    if (!individualForm.studentId || !individualForm.originalAmount || !individualForm.dueDate) {
+      setError('Student, original amount and due date are required.');
       return;
     }
     setIsAddingIndividual(true);
@@ -259,7 +295,11 @@ export function FeeManagement() {
       const result = await createSingleFeeRecordAPI({
         studentId: individualForm.studentId,
         feeType: individualForm.feeType,
-        totalAmount: Number(individualForm.amount),
+        originalAmount: Number(individualForm.originalAmount),
+        discountPercent: Number(individualForm.discountPercent) || 0,
+        category: individualForm.category,
+        startDate: individualForm.startDate,
+        endDate: individualForm.endDate,
         dueDate: individualForm.dueDate,
         academicYear: new Date().getFullYear().toString(),
         month: individualForm.month || undefined,
@@ -268,7 +308,7 @@ export function FeeManagement() {
       // Super Admin approves it (see fee_approval_requests). Super Admin's
       // own calls still apply immediately, same as before this workflow existed.
       setSuccess(result.pendingApproval ? 'Fee request sent for Super Admin approval.' : 'Individual fee record created.');
-      setIndividualForm({ studentId: '', feeType: FEE_TYPES[0], amount: '', dueDate: '', month: '' });
+      setIndividualForm({ studentId: '', feeType: FEE_TYPES[0], originalAmount: '', discountPercent: '', category: '', startDate: '', endDate: '', dueDate: '', month: '' });
       setIndividualSearch('');
       const statsResult = await fetchFeeStats(user);
       setStats(statsResult);
@@ -281,7 +321,11 @@ export function FeeManagement() {
 
   function startEditRecord(record: FeeRecord) {
     setEditingRecord(record);
-    setEditAmount(String(record.totalAmount));
+    setEditOriginalAmount(String(record.originalAmount ?? record.totalAmount));
+    setEditDiscountPercent(String(record.discountPercent ?? 0));
+    setEditCategory(record.category ?? '');
+    setEditStartDate(record.startDate ?? '');
+    setEditEndDate(record.endDate ?? '');
     setEditDueDate(record.dueDate);
   }
 
@@ -296,18 +340,22 @@ export function FeeManagement() {
     // the old try block started.
     try {
       if (!editingRecord) return;
-      const amount = Number(editAmount);
-      if (!amount || amount <= 0) {
-        setError('Enter a valid fee amount.');
+      const originalAmount = Number(editOriginalAmount);
+      if (!originalAmount || originalAmount <= 0) {
+        setError('Enter a valid original amount.');
         return;
       }
-      if (amount < editingRecord.paidAmount) {
-        setError(`Amount can't be less than the ${formatIndianCurrency(editingRecord.paidAmount)} already paid.`);
+      const { finalAmount } = computeDiscountPreview(editOriginalAmount, editDiscountPercent);
+      if (finalAmount < editingRecord.paidAmount) {
+        setError(`Final amount can't be less than the ${formatIndianCurrency(editingRecord.paidAmount)} already paid.`);
         return;
       }
       setIsSavingEdit(true);
       setError(null);
-      const result = await updateFeeRecordAPI(editingRecord.id, { totalAmount: amount, dueDate: editDueDate }, user);
+      const result = await updateFeeRecordAPI(editingRecord.id, {
+        originalAmount, discountPercent: Number(editDiscountPercent) || 0,
+        category: editCategory, startDate: editStartDate, endDate: editEndDate, dueDate: editDueDate,
+      }, user);
       // The existing amount stays active until Super Admin approves the change
       // (Super Admin's own edits still apply immediately, as before).
       setSuccess(result.pendingApproval
@@ -320,6 +368,17 @@ export function FeeManagement() {
       setError(err?.message || 'Failed to update fee.');
     } finally {
       setIsSavingEdit(false);
+    }
+  }
+
+  async function openHistoryFor(record: FeeRecord) {
+    setHistoryRecord(record);
+    setIsLoadingHistory(true);
+    try {
+      const payments = await fetchFeePayments(record.id);
+      setHistoryPayments(payments);
+    } finally {
+      setIsLoadingHistory(false);
     }
   }
 
@@ -350,6 +409,9 @@ export function FeeManagement() {
   return (
     <div className="flex-1 bg-background">
       <Header title="Fees" />
+      <datalist id="fee-category-suggestions">
+        {CATEGORY_SUGGESTIONS.map((c) => <option key={c} value={c} />)}
+      </datalist>
 
       <div className="max-w-5xl mx-auto p-6 space-y-6">
         {error && (
@@ -391,7 +453,7 @@ export function FeeManagement() {
             </button>
             {showSetup && (
               <div className="border-t border-border p-6 space-y-6">
-                <form onSubmit={handleCreateStructure} className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5 items-end">
+                <form onSubmit={handleCreateStructure} className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 items-end">
                   <label className="flex flex-col gap-1.5 text-sm">
                     <span className="font-medium text-foreground">Batch</span>
                     <select value={structureForm.className} onChange={(e) => setStructureForm((f) => ({ ...f, className: e.target.value }))}
@@ -408,13 +470,43 @@ export function FeeManagement() {
                     </select>
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
-                    <span className="font-medium text-foreground">Amount (₹)</span>
-                    <input type="number" min={0} value={structureForm.amount} onChange={(e) => setStructureForm((f) => ({ ...f, amount: e.target.value }))}
+                    <span className="font-medium text-foreground">Category</span>
+                    <input list="fee-category-suggestions" value={structureForm.category} onChange={(e) => setStructureForm((f) => ({ ...f, category: e.target.value }))} placeholder="e.g. Tuition"
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
                     <span className="font-medium text-foreground">Due Date</span>
                     <input type="date" value={structureForm.dueDate} onChange={(e) => setStructureForm((f) => ({ ...f, dueDate: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Original Amount (₹)</span>
+                    <input type="number" min={0} value={structureForm.originalAmount} onChange={(e) => setStructureForm((f) => ({ ...f, originalAmount: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Discount (%)</span>
+                    <input type="number" min={0} max={100} value={structureForm.discountPercent} onChange={(e) => setStructureForm((f) => ({ ...f, discountPercent: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Discount Amount</span>
+                    <input readOnly value={formatIndianCurrency(computeDiscountPreview(structureForm.originalAmount, structureForm.discountPercent).discountAmount)}
+                      className="rounded-xl border border-input bg-secondary px-3 py-2 text-sm text-muted-foreground" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Final Amount</span>
+                    <input readOnly value={formatIndianCurrency(computeDiscountPreview(structureForm.originalAmount, structureForm.discountPercent).finalAmount)}
+                      className="rounded-xl border border-input bg-secondary px-3 py-2 text-sm font-semibold text-foreground" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Start Date</span>
+                    <input type="date" value={structureForm.startDate} onChange={(e) => setStructureForm((f) => ({ ...f, startDate: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">End Date</span>
+                    <input type="date" value={structureForm.endDate} onChange={(e) => setStructureForm((f) => ({ ...f, endDate: e.target.value }))}
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                   </label>
                   <button type="submit" disabled={isCreatingStructure} className="flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">
@@ -428,8 +520,13 @@ export function FeeManagement() {
                   {structures.map((s) => (
                     <div key={s.id} className="flex items-center justify-between rounded-xl border border-border bg-secondary/40 px-4 py-3">
                       <div>
-                        <p className="text-sm font-medium text-foreground">{s.className} · {s.feeType}</p>
-                        <p className="text-xs text-muted-foreground">{formatIndianCurrency(s.amount)} · Due {s.dueDate}</p>
+                        <p className="text-sm font-medium text-foreground">{s.className} · {s.feeType}{s.category ? ` · ${s.category}` : ''}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {formatIndianCurrency(s.originalAmount ?? s.amount)}
+                          {s.discountPercent ? ` − ${s.discountPercent}% (${formatIndianCurrency(s.discountAmount)}) = ${formatIndianCurrency(s.amount)}` : ''}
+                          {' '}· Due {s.dueDate}
+                          {s.startDate && s.endDate ? ` · ${s.startDate} to ${s.endDate}` : ''}
+                        </p>
                       </div>
                       <button
                         onClick={() => handleGenerate(s.id)}
@@ -476,8 +573,33 @@ export function FeeManagement() {
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
-                    <span className="font-medium text-foreground">Monthly Amount (₹)</span>
-                    <input type="number" min={0} value={monthlyForm.amount} onChange={(e) => setMonthlyForm((f) => ({ ...f, amount: e.target.value }))}
+                    <span className="font-medium text-foreground">Category</span>
+                    <input list="fee-category-suggestions" value={monthlyForm.category} onChange={(e) => setMonthlyForm((f) => ({ ...f, category: e.target.value }))} placeholder="e.g. CBSE Batch"
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Monthly Original Amount (₹)</span>
+                    <input type="number" min={0} value={monthlyForm.originalAmount} onChange={(e) => setMonthlyForm((f) => ({ ...f, originalAmount: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Discount (%)</span>
+                    <input type="number" min={0} max={100} value={monthlyForm.discountPercent} onChange={(e) => setMonthlyForm((f) => ({ ...f, discountPercent: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Final Monthly Amount</span>
+                    <input readOnly value={formatIndianCurrency(computeDiscountPreview(monthlyForm.originalAmount, monthlyForm.discountPercent).finalAmount)}
+                      className="rounded-xl border border-input bg-secondary px-3 py-2 text-sm font-semibold text-foreground" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Fee Duration Start</span>
+                    <input type="date" value={monthlyForm.startDate} onChange={(e) => setMonthlyForm((f) => ({ ...f, startDate: e.target.value }))}
+                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-foreground">Fee Duration End</span>
+                    <input type="date" value={monthlyForm.endDate} onChange={(e) => setMonthlyForm((f) => ({ ...f, endDate: e.target.value }))}
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
@@ -552,8 +674,8 @@ export function FeeManagement() {
                       </select>
                     </label>
                     <label className="flex flex-col gap-1.5 text-sm">
-                      <span className="font-medium text-foreground">Amount (₹)</span>
-                      <input type="number" min={0} value={individualForm.amount} onChange={(e) => setIndividualForm((f) => ({ ...f, amount: e.target.value }))}
+                      <span className="font-medium text-foreground">Category</span>
+                      <input list="fee-category-suggestions" value={individualForm.category} onChange={(e) => setIndividualForm((f) => ({ ...f, category: e.target.value }))} placeholder="e.g. Crash Course"
                         className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                     </label>
                     <label className="flex flex-col gap-1.5 text-sm">
@@ -564,6 +686,36 @@ export function FeeManagement() {
                     <label className="flex flex-col gap-1.5 text-sm">
                       <span className="font-medium text-foreground">Month (optional)</span>
                       <input type="month" value={individualForm.month} onChange={(e) => setIndividualForm((f) => ({ ...f, month: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Original Amount (₹)</span>
+                      <input type="number" min={0} value={individualForm.originalAmount} onChange={(e) => setIndividualForm((f) => ({ ...f, originalAmount: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Discount (%)</span>
+                      <input type="number" min={0} max={100} value={individualForm.discountPercent} onChange={(e) => setIndividualForm((f) => ({ ...f, discountPercent: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Discount Amount</span>
+                      <input readOnly value={formatIndianCurrency(computeDiscountPreview(individualForm.originalAmount, individualForm.discountPercent).discountAmount)}
+                        className="rounded-xl border border-input bg-secondary px-3 py-2 text-sm text-muted-foreground" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Final Amount</span>
+                      <input readOnly value={formatIndianCurrency(computeDiscountPreview(individualForm.originalAmount, individualForm.discountPercent).finalAmount)}
+                        className="rounded-xl border border-input bg-secondary px-3 py-2 text-sm font-semibold text-foreground" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Fee Duration Start</span>
+                      <input type="date" value={individualForm.startDate} onChange={(e) => setIndividualForm((f) => ({ ...f, startDate: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Fee Duration End</span>
+                      <input type="date" value={individualForm.endDate} onChange={(e) => setIndividualForm((f) => ({ ...f, endDate: e.target.value }))}
                         className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                     </label>
                   </div>
@@ -699,7 +851,7 @@ export function FeeManagement() {
             </select>
           )}
           <div className="flex rounded-xl border border-border overflow-hidden">
-            {(['All', 'Paid', 'Pending', 'Overdue'] as const).map((f) => (
+            {(['All', 'Paid', 'Pending', 'Partial', 'Overdue'] as const).map((f) => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
@@ -773,19 +925,45 @@ export function FeeManagement() {
               </h2>
               <button onClick={() => setEditingRecord(null)} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
             </div>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div>
-                <label className="mb-1.5 block text-sm font-medium text-foreground">Fee Amount (₹)</label>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Original Amount (₹)</label>
                 <input
                   type="number"
-                  min={editingRecord.paidAmount}
-                  value={editAmount}
-                  onChange={(e) => setEditAmount(e.target.value)}
+                  min={0}
+                  value={editOriginalAmount}
+                  onChange={(e) => setEditOriginalAmount(e.target.value)}
                   className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
                 {editingRecord.paidAmount > 0 && (
-                  <p className="mt-1 text-xs text-muted-foreground">{formatIndianCurrency(editingRecord.paidAmount)} already paid — amount can't go below this.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{formatIndianCurrency(editingRecord.paidAmount)} already paid — final amount can't go below this.</p>
                 )}
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Discount (%)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={editDiscountPercent}
+                  onChange={(e) => setEditDiscountPercent(e.target.value)}
+                  className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Discount Amount</label>
+                <input readOnly value={formatIndianCurrency(computeDiscountPreview(editOriginalAmount, editDiscountPercent).discountAmount)}
+                  className="w-full rounded-xl border border-input bg-secondary px-4 py-2.5 text-sm text-muted-foreground" />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Final Amount</label>
+                <input readOnly value={formatIndianCurrency(computeDiscountPreview(editOriginalAmount, editDiscountPercent).finalAmount)}
+                  className="w-full rounded-xl border border-input bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground" />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Category</label>
+                <input list="fee-category-suggestions" value={editCategory} onChange={(e) => setEditCategory(e.target.value)}
+                  className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" />
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-foreground">Due Date</label>
@@ -793,6 +971,24 @@ export function FeeManagement() {
                   type="date"
                   value={editDueDate}
                   onChange={(e) => setEditDueDate(e.target.value)}
+                  className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Fee Duration Start</label>
+                <input
+                  type="date"
+                  value={editStartDate}
+                  onChange={(e) => setEditStartDate(e.target.value)}
+                  className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-foreground">Fee Duration End</label>
+                <input
+                  type="date"
+                  value={editEndDate}
+                  onChange={(e) => setEditEndDate(e.target.value)}
                   className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
                 />
               </div>
@@ -810,6 +1006,52 @@ export function FeeManagement() {
                 Cancel
               </button>
             </div>
+          </div>
+        )}
+
+        {historyRecord && (
+          <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-foreground">Fee Collection History — {historyRecord.studentName}</h2>
+              <button onClick={() => setHistoryRecord(null)} className="text-sm text-muted-foreground hover:text-foreground">✕</button>
+            </div>
+            <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-xl border border-border bg-secondary/40 p-3">
+                <p className="text-xs text-muted-foreground">Original Amount</p>
+                <p className="text-sm font-semibold text-foreground">{formatIndianCurrency(historyRecord.originalAmount)}</p>
+              </div>
+              <div className="rounded-xl border border-border bg-secondary/40 p-3">
+                <p className="text-xs text-muted-foreground">Discount</p>
+                <p className="text-sm font-semibold text-foreground">{historyRecord.discountPercent}% ({formatIndianCurrency(historyRecord.discountAmount)})</p>
+              </div>
+              <div className="rounded-xl border border-border bg-secondary/40 p-3">
+                <p className="text-xs text-muted-foreground">Final Amount</p>
+                <p className="text-sm font-semibold text-foreground">{formatIndianCurrency(historyRecord.totalAmount)}</p>
+              </div>
+              <div className="rounded-xl border border-border bg-secondary/40 p-3">
+                <p className="text-xs text-muted-foreground">Balance Pending</p>
+                <p className="text-sm font-semibold text-foreground">{formatIndianCurrency(historyRecord.totalAmount - historyRecord.paidAmount)}</p>
+              </div>
+            </div>
+            {isLoadingHistory ? (
+              <div className="flex items-center justify-center py-8 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading…
+              </div>
+            ) : historyPayments.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">No payments collected yet for this fee.</p>
+            ) : (
+              <div className="divide-y divide-border rounded-xl border border-border">
+                {historyPayments.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between px-4 py-3 text-sm">
+                    <div>
+                      <p className="font-medium text-foreground">{formatIndianCurrency(p.amount)} · {p.paymentMode}</p>
+                      <p className="text-xs text-muted-foreground">Receipt {p.receiptNumber} · {p.paymentDate}{p.referenceNumber ? ` · Ref ${p.referenceNumber}` : ''}</p>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{p.receivedBy}</p>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -838,16 +1080,32 @@ export function FeeManagement() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-foreground">{r.studentName}</p>
-                      <p className="text-xs text-muted-foreground">{r.feeType}{r.month ? ` · ${formatMonthLabel(r.month)}` : ''} · {r.className}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {r.feeType}{r.category ? ` · ${r.category}` : ''}{r.month ? ` · ${formatMonthLabel(r.month)}` : ''} · {r.className}
+                      </p>
+                      {r.startDate && r.endDate && (
+                        <p className="text-[11px] text-muted-foreground/80">{r.startDate} → {r.endDate}</p>
+                      )}
                     </div>
                     <div className="hidden sm:block text-right mr-4">
                       <p className="text-sm font-semibold text-foreground">{formatIndianCurrency(r.totalAmount)}</p>
+                      {!!r.discountPercent && (
+                        <p className="text-[11px] text-muted-foreground">{formatIndianCurrency(r.originalAmount)} − {r.discountPercent}%</p>
+                      )}
+                      <p className="text-xs text-green-600 dark:text-green-400">{formatIndianCurrency(r.paidAmount)} collected</p>
                       {pending > 0 && <p className="text-xs text-red-500">{formatIndianCurrency(pending)} due</p>}
                     </div>
                     <span className={`hidden sm:inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${cfg.bg} ${cfg.color}`}>
                       <StatusIcon className="h-3 w-3" />
                       {r.status}
                     </span>
+                    <button
+                      onClick={() => openHistoryFor(r)}
+                      title="View payment history"
+                      className="flex items-center gap-1 rounded-xl border border-border px-2.5 py-2 text-xs font-medium text-muted-foreground transition-all hover:bg-secondary hover:text-foreground"
+                    >
+                      <History className="h-3.5 w-3.5" />
+                    </button>
                     {isAccountantOrAdmin && (
                       <button
                         onClick={() => startEditRecord(r)}

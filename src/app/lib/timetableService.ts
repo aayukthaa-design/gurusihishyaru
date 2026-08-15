@@ -3,6 +3,8 @@ import { createStore, useStoreValue } from './store';
 
 export interface TimetableEntry {
   id: number;
+  /** classes.id — the real scoping key. className alone can't disambiguate two batches on different boards sharing a name. */
+  classId: string;
   className: string;
   dayOfWeek: string;
   period: string;
@@ -19,11 +21,13 @@ export interface TimetableEntry {
 }
 
 export interface TimetableFilter {
+  classId?: string;
   className?: string;
   branchId?: string;
 }
 
 export interface TimetableEntryInput {
+  classId: string;
   className: string;
   dayOfWeek: string;
   startTime?: string;
@@ -49,7 +53,8 @@ export async function refreshTimetable(filter: TimetableFilter = currentFilter):
   currentFilter = filter;
   try {
     const params = new URLSearchParams();
-    if (filter.className) params.set('className', filter.className);
+    if (filter.classId) params.set('classId', filter.classId);
+    else if (filter.className) params.set('className', filter.className);
     if (filter.branchId) params.set('branchId', filter.branchId);
     const qs = params.toString();
     const res = await apiFetch(`/api/timetable${qs ? `?${qs}` : ''}`);

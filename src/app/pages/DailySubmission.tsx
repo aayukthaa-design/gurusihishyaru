@@ -3,6 +3,7 @@ import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { addSubmission } from '../lib/dailySubmissionService';
 import { addNotification } from '../lib/notificationService';
+import { getBranchName } from '../lib/branchService';
 import { useNavigate } from 'react-router';
 
 export function DailySubmission() {
@@ -41,8 +42,26 @@ export function DailySubmission() {
       return;
     }
 
-    // Notify admins and superadmins
-    addNotification({ title: 'Daily Submission', message: `${teacherName} submitted report for ${className} (${subject})`, type: 'info', roles: ['admin','super_admin'], classNames: [className] });
+    // Notify admins and superadmins — description carries the actual report
+    // content since this is the only place a super admin can see it.
+    const branchName = getBranchName(user?.branchId);
+    const description = [
+      `Submitted by: ${teacherName}`,
+      `Branch: ${branchName}`,
+      `Date: ${date}`,
+      `Class: ${className}`,
+      `Subject: ${subject}`,
+      `Topic Covered: ${topic || '—'}`,
+      `Homework Given: ${homework || '—'}`,
+      `Attendance: ${attendanceStatus}`,
+      notes ? `Notes: ${notes}` : null,
+    ].filter(Boolean).join('\n');
+    addNotification({
+      title: 'Daily Submission Report',
+      message: `${teacherName} submitted report for ${className} (${subject})`,
+      description, type: 'info', roles: ['admin', 'super_admin'], classNames: [className],
+      sender: teacherName, senderId: teacherId, senderRole: user?.role || 'teacher', branchId: user?.branchId,
+    });
 
     // Notify teacher (confirmation)
     addNotification({ title: 'Submission Received', message: `Your daily submission for ${date} was saved.`, type: 'success', userIds: [teacherId] });

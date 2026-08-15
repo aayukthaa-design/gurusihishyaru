@@ -45,15 +45,19 @@ export function Timetable() {
     ? getClassesForTeacher(user?.id, user?.branchId)
     : getClassesForBranch(user?.branchId);
 
-  const [selectedClass, setSelectedClass] = useState('');
+  // Keyed by batch id, not className — two batches on different boards can
+  // share the same className (e.g. "10th" under CBSE and under State board),
+  // and a <select> can't distinguish two options with the same value.
+  const [selectedBatchId, setSelectedBatchId] = useState('');
   useEffect(() => {
-    if (!selectedClass && batchOptions.length > 0) setSelectedClass(batchOptions[0].className);
-    if (selectedClass && !batchOptions.some((b) => b.className === selectedClass) && batchOptions.length > 0) {
-      setSelectedClass(batchOptions[0].className);
+    if (!selectedBatchId && batchOptions.length > 0) setSelectedBatchId(batchOptions[0].id);
+    if (selectedBatchId && !batchOptions.some((b) => b.id === selectedBatchId) && batchOptions.length > 0) {
+      setSelectedBatchId(batchOptions[0].id);
     }
-  }, [batchOptions, selectedClass]);
+  }, [batchOptions, selectedBatchId]);
 
-  const selectedBatch = batchOptions.find((b) => b.className === selectedClass) || null;
+  const selectedBatch = batchOptions.find((b) => b.id === selectedBatchId) || null;
+  const selectedClass = selectedBatch?.className || '';
   // A teacher may only edit timetable entries for a batch they're assigned to
   // (the backend enforces this too — this just keeps the UI honest).
   const canEdit = isSuperAdmin || (user?.role === 'admin') || (isTeacherOnly && selectedBatch?.assignedTeacherId === user?.id);
@@ -68,10 +72,10 @@ export function Timetable() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!selectedClass) return;
+    if (!selectedBatchId) return;
     setLoading(true);
-    void refreshTimetable({ className: selectedClass, branchId: selectedBatch?.branchId }).finally(() => setLoading(false));
-  }, [selectedClass, selectedBatch?.branchId]);
+    void refreshTimetable({ classId: selectedBatchId, branchId: selectedBatch?.branchId }).finally(() => setLoading(false));
+  }, [selectedBatchId, selectedBatch?.branchId]);
 
   useEffect(() => {
     if (!selectedClass) return;
@@ -105,13 +109,14 @@ export function Timetable() {
   };
 
   const saveSlot = async () => {
-    if (!editSlot || !selectedClass) return;
+    if (!editSlot || !selectedBatchId || !selectedClass) return;
     if (!form.startTime || !form.endTime) { setError('Start time and end time are required.'); return; }
     // Teachers only ever edit their own batch's timetable (the Teacher select
     // is hidden for them), so the entry's teacher is implicitly themselves.
     const effectiveTeacherId = isTeacherOnly ? user?.id : form.teacherId;
     const teacher = isTeacherOnly ? null : teachers.find((t) => t.id === form.teacherId);
     const result = await saveTimetableEntry({
+      classId: selectedBatchId,
       className: selectedClass,
       dayOfWeek: editSlot.day,
       startTime: form.startTime,
@@ -148,12 +153,12 @@ export function Timetable() {
       <div className="p-6 space-y-6">
         <div className="mb-6 flex items-center gap-4">
           <select
-            value={selectedClass}
-            onChange={(e) => setSelectedClass(e.target.value)}
+            value={selectedBatchId}
+            onChange={(e) => setSelectedBatchId(e.target.value)}
             className="rounded-lg border border-input bg-input-background px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
           >
             {batchOptions.length === 0 && <option value="">No batches available</option>}
-            {batchOptions.map((b) => <option key={b.id} value={b.className}>{b.className}{b.board ? ` (${b.board})` : ''}</option>)}
+            {batchOptions.map((b) => <option key={b.id} value={b.id}>{b.className}{b.board ? ` (${b.board})` : ''}</option>)}
           </select>
           <p className="text-xs text-muted-foreground">
             {canEdit ? 'Click any entry to add or edit a class period.' : 'You can view this batch\'s timetable, but only its assigned teacher or an admin can edit it.'}
