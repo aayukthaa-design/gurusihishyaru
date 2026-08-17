@@ -562,8 +562,8 @@ export function Attendance() {
                           </button>
                         </div>
 
-                        {/* 📲 Send WhatsApp Action (Only for Absent) — hidden for teachers */}
-                        {status === 'absent' && !isTeacherOnly && (
+                        {/* 📲 Send WhatsApp Action (Only for Absent) */}
+                        {status === 'absent' && (
                           <div className="flex items-center gap-2">
                             {whatsappStatus[s.id] === 'success' ? (
                               <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/20 px-2.5 py-1.5 rounded-lg border border-green-200 dark:border-green-800">
@@ -615,8 +615,8 @@ export function Attendance() {
                 </div>
                 
                 <div className="flex gap-2">
-                  {/* Bulk WhatsApp Trigger Button — hidden for teachers */}
-                  {pendingWhatsappCount > 0 && !isTeacherOnly && (
+                  {/* Bulk WhatsApp Trigger Button */}
+                  {pendingWhatsappCount > 0 && (
                     <button
                       type="button"
                       disabled={bulkSending}
