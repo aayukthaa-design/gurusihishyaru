@@ -73,7 +73,10 @@ export function getStudentsForClass(className?: string, branchId?: string, batch
     const matchesClass = !className || sClass === filterClass;
     const matchesBranch = !branchId || student.branchId === branchId;
     const matchesBoard = !batch || student.batch === batch;
-    return matchesClass && matchesBranch && matchesBoard;
+    // Soft-deleted/re-admitted students keep an Inactive duplicate row; exclude
+    // it here so every roster built off this class list (attendance, exams,
+    // homework) doesn't show the same student twice.
+    return matchesClass && matchesBranch && matchesBoard && student.status !== 'Inactive';
   });
 }
 
