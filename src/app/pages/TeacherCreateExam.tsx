@@ -44,6 +44,7 @@ export function TeacherCreateExam() {
   const [attendanceStatuses, setAttendanceStatuses] = React.useState<Record<string, 'present' | 'absent'>>({});
   const [attendanceMessage, setAttendanceMessage] = React.useState<string | null>(null);
   const [attendanceSuccess, setAttendanceSuccess] = React.useState(false);
+  const [submittingAttendance, setSubmittingAttendance] = React.useState(false);
 
   // Referenced by the attendance modal below but previously never computed —
   // that left `attendanceSummary`/`canSubmitAttendance` undefined, so the
@@ -166,7 +167,8 @@ export function TeacherCreateExam() {
   }
 
   async function handleAttendanceSubmit() {
-    if (!pendingExam || !user) return;
+    if (!pendingExam || !user || submittingAttendance) return;
+    setSubmittingAttendance(true);
     const submissions = attendanceStudents.map((student) => ({
       examId: String(pendingExam.id),
       studentId: student.id,
@@ -191,9 +193,11 @@ export function TeacherCreateExam() {
       await submitExamAttendanceRecords(submissions, user);
     } catch (err) {
       setAttendanceMessage(err instanceof Error ? err.message : 'Failed to submit exam attendance.');
+      setSubmittingAttendance(false);
       return;
     }
-    updateExamStatus(String(pendingExam.id), 'attendance_completed');
+    await updateExamStatus(String(pendingExam.id), 'attendance_completed');
+    setSubmittingAttendance(false);
     addNotification({
       title: 'Exam Attendance Submitted',
       message: `Attendance recorded for ${pendingExam.name}.`,
@@ -418,7 +422,7 @@ export function TeacherCreateExam() {
                   ))}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <button type="button" onClick={handleAttendanceSubmit} disabled={!canSubmitAttendance} className="rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground disabled:cursor-not-allowed disabled:opacity-60">Submit Attendance</button>
+                  <button type="button" onClick={handleAttendanceSubmit} disabled={!canSubmitAttendance || submittingAttendance} className="rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground disabled:cursor-not-allowed disabled:opacity-60">{submittingAttendance ? 'Submitting...' : 'Submit Attendance'}</button>
                   <button type="button" onClick={() => setShowAttendanceModal(false)} className="rounded-lg border border-border px-4 py-2 text-sm">Cancel</button>
                 </div>
               </>
