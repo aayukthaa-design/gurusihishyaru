@@ -642,6 +642,14 @@ function matchesUserScope(notification, user) {
   }
 
   if (user.role === 'parent') {
+    // studentIds is how a notification like "Fee Update" targets one specific
+    // student's parent(s) — it must never fall through to the branch-wide
+    // 'parent' role broadcast below just because roles also lists 'parent'
+    // (that combination previously leaked e.g. one student's fee change to
+    // every parent in the branch). The match against this parent's own
+    // linked children already happened above; no match here means it's some
+    // other student's notice.
+    if (notification.studentIds?.length) return false;
     if (notification.classNames?.length && (user.linkedStudentIds?.length ?? 0) > 0) return true;
     if (roles.includes('parent') && (!notification.branchId || notification.branchId === user.branchId)) return true;
     return false;

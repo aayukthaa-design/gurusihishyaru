@@ -21,6 +21,8 @@ import { refreshNotifications } from '../lib/notificationService';
 import { refreshStudents } from '../lib/studentService';
 import { refreshTeachers, clearTeachers } from '../lib/teacherService';
 import { refreshBranches } from '../lib/branchService';
+import { refreshExams } from '../lib/examService';
+import { refreshMarks } from '../lib/examMarksService';
 import { apiFetch, setUnauthorizedHandler } from '../lib/apiClient';
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
@@ -108,6 +110,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // hadn't separately visited Branch Management yet — showing the raw
       // branchId string instead of its name.
       void refreshBranches();
+      // Same reasoning again for exams/marks: their module-level fetches also
+      // ran pre-login and no-op'd, so every page that reads the shared exam/
+      // marks cache synchronously (Teacher Dashboard's "Upcoming Exams",
+      // Exams Management, Enter Marks, Exam Attendance, Parent Portal) stayed
+      // empty for the rest of the session unless that specific tab happened
+      // to create/edit an exam itself. Student Performance Analytics used to
+      // be the only page patched around this locally — fixing it here instead
+      // covers every consumer of the shared store, not just one page.
+      void refreshExams();
+      void refreshMarks();
     }
   }, [state.user]);
 

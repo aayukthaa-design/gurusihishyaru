@@ -543,6 +543,11 @@ export function getVisibleNotificationsForUser(
     }
 
     if (user.role === 'parent') {
+      // Mirrors the server-side matchesUserScope fix: a notification naming
+      // specific studentIds (e.g. "Fee Update") is only for those students'
+      // own parent(s) — never falls through to the branch-wide 'parent'
+      // broadcast just because roles also includes 'parent'.
+      if (notification.studentIds?.length) return false;
       if (notification.classNames?.length && (user.linkedStudentIds?.length ?? 0) > 0) return true;
       if (explicitRoles.includes('parent')) return true;
       return false;

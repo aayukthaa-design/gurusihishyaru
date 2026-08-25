@@ -15,7 +15,7 @@ import {
   Plus, X, CheckCircle2, MessageSquare, Boxes, FileSpreadsheet, TrendingDown, AlertTriangle
 } from 'lucide-react';
 import { useSubmissions } from '../lib/dailySubmissionService';
-import { getNotificationStats, useNotifications, getVisibleNotificationsForUser } from '../lib/notificationService';
+import { getNotificationStats, useNotifications, getVisibleNotificationsForUser, isUnreadForMe } from '../lib/notificationService';
 import { useExams } from '../lib/examService';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -201,7 +201,13 @@ export function Dashboard() {
       try {
         let url = `/api/whatsapp/stats`;
         if (isTeacher) {
-          url += `?role=teacher&teacherId=${encodeURIComponent(user?.id || '')}&classNames=${encodeURIComponent((user?.assignedClassIds || []).join(','))}`;
+          // user.assignedClassIds is never populated by the login response (see
+          // myClasses below) — using it here meant classNames was always empty,
+          // and GET /api/whatsapp/stats short-circuits to all-zero stats
+          // whenever classNames is empty. myClasses is the same real
+          // batch-assignment list already used by every other teacher card on
+          // this page.
+          url += `?role=teacher&teacherId=${encodeURIComponent(user?.id || '')}&classNames=${encodeURIComponent(myClasses.join(','))}`;
         } else {
           url += `?branchId=${encodeURIComponent(branchFilter)}`;
         }
@@ -215,7 +221,7 @@ export function Dashboard() {
       }
     };
     void loadStats();
-  }, [branchFilter, isTeacher, user]);
+  }, [branchFilter, isTeacher, user, myClasses]);
 
 
   // Teacher-specific values — must be declared before effects that reference them.
@@ -669,7 +675,12 @@ export function Dashboard() {
       return n.classNames.some((cn: string) => myClasses.includes(cn));
     }
     return false;
-  }).filter((n) => !n.read).length;
+  })
+    // n.read is the shared status column — true the moment ANY recipient
+    // reads a broadcast, which undercounts this teacher's own unread count.
+    // isUnreadForMe checks the per-recipient isReadByMe flag instead (same
+    // helper the Notification Summary card below already uses correctly).
+    .filter((n) => isUnreadForMe(n)).length;
 
   const scopedStudentCount = React.useMemo(
     () => allStudents.filter((s) => !branchFilter || s.branchId === branchFilter).length,
@@ -1391,6 +1402,36 @@ export function Dashboard() {
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* Upcoming Activities — same /api/special-classes data already
+                fetched above for the Admin view, scoped to classes this
+                teacher personally runs (teacherId), matching the same filter
+                SpecialClasses.tsx itself uses for a teacher account. Teachers
+                previously had no visibility into this at all on the dashboard. */}
+            <div className="rounded-2xl border border-border bg-card p-5">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold">Upcoming Activities</h3>
+                <CalendarDays className="h-4 w-4 text-purple-500" />
+              </div>
+              <div className="space-y-2">
+                {specialClasses.filter((c) => c.teacherId === user?.id && c.status !== 'Cancelled' && new Date(c.date + 'T' + c.startTime) > new Date()).length === 0 && (
+                  <p className="text-sm text-muted-foreground">No upcoming activities scheduled.</p>
+                )}
+                {specialClasses
+                  .filter((c) => c.teacherId === user?.id && c.status !== 'Cancelled' && new Date(c.date + 'T' + c.startTime) > new Date())
+                  .slice(0, 4)
+                  .map((c) => (
+                    <div key={c.id} className="flex items-center justify-between text-sm">
+                      <div>
+                        <p className="font-medium">{c.title}</p>
+                        <p className="text-xs text-muted-foreground">{c.subject} · {c.className} · {c.date} · {c.startTime}</p>
+                      </div>
+                      <span className="text-[10px] font-semibold text-purple-600 dark:text-purple-400 bg-purple-100 dark:bg-purple-950/40 px-2 py-0.5 rounded-full shrink-0">{c.purpose}</span>
+                    </div>
+                  ))}
+              </div>
+              <div className="mt-3"><Link to="/special-classes" className="text-xs text-primary">View all</Link></div>
             </div>
           </div>
         ) : (
