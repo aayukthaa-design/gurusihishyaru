@@ -15,9 +15,15 @@ export interface Exam {
   teacherName: string;
   status: 'draft' | 'published' | 'attendance_completed' | 'marks_entry_open' | 'results_published' | 'completed';
   createdAt: string;
+  /** Set only on a "Primary Exam" (created for individually-selected students, not a batch). */
+  studentIds?: string[];
 }
 
 function mapApiExam(row: any): Exam {
+  let studentIds: string[] | undefined;
+  if (row.studentIds) {
+    try { studentIds = JSON.parse(row.studentIds); } catch { studentIds = undefined; }
+  }
   return {
     id: String(row.id),
     name: row.name,
@@ -31,6 +37,7 @@ function mapApiExam(row: any): Exam {
     teacherName: row.teacherName || '',
     status: row.status || 'draft',
     createdAt: row.createdAt,
+    studentIds,
   };
 }
 

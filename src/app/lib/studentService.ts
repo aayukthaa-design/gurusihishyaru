@@ -27,6 +27,8 @@ export interface StudentRecord {
   guardianMobile?: string;
   address?: string;
   status?: string;
+  /** Extra batches this student also belongs to, beyond className/batch/branchId above (their primary batch). Same student, one profile, multiple batches. */
+  batches?: Array<{ classId: string; className: string; batch?: string; branchId: string }>;
 }
 
 const API_BASE = '';
@@ -66,17 +68,26 @@ void refreshStudents();
 
 export function getStudentsForClass(className?: string, branchId?: string, batch?: string): StudentRecord[] {
   const list = studentStore.getState();
+  const normalize = (v?: string) => (v ? v.replace('Grade ', '') : '');
+  const filterClass = normalize(className);
   return list.filter((student) => {
-    // Normalise class names
-    const sClass = student.className ? student.className.replace('Grade ', '') : '';
-    const filterClass = className ? className.replace('Grade ', '') : '';
-    const matchesClass = !className || sClass === filterClass;
-    const matchesBranch = !branchId || student.branchId === branchId;
-    const matchesBoard = !batch || student.batch === batch;
+    const matchesPrimary =
+      (!className || normalize(student.className) === filterClass) &&
+      (!branchId || student.branchId === branchId) &&
+      (!batch || student.batch === batch);
+    // Multi-batch: also match if this student was additionally assigned to a
+    // batch (student_batches, server-attached as `batches`) matching the
+    // requested className/branch/board — so a student in a second batch shows
+    // up for that batch's roster too, not just their primary one.
+    const matchesSecondary =
+      !!className &&
+      (student.batches || []).some(
+        (b) => normalize(b.className) === filterClass && (!branchId || b.branchId === branchId) && (!batch || b.batch === batch)
+      );
     // Soft-deleted/re-admitted students keep an Inactive duplicate row; exclude
     // it here so every roster built off this class list (attendance, exams,
     // homework) doesn't show the same student twice.
-    return matchesClass && matchesBranch && matchesBoard && student.status !== 'Inactive';
+    return (matchesPrimary || matchesSecondary) && student.status !== 'Inactive';
   });
 }
 
@@ -145,4 +156,34 @@ export async function deleteStudentAPI(id: string): Promise<boolean> {
 
 export function useStudents() {
   return useStoreValue(studentStore);
+}
+
+/** Adds the student to another batch (classId) alongside every batch they're already in — never moves/overwrites their primary. */
+export async function addStudentToBatchAPI(studentId: string, classId: string): Promise<StudentRecord | null> {
+  try {
+    const res = await apiFetch(`${API_BASE}/api/students/${studentId}/batches`, { method: 'POST', body: { classId } });
+    if (res.ok) {
+      const saved = await res.json();
+      await refreshStudents();
+      return saved;
+    }
+  } catch (err) {
+    console.error('addStudentToBatchAPI error:', err);
+  }
+  return null;
+}
+
+/** Removes the student from one batch (classId). If it was their primary, the server reassigns their primary to a remaining batch (or clears it if none are left). */
+export async function removeStudentFromBatchAPI(studentId: string, classId: string): Promise<StudentRecord | null> {
+  try {
+    const res = await apiFetch(`${API_BASE}/api/students/${studentId}/batches/${classId}`, { method: 'DELETE' });
+    if (res.ok) {
+      const saved = await res.json();
+      await refreshStudents();
+      return saved;
+    }
+  } catch (err) {
+    console.error('removeStudentFromBatchAPI error:', err);
+  }
+  return null;
 }

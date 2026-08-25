@@ -4,7 +4,7 @@ import { useParams, useNavigate } from 'react-router';
 import { subscribeExams } from '../lib/examService';
 import { submitMarks, subscribeMarks, refreshMarks } from '../lib/examMarksService';
 import { getExamAttendanceForExam } from '../lib/examAttendanceService';
-import { getStudentsForClass as getRealStudentsForClass } from '../lib/studentService';
+import { getStudentsForClass as getRealStudentsForClass, getStudentsByIds } from '../lib/studentService';
 
 export function TeacherEnterMarks() {
   const params = useParams();
@@ -20,7 +20,12 @@ export function TeacherEnterMarks() {
       const found = items.find((e: any) => e.id === examId);
       setExam(found || null);
       if (found) {
-        const roster = getRealStudentsForClass(found.className, found.branchId);
+        // Scope to this exam's own batch, same as attendance — otherwise marks
+        // entry lists every batch sharing the className. A Primary Exam (no
+        // batch) carries its own explicit studentIds instead.
+        const roster = found.studentIds?.length
+          ? getStudentsByIds(found.studentIds)
+          : getRealStudentsForClass(found.className, found.branchId, found.batch);
         setStudents(roster.map((s) => ({ id: s.id, name: s.fullName, roll: s.rollNumber })));
       }
     });

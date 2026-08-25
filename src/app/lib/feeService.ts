@@ -152,7 +152,9 @@ export async function generateFeeRecordsAPI(structureId: number, user: any): Pro
 }
 
 export interface MonthlyFeeGenerationInput {
-  className: string;
+  /** Generate for just this one student — takes priority over className, no batch required. */
+  studentId?: string;
+  className?: string;
   feeType: string;
   /** Original Amount before discount — the server computes discountAmount/Final Amount from this + discountPercent. */
   originalAmount: number;

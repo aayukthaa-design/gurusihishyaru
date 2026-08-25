@@ -3,10 +3,10 @@ import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { saveExamAPI } from '../lib/examApi';
 import { addNotification } from '../lib/notificationService';
-import { getStudentsForClass } from '../lib/studentService';
+import { getStudentsForClass, getStudentsByIds, useStudents } from '../lib/studentService';
 import { submitExamAttendanceRecords } from '../lib/examAttendanceService';
 import { updateExamStatus } from '../lib/examService';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { apiFetch } from '../lib/apiClient';
 import { BOARDS } from '../lib/classConstants';
 import { getClassesForTeacher, useClasses } from '../lib/classService';
@@ -14,7 +14,28 @@ import { getClassesForTeacher, useClasses } from '../lib/classService';
 export function TeacherCreateExam() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const isTeacherOnly = user?.role === 'teacher';
+
+  // "Primary Exam" — created for individually-selected students instead of a
+  // batch (?mode=primary, from the Dashboard's "Create Primary Exam" tile).
+  // Reuses this same page/route/workflow end-to-end rather than a parallel one.
+  const isPrimaryMode = searchParams.get('mode') === 'primary';
+  const allStudents = useStudents();
+  const [studentSearch, setStudentSearch] = React.useState('');
+  const [selectedStudentIds, setSelectedStudentIds] = React.useState<string[]>([]);
+  const studentMatches = React.useMemo(() => {
+    if (!studentSearch.trim()) return [];
+    const query = studentSearch.toLowerCase();
+    return allStudents
+      .filter((s) => s.status !== 'Inactive' && !selectedStudentIds.includes(s.id) &&
+        (s.fullName.toLowerCase().includes(query) || s.id.toLowerCase().includes(query)))
+      .slice(0, 20);
+  }, [allStudents, studentSearch, selectedStudentIds]);
+  const selectedStudents = React.useMemo(
+    () => selectedStudentIds.map((id) => allStudents.find((s) => s.id === id)).filter(Boolean) as typeof allStudents,
+    [selectedStudentIds, allStudents]
+  );
 
   // Derived directly from the reactive `classes` list on every render — no
   // effect + conditional setState in between, which is what let the batch
@@ -77,7 +98,16 @@ export function TeacherCreateExam() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    if (!name || !subject || !className || !date || !maxMarks) {
+    if (isPrimaryMode) {
+      if (!name || !subject || !date || !maxMarks) {
+        setError('Please fill all required fields');
+        return;
+      }
+      if (selectedStudentIds.length === 0) {
+        setError('Select at least one student.');
+        return;
+      }
+    } else if (!name || !subject || !className || !date || !maxMarks) {
       setError('Please fill all required fields');
       return;
     }
@@ -104,13 +134,17 @@ export function TeacherCreateExam() {
 
     // Enforce teacher can only create for one of their own assigned batches
     // (the class name itself is free text now, so batch selection — not a
-    // text match — is what proves the exam belongs to this teacher).
-    if (isTeacherOnly && !selectedBatchId) {
+    // text match — is what proves the exam belongs to this teacher). Doesn't
+    // apply to a Primary Exam — it's for the teacher's own selected students,
+    // not tied to any batch assignment at all.
+    if (!isPrimaryMode && isTeacherOnly && !selectedBatchId) {
       setError('Please select one of your assigned batches.');
       return;
     }
 
-    const payload = { name, subject, className, batch, date, maxMarks, passingMarks, status: 'published', createdBy: user?.id, description, attachment };
+    const payload = isPrimaryMode
+      ? { name, subject, className: 'Primary Exam', batch: '', date, maxMarks, passingMarks, status: 'published', createdBy: user?.id, description, attachment, studentIds: selectedStudentIds }
+      : { name, subject, className, batch, date, maxMarks, passingMarks, status: 'published', createdBy: user?.id, description, attachment };
 
     let saved: Awaited<ReturnType<typeof saveExamAPI>>;
     try {
@@ -127,7 +161,13 @@ export function TeacherCreateExam() {
 
     const exam = saved;
     setPendingExam(exam);
-    const students = getStudentsForClass(exam.className, user?.branchId).map((student) => ({
+    // Scope the roster to this exam's own batch — otherwise students from
+    // every other batch sharing the same className show up here too. A
+    // Primary Exam has no batch at all — it carries its own studentIds.
+    const rosterStudents = exam.studentIds?.length
+      ? getStudentsByIds(exam.studentIds)
+      : getStudentsForClass(exam.className, user?.branchId, exam.batch);
+    const students = rosterStudents.map((student) => ({
       id: student.id,
       name: student.fullName,
       roll: student.rollNumber,
@@ -236,7 +276,7 @@ export function TeacherCreateExam() {
 
   return (
     <div className="flex-1">
-      <Header title="Create Exam" />
+      <Header title={isPrimaryMode ? 'Create Primary Exam' : 'Create Exam'} />
       <div className="p-6">
         <form onSubmit={handleSubmit} className="max-w-xl space-y-4">
           <div>
@@ -254,33 +294,72 @@ export function TeacherCreateExam() {
             <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. Mathematics" className="mt-1 w-full rounded-md border px-3 py-2" />
           </div>
 
-          {isTeacherOnly && (
+          {isPrimaryMode ? (
             <div>
-              <label className="block text-sm font-medium text-muted-foreground">Batch</label>
-              <select value={selectedBatchId} onChange={(e) => handleBatchChange(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
-                <option value="">
-                  {teacherBatches.length === 0 ? 'No batches assigned yet' : 'Select a batch…'}
-                </option>
-                {teacherBatches.map((b) => (
-                  <option key={b.id} value={String(b.id)}>{b.className}{b.board ? ` (${b.board})` : ''}</option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-muted-foreground">Picking a batch fills in Class and Board below — you can still edit them.</p>
+              <label className="block text-sm font-medium text-muted-foreground">Students</label>
+              <p className="mt-1 text-xs text-muted-foreground">Not tied to any batch — pick one or more individual students from the Student database.</p>
+              {selectedStudents.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {selectedStudents.map((s) => (
+                    <span key={s.id} className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
+                      {s.fullName} <span className="text-muted-foreground">· {s.className}</span>
+                      <button type="button" onClick={() => setSelectedStudentIds((ids) => ids.filter((id) => id !== s.id))} className="ml-1 text-primary hover:text-red-600">×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <input
+                value={studentSearch}
+                onChange={(e) => setStudentSearch(e.target.value)}
+                placeholder="Search student by name or ID…"
+                className="mt-2 w-full rounded-md border px-3 py-2"
+              />
+              {studentSearch && studentMatches.length > 0 && (
+                <div className="mt-1 max-h-48 overflow-y-auto rounded-xl border border-border bg-card divide-y divide-border">
+                  {studentMatches.map((s) => (
+                    <button
+                      type="button"
+                      key={s.id}
+                      onClick={() => { setSelectedStudentIds((ids) => [...ids, s.id]); setStudentSearch(''); }}
+                      className="block w-full px-3 py-2 text-left text-sm hover:bg-secondary"
+                    >
+                      {s.fullName} <span className="text-xs text-muted-foreground">· {s.className} · {s.id}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
+          ) : (
+            <>
+              {isTeacherOnly && (
+                <div>
+                  <label className="block text-sm font-medium text-muted-foreground">Batch</label>
+                  <select value={selectedBatchId} onChange={(e) => handleBatchChange(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
+                    <option value="">
+                      {teacherBatches.length === 0 ? 'No batches assigned yet' : 'Select a batch…'}
+                    </option>
+                    {teacherBatches.map((b) => (
+                      <option key={b.id} value={String(b.id)}>{b.className}{b.board ? ` (${b.board})` : ''}</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-muted-foreground">Picking a batch fills in Class and Board below — you can still edit them.</p>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-muted-foreground">Class</label>
+                <input value={className} onChange={(e) => setClassName(e.target.value)} placeholder="e.g. 10th" className="mt-1 w-full rounded-md border px-3 py-2" />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-muted-foreground">Board</label>
+                <select value={batch} onChange={(e) => setBatch(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
+                  <option value="">Select board…</option>
+                  {BOARDS.map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+            </>
           )}
-
-          <div>
-            <label className="block text-sm font-medium text-muted-foreground">Class</label>
-            <input value={className} onChange={(e) => setClassName(e.target.value)} placeholder="e.g. 10th" className="mt-1 w-full rounded-md border px-3 py-2" />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-muted-foreground">Board</label>
-            <select value={batch} onChange={(e) => setBatch(e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2">
-              <option value="">Select board…</option>
-              {BOARDS.map((b) => <option key={b} value={b}>{b}</option>)}
-            </select>
-          </div>
 
           <div>
             <label className="block text-sm font-medium text-muted-foreground">Exam Date</label>
@@ -341,11 +420,19 @@ export function TeacherCreateExam() {
             <button type="button" onClick={async () => {
               // Save as draft
               setError(null);
-              if (!name || !subject || !className || !date || !maxMarks) { setError('Please fill required fields before saving draft'); return; }
+              if (isPrimaryMode) {
+                if (!name || !subject || !date || !maxMarks) { setError('Please fill required fields before saving draft'); return; }
+                if (selectedStudentIds.length === 0) { setError('Select at least one student.'); return; }
+              } else {
+                if (!name || !subject || !className || !date || !maxMarks) { setError('Please fill required fields before saving draft'); return; }
+                if (isTeacherOnly && !selectedBatchId) { setError('Please select one of your assigned batches.'); return; }
+              }
               if (passingMarks < 0 || passingMarks > maxMarks) { setError('Passing marks must be between 0 and maximum marks'); return; }
-              if (isTeacherOnly && !selectedBatchId) { setError('Please select one of your assigned batches.'); return; }
               try {
-                const draft = await saveExamAPI({ name, subject, className, batch, date, maxMarks, passingMarks, description, attachment, status: 'draft', createdBy: user?.id });
+                const draftPayload = isPrimaryMode
+                  ? { name, subject, className: 'Primary Exam', batch: '', date, maxMarks, passingMarks, description, attachment, status: 'draft', createdBy: user?.id, studentIds: selectedStudentIds }
+                  : { name, subject, className, batch, date, maxMarks, passingMarks, description, attachment, status: 'draft', createdBy: user?.id };
+                const draft = await saveExamAPI(draftPayload);
                 if (!draft?.name) {
                   setError('Failed to save draft. Please try again.');
                   return;

@@ -291,11 +291,16 @@ async function sendSchoolExamUploadNotification(db, schedule, uploader) {
   ];
   if (schedule.attachmentName) descriptionLines.push(`Attachment: ${schedule.attachmentName}`);
 
+  // Also reaches the batch's assigned teacher (schedule.teacherId, already
+  // resolved server-side for parent uploads — see resolveAssignedTeacherForClass)
+  // via teacherIds, not roles: ['teacher'] — that would broadcast to every
+  // teacher instead of just the one responsible for this student's batch.
+  // matchesUserScope grants access on teacherIds regardless of the roles list.
   await db.run(
     `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt, attachmentPath, attachmentName, attachmentSize)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     newNotificationId(), title, message, descriptionLines.join('\n'), 'info', 'high',
-    JSON.stringify(['admin']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+    JSON.stringify(['admin']), JSON.stringify(schedule.teacherId ? [schedule.teacherId] : []), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
     uploader.name, uploader.id, uploader.role, 'school_exam_schedule_uploaded', 'Admin', 'admin',
     schedule.branchId || null, 'unread', 0, new Date().toISOString(),
     schedule.attachmentPath || null, schedule.attachmentName || null, schedule.attachmentSize || null
@@ -728,6 +733,10 @@ async function initDb() {
   } catch (err) {
     // Ignore error if column already exists
   }
+  // "Primary Exam" — created for individually-selected students instead of a
+  // whole batch. JSON array of studentIds; NULL/empty for every ordinary
+  // batch exam (className/batch stay how they've always worked for those).
+  try { await db.exec(`ALTER TABLE exams ADD COLUMN studentIds TEXT`); } catch (err) {}
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS allocations (
@@ -1527,6 +1536,50 @@ async function initDb() {
       console.log(`Migrated timetable_entries: added classId (backfilled ${orphans.length - (await db.get("SELECT COUNT(*) c FROM timetable_entries WHERE classId IS NULL")).c}/${orphans.length} rows unambiguously).`);
     }
   } catch (e) { console.error('timetable_entries classId migration failed:', e); }
+
+  // Student <-> Batch, many-to-many. A student keeps exactly one profile row
+  // (students.className/batch/branchId, unchanged — still "their primary
+  // batch", used everywhere as the default) plus zero or more additional rows
+  // here for every other batch they're also enrolled in. Same junction-table
+  // shape as parent_student above. Every roster query that used to match a
+  // student by className+batch(+branchId) alone now also matches via this
+  // table, so a student assigned to a second batch shows up for THAT batch's
+  // attendance/exams/homework/fees too, without duplicating their profile.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS student_batches (
+      studentId TEXT NOT NULL,
+      classId TEXT NOT NULL,
+      createdAt TEXT,
+      PRIMARY KEY (studentId, classId)
+    );
+  `);
+  // One-time backfill for students who existed before this table did: link
+  // each to the classes row matching their own className/batch(board)/branchId
+  // (best-effort — same "no unambiguous match, skip it" approach as the
+  // timetable_entries migration above). Safe to run only once (INSERT OR
+  // IGNORE below is idempotent anyway) — gated on table-empty so it doesn't
+  // re-scan every student on every boot once it's done.
+  try {
+    const sbCount = await db.get('SELECT COUNT(1) as c FROM student_batches');
+    if (sbCount.c === 0) {
+      const students = await db.all("SELECT id, className, batch, branchId FROM students WHERE className != ''");
+      const insertSb = await db.prepare('INSERT OR IGNORE INTO student_batches (studentId, classId, createdAt) VALUES (?, ?, ?)');
+      const now = new Date().toISOString();
+      let linked = 0;
+      for (const s of students) {
+        const classRow = await db.get(
+          "SELECT id FROM classes WHERE className = ? AND COALESCE(board,'') = COALESCE(?,'') AND (branchId = ? OR branchId IS NULL) LIMIT 1",
+          s.className, s.batch, s.branchId
+        );
+        if (classRow) {
+          await insertSb.run(s.id, classRow.id, now);
+          linked++;
+        }
+      }
+      await insertSb.finalize();
+      console.log(`Backfilled student_batches: linked ${linked}/${students.length} students to their primary batch.`);
+    }
+  } catch (e) { console.error('student_batches backfill failed:', e); }
 
   // Seed the one real branch that predates this table — its id must stay
   // 'branch_main' since it's already hardcoded onto existing users/students.
@@ -2397,6 +2450,82 @@ async function main() {
     return rows.map((r) => r.id);
   }
 
+  // Resolves a (className, board, branchId) triple to the one classes row it
+  // names — reused everywhere a caller supplies className/batch strings and
+  // needs the actual classId for a student_batches join (multi-batch-aware
+  // attendance/exam/fee/homework rosters below).
+  async function resolveClassId(className, board, branchId) {
+    if (!className) return null;
+    branchId = branchId ?? null; // the sqlite driver rejects `undefined` binds
+    const row = await db.get(
+      "SELECT id FROM classes WHERE className = ? AND COALESCE(board,'') = COALESCE(?,'') AND (branchId = ? OR ? IS NULL) LIMIT 1",
+      className, board || '', branchId, branchId
+    );
+    return row?.id || null;
+  }
+
+  // Every active student in a batch by className(+branchId) — the batch's
+  // primary members (students.className match) plus anyone additionally
+  // enrolled via student_batches in any classes row with that className
+  // (multi-batch aware; ignores board since batch-level fee generation is
+  // className+branch scoped today, not board-scoped — same granularity as
+  // fee_structures always had).
+  async function getActiveStudentsForBatchClassName(className, branchId) {
+    branchId = branchId ?? null; // the sqlite driver rejects `undefined` binds
+    const classRows = await db.all(
+      'SELECT id FROM classes WHERE className = ? AND (? IS NULL OR branchId = ?)',
+      className, branchId, branchId
+    );
+    const classIds = classRows.map((r) => r.id);
+    const primary = branchId ? 'className = ? AND branchId = ?' : 'className = ?';
+    const primaryParams = branchId ? [className, branchId] : [className];
+    if (classIds.length === 0) {
+      return db.all(`SELECT * FROM students WHERE ${primary} AND status = 'Active'`, ...primaryParams);
+    }
+    const placeholders = classIds.map(() => '?').join(',');
+    return db.all(
+      `SELECT * FROM students WHERE status = 'Active' AND ((${primary}) OR id IN (SELECT studentId FROM student_batches WHERE classId IN (${placeholders})))`,
+      ...primaryParams, ...classIds
+    );
+  }
+
+  // Keeps a student's student_batches membership in sync with their primary
+  // className/batch/branchId whenever that primary is set or changed (create
+  // or edit) — so the primary batch is always also present in the multi-batch
+  // set, and every roster query only ever needs to consult one place
+  // (student_batches) to find "every batch this student is in" including the
+  // primary. Never removes any OTHER batch membership — this only adds.
+  async function syncPrimaryBatchLink(studentId, className, board, branchId) {
+    const classId = await resolveClassId(className, board, branchId);
+    if (classId) {
+      await db.run('INSERT OR IGNORE INTO student_batches (studentId, classId, createdAt) VALUES (?, ?, ?)', studentId, classId, new Date().toISOString());
+    }
+  }
+
+  // Attaches each student's full batch-membership list — their primary
+  // className/batch/branchId (already on the row) plus any extra
+  // student_batches rows — as `batches: [{classId, className, batch, branchId}]`.
+  // Every existing consumer of a students row is unaffected (nothing removed);
+  // only the Batches page's multi-batch UI and the frontend's multi-batch-aware
+  // getStudentsForClass read this new field.
+  async function attachStudentBatches(rows) {
+    if (!rows.length) return rows;
+    const ids = rows.map((r) => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    const links = await db.all(
+      `SELECT sb.studentId, c.id as classId, c.className, c.board as batch, c.branchId
+       FROM student_batches sb JOIN classes c ON c.id = sb.classId
+       WHERE sb.studentId IN (${placeholders})`,
+      ...ids
+    );
+    const byStudent = new Map();
+    for (const link of links) {
+      if (!byStudent.has(link.studentId)) byStudent.set(link.studentId, []);
+      byStudent.get(link.studentId).push({ classId: link.classId, className: link.className, batch: link.batch, branchId: link.branchId });
+    }
+    return rows.map((r) => ({ ...r, batches: byStudent.get(r.id) || [] }));
+  }
+
   // email/mobile are no longer globally UNIQUE (dual-role accounts share an
   // identifier with a different password per role) — this enforces the
   // narrower rule that still applies: no two accounts may share both an
@@ -2854,8 +2983,15 @@ async function main() {
       const body = req.body;
       const attachment = req.file;
       const now = new Date().toISOString();
-      const stmt = await db.prepare(`INSERT INTO exams (name, subject, className, batch, date, maxMarks, passingMarks, description, status, createdBy, createdAt, attachmentPath, attachmentName, attachmentSize) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-      const result = await stmt.run(body.name, body.subject, body.className, body.batch || '', body.date, Number(body.maxMarks || 0), Number(body.passingMarks || 35), body.description || '', body.status || 'draft', body.createdBy || '', now, attachment ? attachment.path : null, attachment ? attachment.originalname : null, attachment ? attachment.size : null);
+      // "Primary Exam" support: studentIds arrives as a real array (plain
+      // JSON POST) or a JSON string (multipart, when an attachment is sent).
+      let studentIds = [];
+      if (Array.isArray(body.studentIds)) studentIds = body.studentIds;
+      else if (typeof body.studentIds === 'string' && body.studentIds) {
+        try { studentIds = JSON.parse(body.studentIds); } catch { studentIds = []; }
+      }
+      const stmt = await db.prepare(`INSERT INTO exams (name, subject, className, batch, date, maxMarks, passingMarks, description, status, createdBy, createdAt, attachmentPath, attachmentName, attachmentSize, studentIds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const result = await stmt.run(body.name, body.subject, body.className || '', body.batch || '', body.date, Number(body.maxMarks || 0), Number(body.passingMarks || 35), body.description || '', body.status || 'draft', body.createdBy || '', now, attachment ? attachment.path : null, attachment ? attachment.originalname : null, attachment ? attachment.size : null, studentIds.length ? JSON.stringify(studentIds) : null);
       await stmt.finalize();
       const exam = await db.get('SELECT * FROM exams WHERE id = ?', result.lastID);
       res.json(exam);
@@ -2921,26 +3057,52 @@ async function main() {
     return 'F';
   }
 
+  // Role-scoped so every exam's marks (batch exams and individually-scoped
+  // "Primary Exams" alike) reach only who's supposed to see them: Super Admin
+  // sees everything; Admin/Accountant are scoped to their own branch (via the
+  // student's own branchId, since exam_marks/exams carry no branchId of their
+  // own); a teacher-only account sees marks for their assigned batches PLUS
+  // any Primary Exam they personally created; a parent sees only their own
+  // linked children's marks. Parent was previously not in the allowed-roles
+  // list at all (a 403), which meant the Parent Portal's marks view silently
+  // never loaded anything for a parent-only account.
   app.get('/api/exam-marks', async (req, res) => {
-    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant', 'parent'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      // Same batch-assignment scoping as GET /api/students — exam_marks has no
-      // className of its own, so a teacher-only account is scoped via a join
-      // back to the owning exam's className.
-      const teacherClassNames = await getTeacherAssignedClassNames(req);
-      if (teacherClassNames && teacherClassNames.length === 0) return res.json([]);
+      const roles = req.user.roles || [];
+      const isSuperAdmin = roles.includes('super_admin');
+      const isTeacherOnly = roles.includes('teacher') && !roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r));
+      const isParentOnly = roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r));
 
-      let query = teacherClassNames
-        ? 'SELECT em.* FROM exam_marks em JOIN exams e ON e.id = em.examId'
-        : 'SELECT * FROM exam_marks em';
-      const examIdCol = teacherClassNames ? 'em.examId' : 'examId';
-      const params = [];
+      let query = 'SELECT em.* FROM exam_marks em JOIN exams e ON e.id = em.examId';
       const conditions = [];
-      if (req.query.examId) { conditions.push(`${examIdCol} = ?`); params.push(String(req.query.examId)); }
-      if (teacherClassNames) {
-        conditions.push(`e.className IN (${teacherClassNames.map(() => '?').join(',')})`);
-        params.push(...teacherClassNames);
+      const params = [];
+      if (req.query.examId) { conditions.push('em.examId = ?'); params.push(String(req.query.examId)); }
+
+      if (isTeacherOnly) {
+        const teacherClassNames = await getTeacherAssignedClassNames(req);
+        if (teacherClassNames.length > 0) {
+          conditions.push(`(e.className IN (${teacherClassNames.map(() => '?').join(',')}) OR e.createdBy = ?)`);
+          params.push(...teacherClassNames, req.user.sub);
+        } else {
+          conditions.push('e.createdBy = ?');
+          params.push(req.user.sub);
+        }
+      } else if (isParentOnly) {
+        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const linkedIds = linkedRows.map((r) => r.studentId);
+        if (!linkedIds.length) return res.json([]);
+        conditions.push(`em.studentId IN (${linkedIds.map(() => '?').join(',')})`);
+        params.push(...linkedIds);
+      } else if (!isSuperAdmin) {
+        const branchId = resolveBranchId(req, req.query.branchId);
+        if (branchId) {
+          query += ' JOIN students s ON s.id = em.studentId';
+          conditions.push('s.branchId = ?');
+          params.push(branchId);
+        }
       }
+
       if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
 
       const rows = await db.all(query, ...params);
@@ -2962,11 +3124,13 @@ async function main() {
       const now = new Date().toISOString();
 
       // A teacher-only account may only submit marks for an exam belonging to
-      // a batch actually assigned to them.
+      // a batch actually assigned to them — or, for a Primary Exam (no batch
+      // at all), one they personally created.
       const teacherClassNames = await getTeacherAssignedClassNames(req);
       if (teacherClassNames) {
-        const exam = await db.get('SELECT className FROM exams WHERE id = ?', examId);
-        if (!exam || !teacherClassNames.includes(exam.className)) {
+        const exam = await db.get('SELECT className, createdBy FROM exams WHERE id = ?', examId);
+        const allowed = exam && (teacherClassNames.includes(exam.className) || exam.createdBy === req.user.sub);
+        if (!allowed) {
           return res.status(403).json({ error: 'You can only submit marks for a batch assigned to you.' });
         }
       }
@@ -4177,10 +4341,18 @@ async function main() {
       const teacherRow = await db.get('SELECT name FROM users WHERE id = ?', hw.teacherId);
       const teacherName = teacherRow?.name || 'the subject teacher';
 
-      const students = await db.all(
-        'SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?',
-        hw.className, hw.branchId, 'Active'
-      );
+      // Multi-batch aware: also reaches a student whose primary batch is
+      // elsewhere but who's additionally enrolled (student_batches) in this
+      // homework's own batch (className+board+branch).
+      const hwClassId = await resolveClassId(hw.className, hw.batch, hw.branchId);
+      const students = hwClassId
+        ? await db.all(
+            `SELECT * FROM students WHERE status = ? AND (
+               (className = ? AND branchId = ?) OR id IN (SELECT studentId FROM student_batches WHERE classId = ?)
+             )`,
+            'Active', hw.className, hw.branchId, hwClassId
+          )
+        : await db.all('SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?', hw.className, hw.branchId, 'Active');
 
       const provider = settings['whatsapp_provider'] || 'WhatsApp Business Cloud API';
       const apiToken = settings['api_token'] || '';
@@ -4700,7 +4872,7 @@ async function main() {
         if (studentIds.length === 0) return res.json([]);
         const placeholders = studentIds.map(() => '?').join(',');
         const rows = await db.all(`SELECT * FROM students WHERE id IN (${placeholders})`, ...studentIds);
-        return res.json(rows);
+        return res.json(await attachStudentBatches(rows));
       }
 
       if (!roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) {
@@ -4713,13 +4885,23 @@ async function main() {
       const params = [];
       const conditions = [];
 
-      if (className) {
-        conditions.push('className = ?');
-        params.push(className);
-      }
-      if (batch) {
-        conditions.push('batch = ?');
-        params.push(batch);
+      // Multi-batch aware: a student matches a requested className/batch either
+      // via their own primary className/batch, or via an additional
+      // student_batches membership in the classes row those two name — so a
+      // student assigned to a second batch shows up for that batch's roster
+      // too (attendance, exams, homework, ...), without ever showing up for a
+      // batch they don't belong to.
+      if (className || batch) {
+        const targetClassId = await resolveClassId(className, batch, branchId);
+        const primary = [];
+        if (className) { primary.push('className = ?'); params.push(className); }
+        if (batch) { primary.push('batch = ?'); params.push(batch); }
+        if (targetClassId) {
+          conditions.push(`((${primary.join(' AND ')}) OR id IN (SELECT studentId FROM student_batches WHERE classId = ?))`);
+          params.push(targetClassId);
+        } else {
+          conditions.push(`(${primary.join(' AND ')})`);
+        }
       }
       if (branchId) {
         conditions.push('branchId = ?');
@@ -4727,17 +4909,26 @@ async function main() {
       }
 
       // Student -> Batch -> Teacher Assignment: a teacher-only account only ever
-      // sees students in batches actually assigned to them. This also means an
-      // unallocated student (className '') is never returned to a teacher, since
-      // '' can never match a real assigned batch name — enforced here so no
-      // amount of client-side filtering (or a hand-crafted className/batch query
-      // param for a batch that isn't theirs) can leak another batch's roster.
+      // sees students in batches actually assigned to them — by primary
+      // className match, or (multi-batch) via student_batches for any of this
+      // teacher's assigned classIds, so a student whose primary batch is
+      // elsewhere but who's also enrolled in one of THIS teacher's batches
+      // still shows up. An unallocated student (className '') is never
+      // returned to a teacher either way.
       const teacherClassNames = await getTeacherAssignedClassNames(req);
       if (teacherClassNames) {
         if (teacherClassNames.length === 0) return res.json([]);
         if (className && !teacherClassNames.includes(className)) return res.json([]);
-        conditions.push(`className IN (${teacherClassNames.map(() => '?').join(',')})`);
-        params.push(...teacherClassNames);
+        const teacherClassIds = await getTeacherAssignedClassIds(req);
+        const namePlaceholders = teacherClassNames.map(() => '?').join(',');
+        if (teacherClassIds.length > 0) {
+          const idPlaceholders = teacherClassIds.map(() => '?').join(',');
+          conditions.push(`(className IN (${namePlaceholders}) OR id IN (SELECT studentId FROM student_batches WHERE classId IN (${idPlaceholders})))`);
+          params.push(...teacherClassNames, ...teacherClassIds);
+        } else {
+          conditions.push(`className IN (${namePlaceholders})`);
+          params.push(...teacherClassNames);
+        }
       }
 
       if (conditions.length > 0) {
@@ -4745,7 +4936,7 @@ async function main() {
       }
 
       const rows = await db.all(query, ...params);
-      res.json(rows);
+      res.json(await attachStudentBatches(rows));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -4872,6 +5063,8 @@ async function main() {
       INSERT OR IGNORE INTO parent_student (parentId, studentId)
       VALUES (?, ?)
     `, parentId, studentId);
+
+    if (s.className) await syncPrimaryBatchLink(studentId, s.className, s.batch, branchId);
 
     const saved = await db.get('SELECT * FROM students WHERE id = ?', studentId);
 
@@ -5008,8 +5201,14 @@ async function main() {
         VALUES (?, ?)
       `, parentId, studentId);
 
+      // Editing the primary className/batch here only ever ADDS a
+      // student_batches membership for the new primary — it never removes
+      // whatever other batches the student was separately added to (that's
+      // what POST/DELETE /api/students/:id/batches below are for).
+      if (s.className) await syncPrimaryBatchLink(studentId, s.className, s.batch, branchId);
+
       const saved = await db.get('SELECT * FROM students WHERE id = ?', studentId);
-      res.json(saved);
+      res.json((await attachStudentBatches([saved]))[0]);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -5027,6 +5226,73 @@ async function main() {
     } catch (err) {
       console.error('Delete student error:', err);
       res.status(500).json({ error: 'Failed to delete student' });
+    }
+  });
+
+  // Adds the student to ANOTHER batch alongside whatever they're already in
+  // (their primary batch and any others) — never overwrites students.className/
+  // batch, never touches any other membership row. This is the "same student,
+  // multiple batches, one profile" operation; Batches.tsx's existing "move to
+  // this batch" (PUT /api/students/:id) remains how the PRIMARY batch changes.
+  app.post('/api/students/:id/batches', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const student = await db.get('SELECT * FROM students WHERE id = ?', req.params.id);
+      if (!student) return res.status(404).json({ error: 'Student not found' });
+      const classId = req.body?.classId;
+      if (!classId) return res.status(400).json({ error: 'classId is required' });
+      const classRow = await db.get('SELECT * FROM classes WHERE id = ?', classId);
+      if (!classRow) return res.status(404).json({ error: 'Batch not found' });
+
+      const teacherClassIds = await getTeacherAssignedClassIds(req);
+      if (teacherClassIds && !teacherClassIds.includes(classId)) {
+        return res.status(403).json({ error: 'You can only add a student to a batch assigned to you.' });
+      }
+
+      await db.run('INSERT OR IGNORE INTO student_batches (studentId, classId, createdAt) VALUES (?, ?, ?)', student.id, classId, new Date().toISOString());
+      const updated = await db.get('SELECT * FROM students WHERE id = ?', student.id);
+      res.json((await attachStudentBatches([updated]))[0]);
+    } catch (err) {
+      console.error('Add student batch error:', err);
+      res.status(500).json({ error: 'Failed to add batch' });
+    }
+  });
+
+  // Removes the student from one batch. If that batch happens to be their
+  // current primary (students.className/batch), the primary is reassigned to
+  // one of their remaining batches (or cleared to unassigned if this was
+  // their only one) — a student is never left pointing at a batch they're no
+  // longer actually in.
+  app.delete('/api/students/:id/batches/:classId', async (req, res) => {
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const student = await db.get('SELECT * FROM students WHERE id = ?', req.params.id);
+      if (!student) return res.status(404).json({ error: 'Student not found' });
+
+      const teacherClassIds = await getTeacherAssignedClassIds(req);
+      if (teacherClassIds && !teacherClassIds.includes(req.params.classId)) {
+        return res.status(403).json({ error: 'You can only remove a student from a batch assigned to you.' });
+      }
+
+      await db.run('DELETE FROM student_batches WHERE studentId = ? AND classId = ?', student.id, req.params.classId);
+
+      const primaryClassId = await resolveClassId(student.className, student.batch, student.branchId);
+      if (primaryClassId === req.params.classId) {
+        const remaining = await db.get(
+          `SELECT c.className, c.board, c.branchId FROM student_batches sb JOIN classes c ON c.id = sb.classId WHERE sb.studentId = ? LIMIT 1`,
+          student.id
+        );
+        await db.run(
+          'UPDATE students SET className = ?, batch = ? WHERE id = ?',
+          remaining?.className || '', remaining?.board || '', student.id
+        );
+      }
+
+      const updated = await db.get('SELECT * FROM students WHERE id = ?', student.id);
+      res.json((await attachStudentBatches([updated]))[0]);
+    } catch (err) {
+      console.error('Remove student batch error:', err);
+      res.status(500).json({ error: 'Failed to remove batch' });
     }
   });
 
@@ -6684,19 +6950,27 @@ async function main() {
       const branchId = resolveBranchId(req, req.query.branchId);
       const conditions = [];
       const params = [];
-      if (req.query.examId) { conditions.push('examId = ?'); params.push(req.query.examId); }
-      if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      if (req.query.examId) { conditions.push('ea.examId = ?'); params.push(req.query.examId); }
+      if (branchId) { conditions.push('ea.branchId = ?'); params.push(branchId); }
 
-      // Same batch-assignment scoping as GET /api/students.
+      // Same batch-assignment scoping as GET /api/students — plus a Primary
+      // Exam (no batch) a teacher-only account personally created, via the
+      // owning exam's createdBy.
+      let fromClause = 'exam_attendance ea';
       const teacherClassNames = await getTeacherAssignedClassNames(req);
       if (teacherClassNames) {
-        if (teacherClassNames.length === 0) return res.json([]);
-        conditions.push(`className IN (${teacherClassNames.map(() => '?').join(',')})`);
-        params.push(...teacherClassNames);
+        fromClause += ' JOIN exams e ON e.id = ea.examId';
+        if (teacherClassNames.length > 0) {
+          conditions.push(`(ea.className IN (${teacherClassNames.map(() => '?').join(',')}) OR e.createdBy = ?)`);
+          params.push(...teacherClassNames, req.user.sub);
+        } else {
+          conditions.push('e.createdBy = ?');
+          params.push(req.user.sub);
+        }
       }
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const rows = await db.all(`SELECT * FROM exam_attendance ${where} ORDER BY createdAt ASC`, ...params);
+      const rows = await db.all(`SELECT ea.* FROM ${fromClause} ${where} ORDER BY ea.createdAt ASC`, ...params);
       res.json(rows.map((row) => ({ ...row, isLocked: Boolean(row.isLocked) })));
     } catch (error) { console.error('List exam attendance error:', error); res.status(500).json({ error: 'Failed to load exam attendance' }); }
   });
@@ -6707,11 +6981,18 @@ async function main() {
       if (!submissions.length) return res.status(400).json({ error: 'No attendance records provided' });
 
       // A teacher-only account may only submit exam attendance for a batch
-      // actually assigned to them — checked against every record in the batch
-      // up front, same all-or-nothing behaviour as the lock check below.
+      // actually assigned to them — or, for a Primary Exam (no batch at all),
+      // one they personally created. Checked against every record in the
+      // batch up front, same all-or-nothing behaviour as the lock check below.
       const teacherClassNames = await getTeacherAssignedClassNames(req);
       if (teacherClassNames) {
-        const disallowed = submissions.some((s) => !teacherClassNames.includes(s.className));
+        const examIds = [...new Set(submissions.map((s) => String(s.examId)))];
+        const exams = await db.all(`SELECT id, className, createdBy FROM exams WHERE id IN (${examIds.map(() => '?').join(',')})`, ...examIds);
+        const examById = new Map(exams.map((e) => [String(e.id), e]));
+        const disallowed = submissions.some((s) => {
+          const exam = examById.get(String(s.examId));
+          return !exam || (!teacherClassNames.includes(s.className) && exam.createdBy !== req.user.sub);
+        });
         if (disallowed) return res.status(403).json({ error: 'You can only record exam attendance for a batch assigned to you.' });
       }
 
@@ -7865,29 +8146,41 @@ async function main() {
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });
 
-  // Bulk-generate one fee record per month (independently trackable/payable) for
-  // every active student in a class — the monthly-tuition equivalent of the
-  // one-time "generate for class" flow below, skipping months a student already
-  // has a record for.
+  // Bulk-generate one fee record per month (independently trackable/payable).
+  // Two modes: pass studentId to generate for just that one student (no batch
+  // required at all — the whole point of the individual-student flow), or
+  // pass className to generate for every active student in that batch, same
+  // as before. Both skip months a student already has a record for.
   app.post('/api/fees/records/generate-monthly', async (req, res) => {
     if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const body = req.body || {};
-      const { className, feeType, academicYear, startMonth } = body;
+      const { studentId, className, academicYear, startMonth } = body;
+      // Trimmed once and reused for both the insert and the duplicate check
+      // below — an admin typing "Tuition " one time and "Tuition" the next
+      // (or the browser autofilling different casing) must still count as
+      // the same fee, or the duplicate check silently lets a second, visually
+      // identical row through.
+      const feeType = String(body.feeType || '').trim();
       const originalAmountInput = body.originalAmount !== undefined ? body.originalAmount : body.amount;
       const months = Math.max(1, Math.min(24, Number(body.months) || 12));
       const dueDay = Math.max(1, Math.min(28, Number(body.dueDay) || 5));
-      if (!className || !feeType || !originalAmountInput || !startMonth || !/^\d{4}-\d{2}$/.test(startMonth)) {
-        return res.status(400).json({ error: 'className, feeType, originalAmount and startMonth (YYYY-MM) are required' });
+      if ((!studentId && !className) || !feeType || !originalAmountInput || !startMonth || !/^\d{4}-\d{2}$/.test(startMonth)) {
+        return res.status(400).json({ error: 'studentId (or className), feeType, originalAmount and startMonth (YYYY-MM) are required' });
       }
       const { originalAmount, discountPercent, discountAmount, finalAmount: amount } = computeDiscount(originalAmountInput, body.discountPercent);
       const category = body.category || '';
       const startDate = body.startDate || '';
       const endDate = body.endDate || '';
       const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || null;
-      const students = branchId
-        ? await db.all('SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?', className, branchId, 'Active')
-        : await db.all('SELECT * FROM students WHERE className = ? AND status = ?', className, 'Active');
+      let students;
+      if (studentId) {
+        const student = await db.get('SELECT * FROM students WHERE id = ?', studentId);
+        if (!student) return res.status(404).json({ error: 'Student not found' });
+        students = [student];
+      } else {
+        students = await getActiveStudentsForBatchClassName(className, branchId);
+      }
 
       const [startYear, startMon] = startMonth.split('-').map(Number);
       const now = new Date().toISOString();
@@ -7900,7 +8193,7 @@ async function main() {
           const mon = (totalMonthIndex % 12) + 1;
           const month = `${year}-${String(mon).padStart(2, '0')}`;
           const existing = await db.get(
-            'SELECT id FROM fee_records WHERE studentId = ? AND feeType = ? AND month = ?',
+            "SELECT id FROM fee_records WHERE studentId = ? AND LOWER(TRIM(feeType)) = LOWER(?) AND month = ?",
             student.id, feeType, month
           );
           if (existing) { skipped++; continue; }
@@ -7928,12 +8221,12 @@ async function main() {
       const structure = await db.get('SELECT * FROM fee_structures WHERE id = ?', structureId);
       if (!structure) return res.status(404).json({ error: 'Fee structure not found' });
 
-      const students = await db.all('SELECT * FROM students WHERE className = ? AND branchId = ? AND status = ?', structure.className, structure.branchId, 'Active');
+      const students = await getActiveStudentsForBatchClassName(structure.className, structure.branchId);
       const now = new Date().toISOString();
       const createdIds = [];
       for (const student of students) {
         const existing = await db.get(
-          'SELECT id FROM fee_records WHERE studentId = ? AND feeType = ? AND academicYear = ?',
+          "SELECT id FROM fee_records WHERE studentId = ? AND LOWER(TRIM(feeType)) = LOWER(TRIM(?)) AND COALESCE(academicYear,'') = COALESCE(?,'')",
           student.id, structure.feeType, structure.academicYear
         );
         if (existing) continue;
@@ -7982,15 +8275,30 @@ async function main() {
       if (!amount || amount <= 0) return res.status(400).json({ error: 'A positive payment amount is required' });
 
       const now = new Date().toISOString();
+      const paymentDate = now.slice(0, 10);
       const receiptNumber = `RCPT-${Date.now()}`;
       await db.run(`
         INSERT INTO fee_payments (feeRecordId, studentId, amount, paymentMode, referenceNumber, receivedBy, paymentDate, receiptNumber, branchId, createdAt)
         VALUES (?,?,?,?,?,?,?,?,?,?)
-      `, record.id, record.studentId, amount, body.paymentMode || 'Cash', body.referenceNumber || '', req.user.name || 'Accountant', now.slice(0, 10), receiptNumber, record.branchId, now);
+      `, record.id, record.studentId, amount, body.paymentMode || 'Cash', body.referenceNumber || '', req.user.name || 'Accountant', paymentDate, receiptNumber, record.branchId, now);
 
       const newPaidAmount = (record.paidAmount || 0) + amount;
       const newStatus = feeRecordStatus(record.totalAmount, newPaidAmount, record.dueDate);
       await db.run('UPDATE fee_records SET paidAmount = ?, status = ?, updatedAt = ? WHERE id = ?', newPaidAmount, newStatus, now, record.id);
+
+      // Every fee payment is also an Income ledger entry — otherwise it never
+      // shows up in the Accountant/Super Admin "Income Summary by Category"
+      // (sourced entirely from ledger_transactions), even though the payment
+      // was genuinely recorded here. Same voucher-numbering scheme as the
+      // manual POST /api/ledger entry point above.
+      const datePart = paymentDate.replace(/-/g, '');
+      const countRow = await db.get('SELECT COUNT(1) as c FROM ledger_transactions WHERE date = ?', paymentDate);
+      const voucherNumber = `VOU-${datePart}-${String(countRow.c + 1).padStart(3, '0')}`;
+      await db.run(`
+        INSERT INTO ledger_transactions (voucherNumber, date, type, category, description, amount, paymentMode, referenceNumber, enteredBy, branchId, notes)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `, voucherNumber, paymentDate, 'Income', record.feeType, `${record.feeType} payment received from ${record.studentName}`, amount,
+         body.paymentMode || 'Cash', body.referenceNumber || receiptNumber, req.user.name || 'Accountant', record.branchId, `Fee record #${record.id}, receipt ${receiptNumber}`);
 
       const updated = await db.get('SELECT * FROM fee_records WHERE id = ?', record.id);
       res.status(201).json({ record: updated, receiptNumber });

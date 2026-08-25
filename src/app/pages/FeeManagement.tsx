@@ -23,6 +23,9 @@ import {
 } from '../lib/feeService';
 import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus, Pencil, CalendarClock, History } from 'lucide-react';
 import { useClasses, getClassesForBranch } from '../lib/classService';
+import { WhatsAppButton } from '../components/WhatsAppButton';
+import { composeWhatsAppMessage } from '../lib/whatsapp';
+import type { StudentRecord } from '../lib/studentService';
 
 function formatMonthLabel(month?: string | null): string {
   if (!month) return '';
@@ -43,6 +46,69 @@ function computeDiscountPreview(originalAmountInput: string, discountPercentInpu
   const discountAmount = Math.round(((originalAmount * discountPercent) / 100) * 100) / 100;
   const finalAmount = Math.round((originalAmount - discountAmount) * 100) / 100;
   return { discountAmount, finalAmount };
+}
+
+/** Fee-situation-specific WhatsApp message for one record — content (and which
+ * of paid/pending/due it leads with) changes with the record's own status, so
+ * this is never the same static text for every student. */
+function feeWhatsAppMessage(record: FeeRecord, student?: StudentRecord): string {
+  const parentName = student?.primaryParentName || `${record.studentName}'s Parent`;
+  const pending = record.totalAmount - record.paidAmount;
+  const feeLabel = `${record.feeType}${record.month ? ` (${formatMonthLabel(record.month)})` : ''}`;
+
+  if (record.status === 'Paid') {
+    return composeWhatsAppMessage({
+      greeting: parentName,
+      intro: `This is to confirm we've received full payment of ${record.studentName}'s ${feeLabel}. Thank you!`,
+      sections: [[
+        { label: 'Student', value: record.studentName },
+        { label: 'Amount Paid', value: formatIndianCurrency(record.paidAmount) },
+      ]],
+      closing: 'Thank you for your prompt payment.',
+    });
+  }
+
+  if (record.status === 'Overdue') {
+    return composeWhatsAppMessage({
+      greeting: parentName,
+      intro: `${record.studentName}'s ${feeLabel} is now overdue. Kindly clear the pending amount at the earliest.`,
+      sections: [[
+        { label: 'Student', value: record.studentName },
+        { label: 'Total Fee', value: formatIndianCurrency(record.totalAmount) },
+        { label: 'Paid', value: formatIndianCurrency(record.paidAmount) },
+        { label: 'Pending', value: formatIndianCurrency(pending) },
+        { label: 'Was Due', value: record.dueDate },
+      ]],
+      closing: 'Please contact us if you have already paid or need assistance.',
+    });
+  }
+
+  if (record.status === 'Partially Paid') {
+    return composeWhatsAppMessage({
+      greeting: parentName,
+      intro: `A partial payment has been received for ${record.studentName}'s ${feeLabel}. A balance is still pending.`,
+      sections: [[
+        { label: 'Student', value: record.studentName },
+        { label: 'Total Fee', value: formatIndianCurrency(record.totalAmount) },
+        { label: 'Paid So Far', value: formatIndianCurrency(record.paidAmount) },
+        { label: 'Balance Pending', value: formatIndianCurrency(pending) },
+        { label: 'Due Date', value: record.dueDate },
+      ]],
+      closing: 'Kindly clear the balance by the due date.',
+    });
+  }
+
+  // Pending (not yet due/overdue) — a plain reminder of the upcoming fee.
+  return composeWhatsAppMessage({
+    greeting: parentName,
+    intro: `This is a reminder that ${record.studentName}'s ${feeLabel} is due soon.`,
+    sections: [[
+      { label: 'Student', value: record.studentName },
+      { label: 'Amount Due', value: formatIndianCurrency(pending) },
+      { label: 'Due Date', value: record.dueDate },
+    ]],
+    closing: 'Please make the payment on or before the due date.',
+  });
 }
 
 const CATEGORY_SUGGESTIONS = ['Tuition', 'CBSE Batch', 'State Batch', 'Crash Course', 'Special Coaching', 'Exam Preparation'];
@@ -92,12 +158,21 @@ export function FeeManagement() {
   const [isGenerating, setIsGenerating] = useState<number | null>(null);
 
   const [showMonthly, setShowMonthly] = useState(false);
+  const [monthlyTarget, setMonthlyTarget] = useState<'student' | 'batch'>('student');
+  const [monthlyStudentSearch, setMonthlyStudentSearch] = useState('');
   const [monthlyForm, setMonthlyForm] = useState({
-    className: '', feeType: 'Tuition', originalAmount: '', discountPercent: '', category: '',
+    studentId: '', className: '', feeType: 'Tuition', originalAmount: '', discountPercent: '', category: '',
     startDate: '', endDate: '', academicYear: '',
     startMonth: nextMonthValue(), months: '12', dueDay: '5',
   });
   const [isGeneratingMonthly, setIsGeneratingMonthly] = useState(false);
+  const monthlyStudentMatches = useMemo(() => {
+    if (!monthlyStudentSearch.trim()) return [];
+    const query = monthlyStudentSearch.toLowerCase();
+    return students
+      .filter((s) => s.status === 'Active' && (s.fullName.toLowerCase().includes(query) || s.id.toLowerCase().includes(query)))
+      .slice(0, 20);
+  }, [students, monthlyStudentSearch]);
 
   const [showIndividual, setShowIndividual] = useState(false);
   const [individualSearch, setIndividualSearch] = useState('');
@@ -249,11 +324,20 @@ export function FeeManagement() {
       setError('Monthly original amount and start month are required.');
       return;
     }
+    if (monthlyTarget === 'student' && !monthlyForm.studentId) {
+      setError('Select a student.');
+      return;
+    }
+    if (monthlyTarget === 'batch' && !monthlyForm.className) {
+      setError('Select a batch.');
+      return;
+    }
     setIsGeneratingMonthly(true);
     setError(null);
     try {
       const result = await generateMonthlyFeeRecordsAPI({
-        className: monthlyForm.className,
+        studentId: monthlyTarget === 'student' ? monthlyForm.studentId : undefined,
+        className: monthlyTarget === 'batch' ? monthlyForm.className : undefined,
         feeType: monthlyForm.feeType,
         originalAmount: Number(monthlyForm.originalAmount),
         discountPercent: Number(monthlyForm.discountPercent) || 0,
@@ -266,6 +350,8 @@ export function FeeManagement() {
         dueDay: Number(monthlyForm.dueDay) || 5,
       }, user);
       setSuccess(`Created ${result.createdCount} monthly fee record(s) for ${result.studentCount} student(s)${result.skippedCount ? `, skipped ${result.skippedCount} already existing` : ''}.`);
+      setMonthlyForm((f) => ({ ...f, studentId: '' }));
+      setMonthlyStudentSearch('');
       const statsResult = await fetchFeeStats(user);
       setStats(statsResult);
     } catch (err: any) {
@@ -556,17 +642,57 @@ export function FeeManagement() {
             {showMonthly && (
               <div className="border-t border-border p-6 space-y-4">
                 <p className="text-xs text-muted-foreground">
-                  Creates one fee record per month for every active student in the class, so each month can be tracked and paid separately. You can edit any individual student's amount afterwards.
+                  Creates one fee record per month, so each month can be tracked and paid separately. Generate for a single student, or for every active student in a batch at once.
                 </p>
+                <div className="flex rounded-xl border border-border overflow-hidden w-fit">
+                  {(['student', 'batch'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setMonthlyTarget(t)}
+                      className={`px-4 py-2 text-sm font-medium transition-colors ${
+                        monthlyTarget === t ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-secondary'
+                      }`}
+                    >
+                      {t === 'student' ? 'Individual Student' : 'Whole Batch'}
+                    </button>
+                  ))}
+                </div>
                 <form onSubmit={handleGenerateMonthly} className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  <label className="flex flex-col gap-1.5 text-sm">
-                    <span className="font-medium text-foreground">Batch</span>
-                    <select value={monthlyForm.className} onChange={(e) => setMonthlyForm((f) => ({ ...f, className: e.target.value }))}
-                      className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
-                      <option value="">Select batch…</option>
-                      {classOptions.map((c) => <option key={c.id} value={c.className}>{c.className}</option>)}
-                    </select>
-                  </label>
+                  {monthlyTarget === 'student' ? (
+                    <label className="flex flex-col gap-1.5 text-sm sm:col-span-2 lg:col-span-1">
+                      <span className="font-medium text-foreground">Student</span>
+                      <input
+                        value={monthlyForm.studentId ? (students.find((s) => s.id === monthlyForm.studentId)?.fullName ?? '') : monthlyStudentSearch}
+                        onChange={(e) => { setMonthlyStudentSearch(e.target.value); setMonthlyForm((f) => ({ ...f, studentId: '' })); }}
+                        placeholder="Search student by name or ID…"
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                      />
+                      {monthlyStudentSearch && !monthlyForm.studentId && monthlyStudentMatches.length > 0 && (
+                        <div className="max-h-40 overflow-y-auto rounded-xl border border-border bg-card divide-y divide-border">
+                          {monthlyStudentMatches.map((s) => (
+                            <button
+                              type="button"
+                              key={s.id}
+                              onClick={() => { setMonthlyForm((f) => ({ ...f, studentId: s.id })); setMonthlyStudentSearch(''); }}
+                              className="block w-full px-3 py-2 text-left text-sm hover:bg-secondary"
+                            >
+                              {s.fullName} <span className="text-xs text-muted-foreground">· {s.className} · {s.id}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </label>
+                  ) : (
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-foreground">Batch</span>
+                      <select value={monthlyForm.className} onChange={(e) => setMonthlyForm((f) => ({ ...f, className: e.target.value }))}
+                        className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
+                        <option value="">Select batch…</option>
+                        {classOptions.map((c) => <option key={c.id} value={c.className}>{c.className}</option>)}
+                      </select>
+                    </label>
+                  )}
                   <label className="flex flex-col gap-1.5 text-sm">
                     <span className="font-medium text-foreground">Fee Type</span>
                     <input value={monthlyForm.feeType} onChange={(e) => setMonthlyForm((f) => ({ ...f, feeType: e.target.value }))} placeholder="e.g. Tuition"
@@ -1073,6 +1199,8 @@ export function FeeManagement() {
                 const cfg = STATUS_CONFIG[r.status];
                 const StatusIcon = cfg.icon;
                 const pending = r.totalAmount - r.paidAmount;
+                const student = students.find((s) => s.id === r.studentId);
+                const parentPhone = student?.primaryParentMobile || student?.fatherMobile || student?.motherMobile;
                 return (
                   <div key={r.id} className="flex items-center gap-4 px-6 py-4 transition-colors hover:bg-secondary/30">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-bold text-primary">
@@ -1106,6 +1234,14 @@ export function FeeManagement() {
                     >
                       <History className="h-3.5 w-3.5" />
                     </button>
+                    {parentPhone && (
+                      <WhatsAppButton
+                        variant="outline"
+                        phone={parentPhone}
+                        label="WhatsApp"
+                        message={() => feeWhatsAppMessage(r, student)}
+                      />
+                    )}
                     {isAccountantOrAdmin && (
                       <button
                         onClick={() => startEditRecord(r)}

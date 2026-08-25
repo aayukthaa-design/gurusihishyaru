@@ -29,7 +29,8 @@ import { addTeacher, getTeachersForBranch, useTeachers, refreshTeachers } from '
 import { addClass, getClassesForBranch, getClassesForTeacher, useClasses } from '../lib/classService';
 import { BOARDS } from '../lib/classConstants';
 import { addNotification } from '../lib/notificationService';
-import { useSchoolExamSchedules } from '../lib/schoolExamScheduleService';
+import { useSchoolExamSchedules, refreshSchoolExamSchedules } from '../lib/schoolExamScheduleService';
+import { useLessonPlans, refreshLessonPlans } from '../lib/lessonPlanService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { useStudents, refreshStudents } from '../lib/studentService';
@@ -536,6 +537,7 @@ export function Dashboard() {
   }, [notifications, user]);
   const exams = useExams();
   const schoolExamSchedules = useSchoolExamSchedules();
+  const lessonPlans = useLessonPlans();
   const scopedSubmissions = filterByBranch(submissions as Array<{ branchId?: string | null }>, user, branchFilter);
   const scopedExams = filterByBranch(exams as Array<{ branchId?: string | null }>, user, branchFilter);
   const myExams = React.useMemo(() => {
@@ -564,6 +566,23 @@ export function Dashboard() {
       return matchesTeacher && matchesClass && schedule.startDate >= today;
     }).slice(0, 5);
   }, [myClasses, schoolExamSchedules, user?.id]);
+
+  // Super Admin's "Uploaded Portions Lists" card — same oversight-visibility
+  // reuse as the "Upcoming School Exams" card below, just for Lesson Plans
+  // (the syllabus-portions module) instead of school exam schedules.
+  const recentLessonPlans = React.useMemo(() => {
+    return lessonPlans
+      .filter((plan) => !branchFilter || plan.branchId === branchFilter)
+      .slice()
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+      .slice(0, 5);
+  }, [branchFilter, lessonPlans]);
+
+  React.useEffect(() => {
+    if (!isSuperAdmin || !user) return;
+    void refreshSchoolExamSchedules();
+    void refreshLessonPlans(user);
+  }, [isSuperAdmin, user]);
 
   const todaySchoolExams = React.useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -1303,22 +1322,37 @@ export function Dashboard() {
           </div>
         ) : (
           <>
-            {/* Super Admin has no school_exam_schedules module access (day-to-day
-                tracking is an Admin operation) — the "View schedules" link below
-                would 403 for them, so this card is Admin-only. */}
-            {!isSuperAdmin && (
+            {/* Uploaded School Exam Timetables — same card Admin sees; Super
+                Admin now has school_exam_schedules module access too (rbac.ts). */}
+            <div className="rounded-2xl border border-border bg-card p-5">
+              <h3 className="text-sm font-semibold mb-2">Upcoming School Exams</h3>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                {adminSchoolExams.length === 0 && <div className="text-sm text-muted-foreground">No upcoming school exams</div>}
+                {adminSchoolExams.map((exam) => (
+                  <div key={exam.id} className="flex items-center justify-between gap-2">
+                    <span>{exam.studentName} · {exam.examName}</span>
+                    <span className="text-xs text-primary">{exam.startDate}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3"><Link to="/school-exam-schedules" className="text-xs text-primary">View schedules</Link></div>
+            </div>
+
+            {/* Uploaded Portions Lists — Lesson Plan module, Super-Admin-only
+                (Admin already has its own full view via the Lesson Plan page). */}
+            {isSuperAdmin && (
               <div className="rounded-2xl border border-border bg-card p-5">
-                <h3 className="text-sm font-semibold mb-2">Upcoming School Exams</h3>
+                <h3 className="text-sm font-semibold mb-2">Uploaded Portions Lists</h3>
                 <div className="space-y-2 text-sm text-muted-foreground">
-                  {adminSchoolExams.length === 0 && <div className="text-sm text-muted-foreground">No upcoming school exams</div>}
-                  {adminSchoolExams.map((exam) => (
-                    <div key={exam.id} className="flex items-center justify-between gap-2">
-                      <span>{exam.studentName} · {exam.examName}</span>
-                      <span className="text-xs text-primary">{exam.startDate}</span>
+                  {recentLessonPlans.length === 0 && <div className="text-sm text-muted-foreground">No portions submitted yet</div>}
+                  {recentLessonPlans.map((plan) => (
+                    <div key={plan.id} className="flex items-center justify-between gap-2">
+                      <span>{plan.className}{plan.batch ? ` (${plan.batch})` : ''} · {plan.subject} — {plan.chapterTitle || plan.topic}</span>
+                      <span className="text-xs text-primary">{plan.teacherName}</span>
                     </div>
                   ))}
                 </div>
-                <div className="mt-3"><Link to="/school-exam-schedules" className="text-xs text-primary">View schedules</Link></div>
+                <div className="mt-3"><Link to="/lesson-plan" className="text-xs text-primary">View all portions</Link></div>
               </div>
             )}
 
@@ -1448,6 +1482,7 @@ export function Dashboard() {
                 { label: 'Enter Marks', icon: BookOpen, path: '/exams' },
                 { label: 'Manage Timetable', icon: CalendarDays, path: '/timetable' },
                 { label: 'Create Exam', icon: GraduationCap, path: '/teacher/exams/create' },
+                { label: 'Create Primary Exam', icon: GraduationCap, path: '/teacher/exams/create?mode=primary' },
                 { label: 'Daily Submission', icon: FileText, path: '/daily-submission' },
               ].map((a) => (
                 <button
@@ -1631,12 +1666,18 @@ export function Dashboard() {
                   </div>
                 </div>
               ))}
-              {/* Recent teacher submissions for admins */}
-              {(isAdmin || isSuperAdmin) && submissions.slice(0,5).map((s) => (
+              {/* Recent teacher daily updates — the actual content (topic/homework/
+                  notes), not just "submitted a report", so an admin or super admin
+                  can read what was entered without opening Notifications separately. */}
+              {(isAdmin || isSuperAdmin) && (isSuperAdmin ? submissions : scopedSubmissions).slice(0,5).map((s: any) => (
                 <div key={s.id} className="flex items-start gap-3 rounded-xl bg-secondary/60 px-3 py-2.5">
                   <span className="mt-0.5 shrink-0 text-base">📝</span>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm leading-snug text-card-foreground">{s.teacherName} submitted report for {s.className} — {s.subject}</p>
+                    <p className="text-sm font-medium leading-snug text-card-foreground">{s.teacherName} — {s.className} · {s.subject}</p>
+                    {s.topic && <p className="mt-0.5 text-xs text-muted-foreground">Topic: {s.topic}</p>}
+                    {s.homework && <p className="text-xs text-muted-foreground">Homework: {s.homework}</p>}
+                    <p className="text-xs text-muted-foreground">Attendance: {s.attendanceStatus}</p>
+                    {s.notes && <p className="text-xs text-muted-foreground">Notes: {s.notes}</p>}
                     <p className="mt-0.5 text-xs text-muted-foreground">{new Date(s.createdAt).toLocaleString()}</p>
                   </div>
                 </div>

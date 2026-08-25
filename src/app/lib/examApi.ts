@@ -11,13 +11,17 @@ export async function saveExamAPI(exam: any) {
       const fd = new FormData();
       fd.append('name', exam.name);
       fd.append('subject', exam.subject);
-      fd.append('className', exam.className);
+      fd.append('className', exam.className || '');
       fd.append('batch', exam.batch || '');
       fd.append('date', exam.date);
       fd.append('maxMarks', String(exam.maxMarks));
+      fd.append('passingMarks', String(exam.passingMarks ?? Math.round(Number(exam.maxMarks || 0) * 0.35)));
       fd.append('description', exam.description || '');
       fd.append('status', exam.status || 'draft');
       fd.append('createdBy', exam.createdBy || '');
+      // Individual-student ("Primary") exams carry the exact student list
+      // instead of a batch — omitted entirely for ordinary batch exams.
+      if (exam.studentIds?.length) fd.append('studentIds', JSON.stringify(exam.studentIds));
       fd.append('attachment', exam.attachment.file);
       const resp = await apiFetch(`${API_BASE}/api/exams`, { method: 'POST', body: fd });
       if (!resp.ok) throw new Error('network');

@@ -10,7 +10,7 @@ import { addNotification } from '../lib/notificationService';
 import { useTeachers, getTeachersForBranch, getTeacherById } from '../lib/teacherService';
 import { BOARDS } from '../lib/classConstants';
 import { useClasses, addClass, updateClass, deleteClass, type ClassRecord } from '../lib/classService';
-import { getStudentsForClass, updateStudentAPI, useStudents, getAllStudents } from '../lib/studentService';
+import { getStudentsForClass, useStudents, getAllStudents, addStudentToBatchAPI, removeStudentFromBatchAPI } from '../lib/studentService';
 
 // Replaces the old standalone Class Allocation page: batches ARE the classes
 // table now (className free-text batch name, board, teacher, timings). See
@@ -120,16 +120,22 @@ export function Batches() {
     setStudentError(null);
   }
 
+  // Multi-batch aware: includes both students whose primary batch is this one
+  // AND students additionally enrolled here via student_batches — same one
+  // roster helper used everywhere else (attendance, exams, homework...).
   const batchStudents = studentsBatch
     ? getStudentsForClass(studentsBatch.className, studentsBatch.branchId, studentsBatch.board)
     : [];
+  const batchStudentIds = new Set(batchStudents.map((s) => s.id));
 
-  // Existing students from the SAME branch who aren't already in this batch —
-  // no separate "create new student" form here; assigning just re-points an
-  // existing student record's className/batch at this batch (branch-locked,
-  // same as the server-side same-branch enforcement on the students API).
+  // Existing students from the SAME branch who aren't already in this batch
+  // (by either their primary or any additional batch) — no separate "create
+  // new student" form here; assigning ADDS this batch to whichever ones they
+  // already have (branch-locked, same as the server-side same-branch
+  // enforcement on the students API) — it never moves/overwrites their
+  // primary batch. Change the primary batch from the student's own profile.
   const availableStudents = studentsBatch
-    ? getAllStudents().filter((s) => s.branchId === studentsBatch.branchId && s.status !== 'Inactive' && s.className !== studentsBatch.className)
+    ? getAllStudents().filter((s) => s.branchId === studentsBatch.branchId && s.status !== 'Inactive' && !batchStudentIds.has(s.id))
     : [];
 
   async function handleAssignStudent() {
@@ -138,15 +144,7 @@ export function Batches() {
     if (!student) return;
     setAssigning(true);
     setStudentError(null);
-    // PUT /api/students/:id replaces the whole row (no partial-update
-    // fallback server-side) — send every existing field back, only
-    // overriding className/batch, or every other field gets wiped to NULL
-    // (including primaryParentMobile, which would also orphan the parent link).
-    const saved = await updateStudentAPI(selectedStudentId, {
-      ...student,
-      className: studentsBatch.className,
-      batch: studentsBatch.board,
-    });
+    const saved = await addStudentToBatchAPI(selectedStudentId, studentsBatch.id);
     setAssigning(false);
     if (!saved) { setStudentError('Unable to add this student to the batch. Please try again.'); return; }
     addNotification({
@@ -163,8 +161,10 @@ export function Batches() {
     if (!studentsBatch) return;
     const ok = confirm(`Remove ${student.fullName} from ${studentsBatch.className}?`);
     if (!ok) return;
-    // Same full-row-replace caveat as handleAssignStudent above.
-    const saved = await updateStudentAPI(student.id, { ...student, className: '', batch: '' });
+    // Removing their primary batch reassigns it server-side to one of their
+    // remaining batches (or clears it if this was their only one) — the
+    // student's profile is never deleted, just their link to this one batch.
+    const saved = await removeStudentFromBatchAPI(student.id, studentsBatch.id);
     if (!saved) { setStudentError('Unable to remove this student from the batch. Please try again.'); return; }
     addNotification({
       title: 'Student Removed from Batch',

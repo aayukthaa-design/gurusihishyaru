@@ -30,6 +30,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'materials',
       'lesson_plan',
       'holiday_calendar',
+      'school_exam_schedules',   // same oversight visibility Admin already has
     ],
     permissions: [
       'create',

@@ -3,7 +3,7 @@ import { Header } from '../components/Header';
 import { useParams, useNavigate } from 'react-router';
 import { useAuth } from '../auth/AuthContext';
 import { subscribeExams, updateExamStatus } from '../lib/examService';
-import { getStudentsForClass } from '../lib/studentService';
+import { getStudentsForClass, getStudentsByIds } from '../lib/studentService';
 import { submitExamAttendanceRecords } from '../lib/examAttendanceService';
 
 // Standalone entry point for marking exam attendance on an exam that's
@@ -28,7 +28,12 @@ export function TeacherExamAttendance() {
       const found = items.find((e) => String(e.id) === examId) || null;
       setExam(found);
       if (found) {
-        const roster = getStudentsForClass(found.className, user?.branchId).map((student) => ({
+        // Exams are scoped to one batch (className + board/batch), not the whole
+        // class — omitting found.batch here pulled in every batch sharing the
+        // same className, which is exactly the "wrong students showing up for
+        // exam attendance" bug. A Primary Exam has no batch at all — it carries
+        // its own explicit studentIds instead.
+        const roster = (found.studentIds?.length ? getStudentsByIds(found.studentIds) : getStudentsForClass(found.className, user?.branchId, found.batch)).map((student) => ({
           id: student.id,
           name: student.fullName,
           roll: student.rollNumber,
