@@ -287,6 +287,7 @@ export function TeacherAttendance() {
             <div className="flex flex-wrap gap-2">
               <button type="button" onClick={() => markAll('present')} className="rounded-xl bg-green-100 px-3 py-2 text-sm font-semibold text-green-700 hover:bg-green-200 dark:bg-green-900/40 dark:text-green-400">Mark All Present</button>
               <button type="button" onClick={() => markAll('absent')} className="rounded-xl bg-red-100 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-400">Mark All Absent</button>
+              <button type="button" onClick={() => markAll('leave')} className="rounded-xl bg-amber-100 px-3 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-400">Mark All Leave</button>
             </div>
           </div>
         </div>

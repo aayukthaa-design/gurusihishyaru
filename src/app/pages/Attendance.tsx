@@ -198,7 +198,7 @@ export function Attendance() {
   }, [selectedClass, selectedBoard, branchFilter]);
 
 
-  const markAll = (status: 'present' | 'absent') => {
+  const markAll = (status: 'present' | 'absent' | 'leave') => {
     const all: Record<string, 'present' | 'absent' | 'leave'> = {};
     students.forEach((s) => { all[s.id] = status; });
     setAttendance(all);
@@ -437,6 +437,12 @@ export function Attendance() {
                   className="rounded-lg bg-red-100 dark:bg-red-900/40 px-3 py-1.5 text-xs font-semibold text-red-600 dark:text-red-400 transition-colors hover:bg-red-200"
                 >
                   All Absent
+                </button>
+                <button
+                  onClick={() => markAll('leave')}
+                  className="rounded-lg bg-amber-100 dark:bg-amber-900/40 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-400 transition-colors hover:bg-amber-200"
+                >
+                  All Leave
                 </button>
                 <button
                   onClick={() => setShowLeaveForm((v) => !v)}
