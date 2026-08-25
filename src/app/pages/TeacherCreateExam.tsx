@@ -182,13 +182,15 @@ export function TeacherCreateExam() {
     setAttendanceMessage(null);
     setAttendanceSuccess(false);
 
-    // Notify admins
+    // Notify admins — branchId keeps this out of every OTHER branch's admin
+    // inbox, since className alone can collide across branches.
     addNotification({
       title: 'New Exam Created',
       message: `${user?.name} created exam '${exam.name}' for ${exam.className} on ${exam.date}`,
       type: 'info',
       roles: ['admin','super_admin'],
       classNames: [exam.className],
+      branchId: exam.branchId,
     });
 
     // Also add a calendar-like notification for students/parents
@@ -198,6 +200,7 @@ export function TeacherCreateExam() {
       type: 'info',
       roles: ['parent'],
       classNames: [exam.className],
+      branchId: exam.branchId,
     });
 
     // Success notification for teacher

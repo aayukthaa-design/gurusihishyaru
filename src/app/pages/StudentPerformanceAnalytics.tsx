@@ -4,8 +4,8 @@ import { GreetingBanner } from '../components/GreetingBanner';
 import { DataTable } from '../components/DataTable';
 import { useAuth } from '../auth/AuthContext';
 import { getBranchName, useBranches } from '../lib/branchService';
-import { subscribeExams } from '../lib/examService';
-import { subscribeMarks } from '../lib/examMarksService';
+import { subscribeExams, refreshExams } from '../lib/examService';
+import { subscribeMarks, refreshMarks } from '../lib/examMarksService';
 import { getStudentsForClass } from '../lib/studentService';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import {
@@ -79,7 +79,12 @@ export function StudentPerformanceAnalytics() {
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  // Subscribe to changes in exams & marks stores
+  // Subscribe to changes in exams & marks stores, and actively refetch both on
+  // mount — both stores' only other load is a module-import-time fetch that
+  // can fire before the auth token is attached (401, store stays empty
+  // forever), which is exactly what made the filter dropdowns look broken:
+  // empty exams/marks means empty filterOptions means every dropdown but
+  // "All ..." has nothing to show, and picking an option has nothing to filter.
   useEffect(() => {
     const unsubExams = subscribeExams((items) => {
       setExams(items);
@@ -89,6 +94,8 @@ export function StudentPerformanceAnalytics() {
       setMarks(items);
       setMarksVersion((v) => v + 1);
     });
+    void refreshExams();
+    void refreshMarks();
     return () => {
       unsubExams();
       unsubMarks();
@@ -108,21 +115,27 @@ export function StudentPerformanceAnalytics() {
       const exam = exams.find((e) => e.id === mark.examId);
       const student = students.find((s) => s.id === mark.studentId);
 
+      // exam.branchId is real data now (branch-scoped exams — see examService).
+      // Previously this fell back to a hardcoded 'branch_jayanagar'/'branch_rajajinagar'
+      // guess keyed off a specific literal teacherId, and 'Batch A'/'Mathematics'/
+      // a fixed 2026-06-01 date as generic filler — fabricated values that looked
+      // real but weren't, exactly the "stale/unrelated data" this page shouldn't show.
+      const branchId = student?.branchId || exam?.branchId || '';
       return {
         id: `${mark.examId}-${mark.studentId}`,
         studentId: mark.studentId,
         studentName: student?.fullName || mark.studentName,
         rollNumber: student?.rollNumber || mark.rollNumber,
         admissionNumber: student?.admissionNumber || 'ADM' + mark.studentId.replace(/\D/g, ''),
-        branchId: student?.branchId || (exam?.teacherId === 'TCH002' ? 'branch_jayanagar' : 'branch_rajajinagar'),
-        branchName: student?.branchName || (exam?.teacherId === 'TCH002' ? 'Jayanagar Branch' : 'Rajajinagar Branch'),
-        className: exam?.className || student?.className || '10th',
-        batch: exam?.batch || 'Batch A',
-        subject: exam?.subject || 'Mathematics',
+        branchId,
+        branchName: branchId ? getBranchName(branchId) : 'Unknown Branch',
+        className: exam?.className || student?.className || 'Unknown',
+        batch: exam?.batch || student?.batch || 'Unknown',
+        subject: exam?.subject || 'Unknown',
         examId: mark.examId,
         examName: exam?.name || 'Unknown Exam',
-        examDate: exam?.date || '2026-06-01',
-        maxMarks: exam?.maxMarks || 100,
+        examDate: exam?.date || '',
+        maxMarks: exam?.maxMarks || 0,
         marksObtained: mark.marksObtained,
         percentage: mark.percentage,
         grade: mark.grade,

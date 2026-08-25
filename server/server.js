@@ -737,6 +737,11 @@ async function initDb() {
   // whole batch. JSON array of studentIds; NULL/empty for every ordinary
   // batch exam (className/batch stay how they've always worked for those).
   try { await db.exec(`ALTER TABLE exams ADD COLUMN studentIds TEXT`); } catch (err) {}
+  // Branch the exam belongs to — previously exams had no branch concept at
+  // all, so GET /api/exams returned every exam to every branch's users (the
+  // client-side filterByBranch() helper is a no-op on a falsy branchId, so it
+  // silently let everything through). Backfilled below once `classes` exists.
+  try { await db.exec(`ALTER TABLE exams ADD COLUMN branchId TEXT`); } catch (err) {}
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS allocations (
@@ -1589,6 +1594,30 @@ async function initDb() {
       VALUES ('branch_main', 'Main', 'MAIN', '', '', '', '', '', '', '', '', 'Active', '${new Date().toISOString()}', '${new Date().toISOString()}');
     `);
   } catch (e) {}
+
+  // One-time backfill for exams created before exams.branchId existed —
+  // best-effort match to the classes row their className/batch(board) names,
+  // same as the student_batches backfill above; anything left unmatched
+  // (free-text className with no corresponding classes row, or a Primary
+  // Exam with no className at all) defaults to 'branch_main', the one branch
+  // that predates multi-branch support, rather than staying invisible to
+  // every non-super-admin account. Gated on branchId IS NULL so it only ever
+  // touches rows this hasn't already run for.
+  try {
+    const unbranched = await db.all("SELECT id, className, batch FROM exams WHERE branchId IS NULL");
+    for (const exam of unbranched) {
+      let branchId = 'branch_main';
+      if (exam.className) {
+        const classRow = await db.get(
+          "SELECT branchId FROM classes WHERE className = ? AND COALESCE(board,'') = COALESCE(?,'') LIMIT 1",
+          exam.className, exam.batch
+        );
+        if (classRow?.branchId) branchId = classRow.branchId;
+      }
+      await db.run('UPDATE exams SET branchId = ? WHERE id = ?', branchId, exam.id);
+    }
+    if (unbranched.length) console.log(`Backfilled branchId for ${unbranched.length} exam(s).`);
+  } catch (e) { console.error('exams branchId backfill failed:', e); }
 
   try { await db.exec("ALTER TABLE allocations ADD COLUMN branchId TEXT;"); } catch(e) {}
   try { await db.exec("ALTER TABLE allocations ADD COLUMN status TEXT DEFAULT 'Assigned';"); } catch(e) {}
@@ -2990,8 +3019,12 @@ async function main() {
       else if (typeof body.studentIds === 'string' && body.studentIds) {
         try { studentIds = JSON.parse(body.studentIds); } catch { studentIds = []; }
       }
-      const stmt = await db.prepare(`INSERT INTO exams (name, subject, className, batch, date, maxMarks, passingMarks, description, status, createdBy, createdAt, attachmentPath, attachmentName, attachmentSize, studentIds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-      const result = await stmt.run(body.name, body.subject, body.className || '', body.batch || '', body.date, Number(body.maxMarks || 0), Number(body.passingMarks || 35), body.description || '', body.status || 'draft', body.createdBy || '', now, attachment ? attachment.path : null, attachment ? attachment.originalname : null, attachment ? attachment.size : null, studentIds.length ? JSON.stringify(studentIds) : null);
+      // Pinned to the creator's own branch (ignored/overridden for non-super-admin,
+      // same as every other create endpoint) — this is what GET /api/exams below
+      // actually restricts on, not just className text.
+      const branchId = resolveBranchId(req, body.branchId) || req.user.branchId || 'branch_main';
+      const stmt = await db.prepare(`INSERT INTO exams (name, subject, className, batch, date, maxMarks, passingMarks, description, status, createdBy, createdAt, attachmentPath, attachmentName, attachmentSize, studentIds, branchId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const result = await stmt.run(body.name, body.subject, body.className || '', body.batch || '', body.date, Number(body.maxMarks || 0), Number(body.passingMarks || 35), body.description || '', body.status || 'draft', body.createdBy || '', now, attachment ? attachment.path : null, attachment ? attachment.originalname : null, attachment ? attachment.size : null, studentIds.length ? JSON.stringify(studentIds) : null, branchId);
       await stmt.finalize();
       const exam = await db.get('SELECT * FROM exams WHERE id = ?', result.lastID);
       res.json(exam);
@@ -3001,9 +3034,74 @@ async function main() {
     }
   });
 
+  // Branch-scoped at the query level, not just filtered client-side — this
+  // endpoint previously had no restriction at all, so every branch's exams
+  // were visible to every user (the frontend's filterByBranch() helper is a
+  // no-op when branchId is falsy, and exams never carried one before now).
   app.get('/api/exams', async (req, res) => {
-    const rows = await db.all('SELECT * FROM exams ORDER BY date ASC');
-    res.json(rows);
+    try {
+      const roles = req.user.roles || [];
+      const isSuperAdmin = roles.includes('super_admin');
+      const isTeacherOnly = roles.includes('teacher') && !roles.some((r) => ['admin', 'super_admin', 'accountant'].includes(r));
+      const isParentOnly = roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r));
+
+      if (isParentOnly) {
+        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const linkedIds = linkedRows.map((r) => r.studentId);
+        if (!linkedIds.length) return res.json([]);
+        const placeholders = linkedIds.map(() => '?').join(',');
+        const children = await attachStudentBatches(await db.all(`SELECT * FROM students WHERE id IN (${placeholders})`, ...linkedIds));
+        // Every (className, batch) pair any linked child belongs to — their
+        // primary batch plus any additional ones (multi-batch aware, same as
+        // every other roster query in this file).
+        const pairs = new Set();
+        for (const c of children) {
+          pairs.add(`${c.className} ${c.batch || ''}`);
+          for (const b of c.batches || []) pairs.add(`${b.className} ${b.batch || ''}`);
+        }
+        const rows = await db.all('SELECT * FROM exams ORDER BY date ASC');
+        const visible = rows.filter((e) => {
+          if (e.studentIds) {
+            try {
+              const ids = JSON.parse(e.studentIds);
+              if (Array.isArray(ids) && ids.some((id) => linkedIds.includes(id))) return true;
+            } catch { /* fall through to batch match */ }
+          }
+          return pairs.has(`${e.className} ${e.batch || ''}`);
+        });
+        return res.json(visible);
+      }
+
+      let query = 'SELECT * FROM exams';
+      const conditions = [];
+      const params = [];
+
+      if (isTeacherOnly) {
+        const teacherClassNames = await getTeacherAssignedClassNames(req);
+        if (teacherClassNames.length > 0) {
+          conditions.push(`(className IN (${teacherClassNames.map(() => '?').join(',')}) OR createdBy = ?)`);
+          params.push(...teacherClassNames, req.user.sub);
+        } else {
+          conditions.push('createdBy = ?');
+          params.push(req.user.sub);
+        }
+        // Still branch-pinned even within that OR — otherwise a className that
+        // happens to match another branch's batch of the same name would leak
+        // that branch's exam in too.
+        if (req.user.branchId) { conditions.push('branchId = ?'); params.push(req.user.branchId); }
+      } else {
+        const branchId = resolveBranchId(req, req.query.branchId);
+        if (branchId) { conditions.push('branchId = ?'); params.push(branchId); }
+      }
+
+      if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
+      query += ' ORDER BY date ASC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error('List exams error:', err);
+      res.status(500).json({ error: 'failed' });
+    }
   });
 
   app.put('/api/exams/:id', async (req, res) => {
@@ -3088,6 +3186,10 @@ async function main() {
           conditions.push('e.createdBy = ?');
           params.push(req.user.sub);
         }
+        // className alone can't disambiguate two branches that happen to share
+        // a batch name — pin to the teacher's own branch too, now that exams
+        // actually carry one.
+        if (req.user.branchId) { conditions.push('e.branchId = ?'); params.push(req.user.branchId); }
       } else if (isParentOnly) {
         const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
         const linkedIds = linkedRows.map((r) => r.studentId);

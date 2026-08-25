@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { apiFetch, getFileUrl } from '../lib/apiClient';
+import { computeIncomeExpenseSummary } from '../lib/ledgerService';
 
 interface LedgerEntry {
   id: number;
@@ -538,30 +539,7 @@ export function AccountantPortal() {
     return list.sort((a, b) => b.timestamp - a.timestamp).slice(0, 10);
   }, [ledger, allocations, students, reports, todayStr]);
 
-  const incomeVsExpenseSummary = useMemo(() => {
-    const incomeCategories: Record<string, number> = {};
-    const expenseCategories: Record<string, number> = {};
-    let totalInc = 0;
-    let totalExp = 0;
-
-    ledger.forEach(t => {
-      if (t.type === 'Income') {
-        incomeCategories[t.category] = (incomeCategories[t.category] || 0) + t.amount;
-        totalInc += t.amount;
-      } else {
-        expenseCategories[t.category] = (expenseCategories[t.category] || 0) + t.amount;
-        totalExp += t.amount;
-      }
-    });
-
-    return {
-      incomeCategories,
-      expenseCategories,
-      totalInc,
-      totalExp,
-      net: totalInc - totalExp
-    };
-  }, [ledger]);
+  const incomeVsExpenseSummary = useMemo(() => computeIncomeExpenseSummary(ledger), [ledger]);
 
   const lowStockItemsList = useMemo(() => {
     return inventory.filter(item => item.status === 'Active' && item.availableQuantity <= item.minStock);

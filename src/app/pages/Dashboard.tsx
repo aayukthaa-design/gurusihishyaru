@@ -35,6 +35,8 @@ import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { useStudents, refreshStudents } from '../lib/studentService';
 import { fetchAttendance } from '../lib/attendanceService';
+import { useTimetable, refreshTimetable, sortByTime, displayTimeRange } from '../lib/timetableService';
+import { computeIncomeExpenseSummary } from '../lib/ledgerService';
 
 // ─── Per-role configuration ───────────────────────────────────────────────────
 
@@ -116,6 +118,8 @@ export function Dashboard() {
   const [weeklyAttendanceTrend, setWeeklyAttendanceTrend] = React.useState<{ week: string; value: number }[]>([]);
   const [totalParents, setTotalParents] = React.useState(0);
   const [totalAccountants, setTotalAccountants] = React.useState(0);
+  const [todaysAttendanceClassNames, setTodaysAttendanceClassNames] = React.useState<string[]>([]);
+  const timetable = useTimetable();
 
   React.useEffect(() => {
     // /api/teachers is admin/super_admin-only (it includes salary/DOB/address) —
@@ -220,12 +224,45 @@ export function Dashboard() {
   // every consumer reading it (this widget, exams filter, notifications
   // filter, school exam schedules filter) was silently empty for every teacher.
   const allClasses = useClasses();
-  const myClasses: string[] = React.useMemo(() => {
+  const myClassRows = React.useMemo(() => {
     if (!user?.id) return [];
-    const rows = getClassesForTeacher(user.id, user.branchId);
-    return Array.from(new Set(rows.map((r) => r.className)));
+    return getClassesForTeacher(user.id, user.branchId);
   }, [user?.id, user?.branchId, allClasses]);
+  const myClasses: string[] = React.useMemo(
+    () => Array.from(new Set(myClassRows.map((r) => r.className))),
+    [myClassRows]
+  );
+  // First matching batch's board/timing for the "My Classes" card subtitle —
+  // a teacher with two same-named batches on different boards is rare enough
+  // that showing the first is fine for a dashboard summary card.
+  const myClassInfo = React.useMemo(() => {
+    const map = new Map<string, { board: string; classTiming: string }>();
+    for (const row of myClassRows) if (!map.has(row.className)) map.set(row.className, row);
+    return map;
+  }, [myClassRows]);
   const todayISO = new Date().toISOString().slice(0, 10);
+  // Full weekday name ("Monday") — the format timetable_entries.dayOfWeek is
+  // stored in (see Timetable.tsx's `days` list).
+  const todayDayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+
+  React.useEffect(() => {
+    if (!isTeacher) return;
+    // No classId/className filter — GET /api/timetable already scopes a
+    // teacher-only account to exactly their own assigned batches server-side.
+    void refreshTimetable({});
+  }, [isTeacher, user?.id]);
+
+  React.useEffect(() => {
+    // "Pending Attendance" must reflect actual Attendance records, not Daily
+    // Submission reports — it previously reused mySubmissionsToday (a
+    // different existing feature entirely), so it stayed "pending" even for
+    // a class whose attendance really had been taken, and cleared the moment
+    // an unrelated daily report was filed instead.
+    if (!isTeacher) return;
+    fetchAttendance(undefined, todayISO, user?.branchId).then((records) => {
+      setTodaysAttendanceClassNames(Array.from(new Set(records.map((r) => r.className))));
+    });
+  }, [isTeacher, user?.branchId, todayISO]);
 
   const { actions } = isSuperAdmin
     ? getSuperAdminConfig()
@@ -335,6 +372,26 @@ export function Dashboard() {
       loadAccountantDashboardData();
     }
   }, [isAccountant]);
+
+  // Admin/Super Admin Income & Expense Summary — same /api/ledger source as
+  // the Accountant dashboard above, just scoped by the page's own branch
+  // selector (branchFilter) instead of the accountant's fixed own-branch
+  // myBranchId, since Super Admin can switch branches here. Previously
+  // neither role ever fetched ledger data at all (only isAccountant did),
+  // which is why this summary was blank/broken for them.
+  React.useEffect(() => {
+    if (!isAdmin && !isSuperAdmin) return;
+    apiFetch(`/api/ledger?branchId=${branchFilter}`)
+      .then(async (res) => {
+        if (res.ok) {
+          const data = await res.json();
+          setLedger(Array.isArray(data) ? data : []);
+        }
+      })
+      .catch((err) => console.error('Failed to load ledger for dashboard summary', err));
+  }, [isAdmin, isSuperAdmin, branchFilter]);
+
+  const incomeExpenseSummary = React.useMemo(() => computeIncomeExpenseSummary(ledger), [ledger]);
 
   // Dynamic calculations for Accountant KPI dashboard cards
   const todayIncome = React.useMemo(() => {
@@ -541,15 +598,30 @@ export function Dashboard() {
   const scopedSubmissions = filterByBranch(submissions as Array<{ branchId?: string | null }>, user, branchFilter);
   const scopedExams = filterByBranch(exams as Array<{ branchId?: string | null }>, user, branchFilter);
   const myExams = React.useMemo(() => {
-    const published = scopedExams.filter(
-      (ex: { status?: string; className?: string }) =>
-        ex.status === 'published' && myClasses.includes(ex.className ?? '')
-    );
-    return published.slice(0, 5);
-  }, [exams, myClasses]);
+    const relevant = scopedExams.filter((ex: { status?: string; className?: string; date?: string; studentIds?: string[]; teacherId?: string }) => {
+      // Still upcoming — not yet fully finished, and not already in the past.
+      // Previously required status === 'published' specifically, so an exam
+      // vanished from here the moment its attendance was recorded (the very
+      // next step after creating it), even though the exam date itself was
+      // still today or in the future.
+      if (['results_published', 'completed'].includes(ex.status ?? '')) return false;
+      if (ex.date && ex.date < todayISO) return false;
+      // A batch exam belongs here if it's one of this teacher's assigned
+      // batches; a Primary Exam (no batch at all) belongs here if this
+      // teacher is the one who created it.
+      if (ex.studentIds?.length) return ex.teacherId === user?.id;
+      return myClasses.includes(ex.className ?? '');
+    });
+    return relevant.slice(0, 5);
+  }, [scopedExams, myClasses, todayISO, user?.id]);
   const mySubmissionsToday = scopedSubmissions.filter((s) => s.teacherId === user?.id && s.date === todayISO);
   const submittedClasses = mySubmissionsToday.map((s) => s.className);
   const pendingClasses = myClasses.filter((c) => !submittedClasses.includes(c));
+  const pendingAttendanceClasses = myClasses.filter((c) => !todaysAttendanceClassNames.includes(c));
+  const todaysTimetable = React.useMemo(
+    () => sortByTime(timetable.filter((e) => e.dayOfWeek === todayDayName)),
+    [timetable, todayDayName]
+  );
   const adminSchoolExams = React.useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
     return schoolExamSchedules.filter((schedule) => {
@@ -1189,7 +1261,7 @@ export function Dashboard() {
                     <div key={c} className="rounded-md border border-border px-3 py-2 flex items-center justify-between">
                       <div>
                         <p className="text-sm font-medium">{c}</p>
-                        <p className="text-xs text-muted-foreground">Section</p>
+                        <p className="text-xs text-muted-foreground">{[myClassInfo.get(c)?.board, myClassInfo.get(c)?.classTiming].filter(Boolean).join(' · ')}</p>
                       </div>
                       <Link to="/timetable" className="text-xs text-primary">View</Link>
                     </div>
@@ -1199,12 +1271,13 @@ export function Dashboard() {
 
               <div className="rounded-2xl border border-border bg-card p-5">
                 <h3 className="text-sm font-semibold mb-2">Today's Timetable</h3>
-                <div className="text-sm text-muted-foreground">Quick view of today's periods</div>
+                <div className="text-sm text-muted-foreground">{todayDayName}'s periods</div>
                 <div className="mt-3 space-y-2">
-                  {['08:00-09:00','09:00-10:00','10:00-11:00'].map((p) => (
-                    <div key={p} className="flex items-center justify-between">
-                      <span className="text-sm">{p}</span>
-                      <span className="text-sm text-muted-foreground">Subject</span>
+                  {todaysTimetable.length === 0 && <p className="text-sm text-muted-foreground">No periods scheduled today</p>}
+                  {todaysTimetable.map((entry) => (
+                    <div key={entry.id} className="flex items-center justify-between">
+                      <span className="text-sm">{displayTimeRange(entry)}</span>
+                      <span className="text-sm text-muted-foreground">{entry.subject || entry.className}</span>
                     </div>
                   ))}
                 </div>
@@ -1215,7 +1288,7 @@ export function Dashboard() {
 
               <div className="rounded-2xl border border-border bg-card p-5">
                 <h3 className="text-sm font-semibold mb-2">Pending Attendance</h3>
-                <p className="text-2xl font-bold">{pendingClasses.length}</p>
+                <p className="text-2xl font-bold">{pendingAttendanceClasses.length}</p>
                 <div className="mt-3">
                   <Link to="/attendance" className="text-xs text-primary">Mark Attendance</Link>
                 </div>
@@ -1355,6 +1428,53 @@ export function Dashboard() {
                 <div className="mt-3"><Link to="/lesson-plan" className="text-xs text-primary">View all portions</Link></div>
               </div>
             )}
+
+            {/* Income & Expense Summary — same /api/ledger data and the exact
+                same computeIncomeExpenseSummary() the Accountant Portal uses,
+                just branch-scoped to this page's own branch selector (all
+                branches for Super Admin, their own branch for Admin) instead
+                of duplicating the calculation. */}
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
+                <div className="flex items-center justify-between border-b border-border pb-3 mb-3">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <TrendingUp className="h-4 w-4 text-emerald-500" /> Income Summary by Category
+                  </h3>
+                  <span className="text-sm font-bold text-emerald-600">{formatIndianCurrency(incomeExpenseSummary.totalInc)}</span>
+                </div>
+                <div className="space-y-2">
+                  {Object.entries(incomeExpenseSummary.incomeCategories).map(([cat, amount]) => (
+                    <div key={cat} className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">{cat}</span>
+                      <span className="font-semibold text-foreground">{formatIndianCurrency(amount)}</span>
+                    </div>
+                  ))}
+                  {Object.keys(incomeExpenseSummary.incomeCategories).length === 0 && (
+                    <p className="text-xs text-muted-foreground italic py-2 text-center">No income records available.</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
+                <div className="flex items-center justify-between border-b border-border pb-3 mb-3">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <TrendingDown className="h-4 w-4 text-red-500" /> Expense Summary by Category
+                  </h3>
+                  <span className="text-sm font-bold text-red-500">{formatIndianCurrency(incomeExpenseSummary.totalExp)}</span>
+                </div>
+                <div className="space-y-2">
+                  {Object.entries(incomeExpenseSummary.expenseCategories).map(([cat, amount]) => (
+                    <div key={cat} className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">{cat}</span>
+                      <span className="font-semibold text-foreground">{formatIndianCurrency(amount)}</span>
+                    </div>
+                  ))}
+                  {Object.keys(incomeExpenseSummary.expenseCategories).length === 0 && (
+                    <p className="text-xs text-muted-foreground italic py-2 text-center">No expense records available.</p>
+                  )}
+                </div>
+              </div>
+            </div>
 
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
               {branchAwareStats.map((s) => (

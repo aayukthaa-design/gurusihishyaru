@@ -17,6 +17,7 @@ export interface Exam {
   createdAt: string;
   /** Set only on a "Primary Exam" (created for individually-selected students, not a batch). */
   studentIds?: string[];
+  branchId?: string;
 }
 
 function mapApiExam(row: any): Exam {
@@ -38,6 +39,7 @@ function mapApiExam(row: any): Exam {
     status: row.status || 'draft',
     createdAt: row.createdAt,
     studentIds,
+    branchId: row.branchId || undefined,
   };
 }
 
