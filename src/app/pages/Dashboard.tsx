@@ -196,13 +196,28 @@ export function Dashboard() {
     void loadSpecialClasses();
   }, []);
 
+  // Teacher-specific values — must be declared before effects that reference them.
+  // Derived from actual class-teacher assignments (classService), not
+  // user.assignedClassIds — the login response never populates that field, so
+  // every consumer reading it (this widget, exams filter, notifications
+  // filter, school exam schedules filter) was silently empty for every teacher.
+  const allClasses = useClasses();
+  const myClassRows = React.useMemo(() => {
+    if (!user?.id) return [];
+    return getClassesForTeacher(user.id, user.branchId);
+  }, [user?.id, user?.branchId, allClasses]);
+  const myClasses: string[] = React.useMemo(
+    () => Array.from(new Set(myClassRows.map((r) => r.className))),
+    [myClassRows]
+  );
+
   React.useEffect(() => {
     const loadStats = async () => {
       try {
         let url = `/api/whatsapp/stats`;
         if (isTeacher) {
           // user.assignedClassIds is never populated by the login response (see
-          // myClasses below) — using it here meant classNames was always empty,
+          // myClasses above) — using it here meant classNames was always empty,
           // and GET /api/whatsapp/stats short-circuits to all-zero stats
           // whenever classNames is empty. myClasses is the same real
           // batch-assignment list already used by every other teacher card on
@@ -223,21 +238,6 @@ export function Dashboard() {
     void loadStats();
   }, [branchFilter, isTeacher, user, myClasses]);
 
-
-  // Teacher-specific values — must be declared before effects that reference them.
-  // Derived from actual class-teacher assignments (classService), not
-  // user.assignedClassIds — the login response never populates that field, so
-  // every consumer reading it (this widget, exams filter, notifications
-  // filter, school exam schedules filter) was silently empty for every teacher.
-  const allClasses = useClasses();
-  const myClassRows = React.useMemo(() => {
-    if (!user?.id) return [];
-    return getClassesForTeacher(user.id, user.branchId);
-  }, [user?.id, user?.branchId, allClasses]);
-  const myClasses: string[] = React.useMemo(
-    () => Array.from(new Set(myClassRows.map((r) => r.className))),
-    [myClassRows]
-  );
   // First matching batch's board/timing for the "My Classes" card subtitle —
   // a teacher with two same-named batches on different boards is rare enough
   // that showing the first is fine for a dashboard summary card.
