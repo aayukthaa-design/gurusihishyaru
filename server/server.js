@@ -3059,13 +3059,15 @@ async function main() {
         if (!linkedIds.length) return res.json([]);
         const placeholders = linkedIds.map(() => '?').join(',');
         const children = await attachStudentBatches(await db.all(`SELECT * FROM students WHERE id IN (${placeholders})`, ...linkedIds));
-        // Every (className, batch) pair any linked child belongs to — their
-        // primary batch plus any additional ones (multi-batch aware, same as
-        // every other roster query in this file).
+        // Every (branchId, className, batch) triple any linked child belongs to
+        // — their primary batch plus any additional ones (multi-batch aware,
+        // same as every other roster query in this file). branchId is part of
+        // the key so a same-named class in another branch (every branch tends to
+        // have a "10th") can't leak that branch's exams in via a text-only match.
         const pairs = new Set();
         for (const c of children) {
-          pairs.add(`${c.className} ${c.batch || ''}`);
-          for (const b of c.batches || []) pairs.add(`${b.className} ${b.batch || ''}`);
+          pairs.add(`${c.branchId || ''} ${c.className} ${c.batch || ''}`);
+          for (const b of c.batches || []) pairs.add(`${b.branchId || c.branchId || ''} ${b.className} ${b.batch || ''}`);
         }
         const rows = await db.all('SELECT * FROM exams ORDER BY date ASC');
         const visible = rows.filter((e) => {
@@ -3075,7 +3077,7 @@ async function main() {
               if (Array.isArray(ids) && ids.some((id) => linkedIds.includes(id))) return true;
             } catch { /* fall through to batch match */ }
           }
-          return pairs.has(`${e.className} ${e.batch || ''}`);
+          return pairs.has(`${e.branchId || ''} ${e.className} ${e.batch || ''}`);
         });
         return res.json(visible);
       }

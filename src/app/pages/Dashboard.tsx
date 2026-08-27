@@ -618,7 +618,7 @@ export function Dashboard() {
       if (ex.studentIds?.length) return ex.teacherId === user?.id;
       return myClasses.includes(ex.className ?? '');
     });
-    return relevant.slice(0, 5);
+    return relevant;
   }, [scopedExams, myClasses, todayISO, user?.id]);
   const mySubmissionsToday = scopedSubmissions.filter((s) => s.teacherId === user?.id && s.date === todayISO);
   const submittedClasses = mySubmissionsToday.map((s) => s.className);
