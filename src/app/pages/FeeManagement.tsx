@@ -15,13 +15,14 @@ import {
   createSingleFeeRecordAPI,
   updateFeeRecordAPI,
   recordFeePaymentAPI,
+  deleteFeeRecordAPI,
   fetchFeeStats,
   fetchFeePayments,
   FeeStats,
   FeeRecord,
   FeePayment,
 } from '../lib/feeService';
-import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus, Pencil, CalendarClock, History } from 'lucide-react';
+import { Search, CreditCard, ChevronRight, CheckCircle2, Clock, AlertCircle, Loader2, Settings2, Plus, UserPlus, Pencil, CalendarClock, History, Trash2 } from 'lucide-react';
 import { useClasses, getClassesForBranch } from '../lib/classService';
 import { WhatsAppButton } from '../components/WhatsAppButton';
 import { composeWhatsAppMessage } from '../lib/whatsapp';
@@ -465,6 +466,19 @@ export function FeeManagement() {
       setHistoryPayments(payments);
     } finally {
       setIsLoadingHistory(false);
+    }
+  }
+
+  async function handleDeleteRecord(record: FeeRecord) {
+    if (!confirm(`Delete this fee entry for ${record.studentName}? This also removes its payment history and cannot be undone.`)) return;
+    setError(null);
+    try {
+      await deleteFeeRecordAPI(record.id, user);
+      const statsResult = await fetchFeeStats(user);
+      setStats(statsResult);
+      setSuccess('Fee entry deleted.');
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete fee entry.');
     }
   }
 
@@ -1249,6 +1263,15 @@ export function FeeManagement() {
                         className="flex items-center gap-1 rounded-xl border border-border px-2.5 py-2 text-xs font-medium text-muted-foreground transition-all hover:bg-secondary hover:text-foreground"
                       >
                         <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {isAccountantOrAdmin && (
+                      <button
+                        onClick={() => handleDeleteRecord(r)}
+                        title="Delete this fee entry"
+                        className="flex items-center gap-1 rounded-xl border border-border px-2.5 py-2 text-xs font-medium text-red-500 transition-all hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     )}
                     {isAccountantOrAdmin && r.status !== 'Paid' && (

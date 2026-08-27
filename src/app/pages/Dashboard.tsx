@@ -1309,7 +1309,7 @@ export function Dashboard() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="rounded-2xl border border-border bg-card p-5">
                 <h3 className="text-sm font-semibold mb-2">Upcoming Exams</h3>
-                <div className="space-y-2 text-sm text-muted-foreground">
+                <div className="space-y-2 text-sm text-muted-foreground max-h-[280px] overflow-y-auto pr-1">
                   {myExams.length === 0 && <div className="text-sm text-muted-foreground">No upcoming exams</div>}
                   {myExams.map((exam) => (
                     <div key={exam.id} className="flex items-center justify-between">

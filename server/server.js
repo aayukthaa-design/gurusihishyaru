@@ -8068,6 +8068,26 @@ async function main() {
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });
 
+  // Delete a fee record outright — no approval workflow (that gate only covers
+  // amount changes, see POST/PUT above); admin/accountant/super_admin can all
+  // remove a bad or duplicate entry directly. Its payment history is deleted
+  // with it since fee_payments rows are meaningless once the record they paid
+  // toward is gone.
+  app.delete('/api/fees/records/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await db.get('SELECT * FROM fee_records WHERE id = ?', req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Fee record not found' });
+      if (!req.user.roles.includes('super_admin')) {
+        const branchId = resolveBranchId(req, existing.branchId);
+        if (branchId && existing.branchId !== branchId) return res.status(403).json({ error: 'Forbidden' });
+      }
+      await db.run('DELETE FROM fee_payments WHERE feeRecordId = ?', req.params.id);
+      await db.run('DELETE FROM fee_records WHERE id = ?', req.params.id);
+      res.json({ success: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
+  });
+
   // Branch-scoped list of fee approval requests — Admin/accountant see only
   // their own branch's requests, Super Admin sees every branch (matches
   // resolveBranchId's existing super_admin passthrough used everywhere else).
