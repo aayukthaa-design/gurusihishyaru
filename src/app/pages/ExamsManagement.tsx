@@ -54,8 +54,8 @@ function ExamsList() {
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       <div className="rounded-xl border border-border bg-card p-6 transition-colors duration-200">
         <h3 className="mb-4 text-lg font-semibold text-card-foreground">Upcoming Exams</h3>
-        <div className="space-y-3">
-          {exams.slice(0,6).map((exam) => (
+        <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+          {exams.map((exam) => (
             <div key={exam.id} className="flex items-center justify-between rounded-lg border border-border bg-secondary p-4">
               <div>
                 <p className="font-medium text-card-foreground">{exam.name} — {exam.subject}</p>
