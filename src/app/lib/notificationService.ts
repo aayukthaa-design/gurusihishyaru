@@ -2,6 +2,7 @@ import { PDFTemplateService } from './pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import { createStore, useStoreValue } from './store';
 import { apiFetch } from './apiClient';
+import { getStudentsByIds } from './studentService';
 
 const API_BASE = '';
 const STORAGE_KEY = 'guru-shishyaru-notifications';
@@ -546,9 +547,14 @@ export function getVisibleNotificationsForUser(
       // Mirrors the server-side matchesUserScope fix: a notification naming
       // specific studentIds (e.g. "Fee Update") is only for those students'
       // own parent(s) — never falls through to the branch-wide 'parent'
-      // broadcast just because roles also includes 'parent'.
+      // broadcast just because roles also includes 'parent'. Same for
+      // classNames (e.g. homework) — it must match the class this parent's
+      // own child is actually in, not just "this parent has some child".
       if (notification.studentIds?.length) return false;
-      if (notification.classNames?.length && (user.linkedStudentIds?.length ?? 0) > 0) return true;
+      if (notification.classNames?.length) {
+        const childClassNames = getStudentsByIds(user.linkedStudentIds ?? []).map((s) => s.className);
+        return notification.classNames.some((className) => childClassNames.includes(className));
+      }
       if (explicitRoles.includes('parent')) return true;
       return false;
     }

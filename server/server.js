@@ -650,7 +650,14 @@ function matchesUserScope(notification, user) {
     // linked children already happened above; no match here means it's some
     // other student's notice.
     if (notification.studentIds?.length) return false;
-    if (notification.classNames?.length && (user.linkedStudentIds?.length ?? 0) > 0) return true;
+    // Same leak, same shape as the studentIds guard above: a class-targeted
+    // notice (e.g. homework) also carries roles=['parent'], so it must never
+    // fall through to the branch-wide broadcast just because that role is
+    // listed — only an actual class match, or the total absence of any class
+    // targeting, should let it through.
+    if (notification.classNames?.length) {
+      return notification.classNames.some((className) => user.studentClassNames?.includes(className));
+    }
     if (roles.includes('parent') && (!notification.branchId || notification.branchId === user.branchId)) return true;
     return false;
   }
@@ -3972,9 +3979,27 @@ async function main() {
     };
   }
 
-  function canMutateNotification(req, notif) {
+  // A parent's linkedStudentIds alone isn't enough to scope a class-targeted
+  // notification (e.g. homework) to them — without checking which class their
+  // own child is actually in, matchesUserScope let any notification carrying
+  // classNames reach every parent who has any linked student at all. This
+  // fetches the parent's children's real classNames once per request so
+  // matchesUserScope can check for an actual overlap.
+  async function resolveNotificationUser(req) {
+    const user = deriveNotificationUser(req);
+    if (user.role === 'parent' && user.linkedStudentIds.length) {
+      const placeholders = user.linkedStudentIds.map(() => '?').join(',');
+      const rows = await db.all(`SELECT DISTINCT className FROM students WHERE id IN (${placeholders})`, ...user.linkedStudentIds);
+      user.studentClassNames = rows.map((r) => r.className);
+    } else {
+      user.studentClassNames = [];
+    }
+    return user;
+  }
+
+  async function canMutateNotification(req, notif) {
     if (req.user.roles.includes('super_admin')) return true;
-    return matchesUserScope(notif, deriveNotificationUser(req));
+    return matchesUserScope(notif, await resolveNotificationUser(req));
   }
 
   // ─── Compose audience resolution (server-authoritative) ───────────────────
@@ -4079,7 +4104,7 @@ async function main() {
       }
 
       const rows = await db.all('SELECT * FROM notifications ORDER BY createdAt DESC');
-      const user = deriveNotificationUser(req);
+      const user = await resolveNotificationUser(req);
       const mapped = rows.map(mapRowToNotification);
       let scoped = mapped.filter((notif) => matchesUserScope(notif, user));
 
@@ -4277,7 +4302,7 @@ async function main() {
     try {
       const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
       if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
-      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+      if (!(await canMutateNotification(req, mapRowToNotification(existingRow)))) return res.status(403).json({ error: 'Forbidden' });
 
       const payload = req.body || {};
       const now = new Date().toISOString();
@@ -4325,7 +4350,7 @@ async function main() {
     try {
       const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
       if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
-      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+      if (!(await canMutateNotification(req, mapRowToNotification(existingRow)))) return res.status(403).json({ error: 'Forbidden' });
 
       const now = new Date().toISOString();
       const body = req.body || {};
@@ -4352,7 +4377,7 @@ async function main() {
     try {
       const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
       if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
-      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+      if (!(await canMutateNotification(req, mapRowToNotification(existingRow)))) return res.status(403).json({ error: 'Forbidden' });
 
       const now = new Date().toISOString();
       const body = req.body || {};
@@ -4371,7 +4396,7 @@ async function main() {
     try {
       const existingRow = await db.get('SELECT * FROM notifications WHERE id = ?', req.params.id);
       if (!existingRow) return res.status(404).json({ error: 'Notification not found' });
-      if (!canMutateNotification(req, mapRowToNotification(existingRow))) return res.status(403).json({ error: 'Forbidden' });
+      if (!(await canMutateNotification(req, mapRowToNotification(existingRow)))) return res.status(403).json({ error: 'Forbidden' });
 
       const stmt = await db.prepare(`UPDATE notifications SET status='unread', read=0, deletedAt=NULL, deletedBy=NULL, deletedByBranch=NULL WHERE id=?`);
       await stmt.run(req.params.id);
@@ -4390,7 +4415,11 @@ async function main() {
       if (!requestedIds.length) return res.json([]);
       const candidatePlaceholders = requestedIds.map(() => '?').join(',');
       const candidateRows = await db.all(`SELECT * FROM notifications WHERE id IN (${candidatePlaceholders})`, ...requestedIds);
-      const ids = candidateRows.filter((r) => canMutateNotification(req, mapRowToNotification(r))).map((r) => r.id);
+      const isSuperAdmin = req.user.roles.includes('super_admin');
+      const scopeUser = isSuperAdmin ? null : await resolveNotificationUser(req);
+      const ids = candidateRows
+        .filter((r) => isSuperAdmin || matchesUserScope(mapRowToNotification(r), scopeUser))
+        .map((r) => r.id);
       if (!ids.length) return res.json([]);
       const now = new Date().toISOString();
       const placeholders = ids.map(() => '?').join(',');
@@ -4421,7 +4450,11 @@ async function main() {
       if (!requestedIds.length) return res.json([]);
       const candidatePlaceholders = requestedIds.map(() => '?').join(',');
       const candidateRows = await db.all(`SELECT * FROM notifications WHERE id IN (${candidatePlaceholders})`, ...requestedIds);
-      const ids = candidateRows.filter((r) => canMutateNotification(req, mapRowToNotification(r))).map((r) => r.id);
+      const isSuperAdmin = req.user.roles.includes('super_admin');
+      const scopeUser = isSuperAdmin ? null : await resolveNotificationUser(req);
+      const ids = candidateRows
+        .filter((r) => isSuperAdmin || matchesUserScope(mapRowToNotification(r), scopeUser))
+        .map((r) => r.id);
       if (!ids.length) return res.json([]);
       const now = new Date().toISOString();
       const placeholders = ids.map(() => '?').join(',');
