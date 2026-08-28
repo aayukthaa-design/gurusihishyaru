@@ -586,7 +586,7 @@ export function FeeManagement() {
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
                     <span className="font-medium text-foreground">Discount (%)</span>
-                    <input type="number" min={0} max={100} value={structureForm.discountPercent} onChange={(e) => setStructureForm((f) => ({ ...f, discountPercent: e.target.value }))}
+                    <input type="number" min={0} max={100} step="0.01" value={structureForm.discountPercent} onChange={(e) => setStructureForm((f) => ({ ...f, discountPercent: e.target.value }))}
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
@@ -724,7 +724,7 @@ export function FeeManagement() {
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
                     <span className="font-medium text-foreground">Discount (%)</span>
-                    <input type="number" min={0} max={100} value={monthlyForm.discountPercent} onChange={(e) => setMonthlyForm((f) => ({ ...f, discountPercent: e.target.value }))}
+                    <input type="number" min={0} max={100} step="0.01" value={monthlyForm.discountPercent} onChange={(e) => setMonthlyForm((f) => ({ ...f, discountPercent: e.target.value }))}
                       className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                   </label>
                   <label className="flex flex-col gap-1.5 text-sm">
@@ -835,7 +835,7 @@ export function FeeManagement() {
                     </label>
                     <label className="flex flex-col gap-1.5 text-sm">
                       <span className="font-medium text-foreground">Discount (%)</span>
-                      <input type="number" min={0} max={100} value={individualForm.discountPercent} onChange={(e) => setIndividualForm((f) => ({ ...f, discountPercent: e.target.value }))}
+                      <input type="number" min={0} max={100} step="0.01" value={individualForm.discountPercent} onChange={(e) => setIndividualForm((f) => ({ ...f, discountPercent: e.target.value }))}
                         className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
                     </label>
                     <label className="flex flex-col gap-1.5 text-sm">
@@ -1085,6 +1085,7 @@ export function FeeManagement() {
                   type="number"
                   min={0}
                   max={100}
+                  step="0.01"
                   value={editDiscountPercent}
                   onChange={(e) => setEditDiscountPercent(e.target.value)}
                   className="w-full rounded-xl border border-input bg-input-background px-4 py-2.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
