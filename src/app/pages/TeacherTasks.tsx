@@ -9,7 +9,7 @@ import { Textarea } from '../components/ui/textarea';
 import { useBranches } from '../lib/branchService';
 import { useAuth } from '../auth/AuthContext';
 import { getTeachersForBranch } from '../lib/teacherService';
-import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, approveTaskAsAdmin, confirmTaskCompletion, refreshTasks, TaskRecord } from '../lib/taskService';
+import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, approveTaskAsAdmin, refreshTasks, TaskRecord } from '../lib/taskService';
 
 const STATUS_LABELS: Record<TaskRecord['status'], string> = {
   pending: 'Pending',
@@ -138,11 +138,9 @@ export function TeacherTasks() {
                 ) : (
                   <span className="text-xs text-muted-foreground">{task.progress ?? 0}% complete</span>
                 )}
-                {(user?.role === 'admin' || user?.role === 'super_admin') && task.status === 'awaiting_admin_review' && (
-                  <Button size="sm" onClick={() => approveTaskAsAdmin(task.id)}>Approve</Button>
-                )}
-                {user?.role === 'super_admin' && task.status === 'awaiting_super_admin_review' && (
-                  <Button size="sm" onClick={() => confirmTaskCompletion(task.id)}>Confirm Completion</Button>
+                {(user?.role === 'admin' || user?.role === 'super_admin') &&
+                  (task.status === 'awaiting_admin_review' || task.status === 'awaiting_super_admin_review') && (
+                  <Button size="sm" onClick={() => approveTaskAsAdmin(task.id)}>Approve &amp; Complete</Button>
                 )}
                 {task.attachmentUrl && <a href={task.attachmentUrl} className="ml-auto inline-flex items-center text-sm text-primary"><Paperclip className="mr-2 h-4 w-4"/>Attachment</a>}
               </div>

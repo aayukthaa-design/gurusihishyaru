@@ -157,30 +157,14 @@ export function setTaskProgress(taskId: string, progress: number, remarks?: stri
   });
 }
 
-// Admin sign-off: hands the task to super_admin for final confirmation.
+// Admin / super_admin approval — finishes the task in one step.
 export function approveTaskAsAdmin(taskId: string) {
-  void updateTask(taskId, { status: 'awaiting_super_admin_review' }).then(() => {
-    const task = taskState.find((t) => t.id === taskId);
-    if (task) {
-      addNotification({
-        title: 'Task Approved by Admin',
-        message: `${task.title} was reviewed by an admin — awaiting super admin confirmation`,
-        type: 'info',
-        roles: ['super_admin'],
-        branchId: task.branchId ?? null,
-      });
-    }
-  });
-}
-
-// Super admin sign-off: final confirmation, task is now fully completed.
-export function confirmTaskCompletion(taskId: string) {
   void updateTask(taskId, { status: 'completed' }).then(() => {
     const task = taskState.find((t) => t.id === taskId);
     if (task && task.teacherId) {
       addNotification({
         title: 'Task Completed',
-        message: `${task.title} was confirmed complete by a super admin`,
+        message: `${task.title} was approved and marked complete`,
         type: 'success',
         teacherIds: [task.teacherId],
         roles: ['teacher'],
@@ -217,6 +201,5 @@ export default {
   assignTask,
   setTaskProgress,
   approveTaskAsAdmin,
-  confirmTaskCompletion,
   exportTasksCSV,
 };

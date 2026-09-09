@@ -3677,11 +3677,12 @@ async function main() {
     }
   });
 
-  // Task completion is a 3-stage sign-off: the assigned teacher marks their
-  // work done (-> awaiting_admin_review), an admin reviews and confirms
-  // (-> awaiting_super_admin_review), and a super_admin gives the final
-  // confirmation (-> completed). Each role can only push the status forward
-  // one stage — nobody can jump straight to "completed".
+  // Task completion is a 2-stage sign-off: the assigned teacher marks their
+  // work done (-> awaiting_admin_review), then an admin or super_admin approves
+  // it (-> completed). A teacher can never jump straight to "completed".
+  // (The old awaiting_super_admin_review middle stage was dropped — an admin's
+  // approval now finishes the task; any legacy row still in that state is also
+  // completed by the same approval path.)
   app.put('/api/teacher-tasks/:id', async (req, res) => {
     const roles = req.user.roles || [];
     const isAdmin = roles.some((r) => ['admin', 'super_admin'].includes(r));
@@ -3703,11 +3704,11 @@ async function main() {
           `UPDATE teacher_tasks SET status=?, progress=?, completionRemarks=?, updatedAt=? WHERE id=?`,
           status, progress, body.completionRemarks ?? existing.completionRemarks, now, req.params.id
         );
-      } else if (body.status === 'awaiting_super_admin_review' && existing.status === 'awaiting_admin_review') {
-        // Admin sign-off step.
-        await db.run(`UPDATE teacher_tasks SET status=?, updatedAt=? WHERE id=?`, 'awaiting_super_admin_review', now, req.params.id);
-      } else if (body.status === 'completed' && existing.status === 'awaiting_super_admin_review' && roles.includes('super_admin')) {
-        // Super admin final sign-off step.
+      } else if (
+        ['completed', 'awaiting_super_admin_review'].includes(body.status) &&
+        ['awaiting_admin_review', 'awaiting_super_admin_review'].includes(existing.status)
+      ) {
+        // Admin / super_admin approval — finishes the task in one step.
         await db.run(`UPDATE teacher_tasks SET status=?, updatedAt=? WHERE id=?`, 'completed', now, req.params.id);
       } else {
         // Regular admin/super_admin edit of task details (not a sign-off action).
@@ -5079,6 +5080,10 @@ async function main() {
       if (conditions.length > 0) {
         query += ' WHERE ' + conditions.join(' AND ');
       }
+      // Newest first — the Student Management list only renders the top slice,
+      // so a just-added student must land at the top or it looks like the add
+      // silently failed.
+      query += ' ORDER BY rowid DESC';
 
       const rows = await db.all(query, ...params);
       res.json(await attachStudentBatches(rows));

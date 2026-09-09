@@ -80,7 +80,11 @@ function StudentForm({
   branchOptions: Array<{ id: string; name: string }>;
   defaultBranchId?: string;
 }) {
-  const [form, setForm] = useState(initial);
+  // Seed the branch from the page's active branch/filter so the value shown in
+  // the "Assigned Branch" dropdown is actually submitted — without this the
+  // select displays the default but form.branchId stays '', and a student added
+  // from a sub-branch view silently lands in the Main branch.
+  const [form, setForm] = useState({ ...initial, branchId: initial.branchId || defaultBranchId || '' });
   const [saving, setSaving] = useState(false);
   const set = (k: keyof typeof form, v: string) => setForm((p) => ({ ...p, [k]: v }));
 
