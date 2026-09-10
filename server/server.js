@@ -2239,6 +2239,11 @@ async function initDb() {
 async function main() {
   const app = express();
 
+  // nginx is the only proxy in front of this app (same host), so trust exactly
+  // one hop — this lets express-rate-limit read the real client IP from
+  // X-Forwarded-For instead of keying every user by nginx's address.
+  app.set('trust proxy', 1);
+
   const corsOrigins = (process.env.CORS_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean);
   if (IS_PRODUCTION && corsOrigins.length === 0) {
     console.warn('WARNING: CORS_ORIGIN is not set in production — cross-origin requests will be rejected by default. Set CORS_ORIGIN to a comma-separated list of your frontend URL(s).');
