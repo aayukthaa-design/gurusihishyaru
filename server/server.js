@@ -2871,9 +2871,11 @@ async function main() {
 
   app.get('/api/teachers', async (req, res) => {
     // Includes salary and DOB/address from teacher_profiles — restricted to
-    // admin/super_admin, not any authenticated user (previously any teacher could
-    // pull every coworker's pay and home address via this endpoint).
-    if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
+    // admin/super_admin/accountant, not any authenticated user (previously any
+    // teacher could pull every coworker's pay and home address via this
+    // endpoint). The accountant needs the roster + pay fields to run payroll on
+    // the Accountant Portal's Teacher Salaries tab.
+    if (!req.user.roles.some((r) => ['super_admin', 'admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = `${TEACHER_JOIN_SELECT} WHERE u.roles LIKE '%teacher%'`;

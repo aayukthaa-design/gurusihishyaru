@@ -1809,7 +1809,25 @@ export function AccountantPortal() {
                       </thead>
                       <tbody className="divide-y divide-border">
                         {salaryRows.map(({ teacher, record }) => {
-                          if (!record) return null;
+                          if (!record) {
+                            // Teacher exists but no salary draft yet for this month — still
+                            // show the row so payroll can see who's outstanding.
+                            return (
+                              <tr key={teacher.id} className="hover:bg-secondary/10 transition-colors">
+                                <td className="px-4 py-3 font-medium text-foreground">{teacher.firstName} {teacher.lastName}</td>
+                                <td className="px-4 py-3 font-mono text-xs text-foreground">{teacher.id}</td>
+                                <td className="px-4 py-3 text-muted-foreground">{getBranchName(teacher.branchId) || '—'}</td>
+                                <td className="px-4 py-3 text-muted-foreground">{salaryMonth}</td>
+                                <td className="px-4 py-3 text-right text-muted-foreground">—</td>
+                                <td className="px-4 py-3 text-right text-muted-foreground">—</td>
+                                <td className="px-4 py-3 text-right text-muted-foreground">—</td>
+                                <td className="px-4 py-3 text-left">
+                                  <span className="inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">No draft</span>
+                                </td>
+                                <td className="px-4 py-3 text-xs text-muted-foreground">Set classes &amp; salary per class on the Teacher Attendance page.</td>
+                              </tr>
+                            );
+                          }
                           const canMarkPaid = record.status === 'Draft';
                           const canPreview = record.classesConducted > 0 && record.salaryPerClass > 0 || record.salaryType === 'Monthly Fixed';
                           const branchName = getBranchName(teacher.branchId) || '—';

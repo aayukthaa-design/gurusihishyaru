@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useBranches } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
-import { Receipt, TrendingDown, DollarSign, CreditCard, Search, Plus, Loader2 } from 'lucide-react';
+import { Receipt, TrendingDown, DollarSign, CreditCard, Search, Plus, Loader2, Pencil, Trash2 } from 'lucide-react';
 
 interface LedgerExpense {
   id: number;
@@ -38,6 +38,40 @@ export function ExpenseManagement() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [isSaving, setIsSaving] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+
+  function resetForm() {
+    setForm(EMPTY_FORM);
+    setEditingId(null);
+    setShowAddForm(false);
+  }
+
+  function openEdit(expense: LedgerExpense) {
+    setForm({
+      category: expense.category,
+      description: expense.description,
+      amount: String(expense.amount),
+      date: expense.date.slice(0, 10),
+      paymentMode: expense.paymentMode,
+      referenceNumber: expense.referenceNumber || '',
+    });
+    setEditingId(expense.id);
+    setShowAddForm(true);
+  }
+
+  async function handleDeleteExpense(expense: LedgerExpense) {
+    if (!window.confirm(`Delete this expense (${expense.category} — ${formatIndianCurrency(expense.amount)})? This cannot be undone.`)) return;
+    try {
+      const res = await apiFetch(`/api/ledger/${expense.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to delete expense');
+      }
+      loadExpenses();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete expense.');
+    }
+  }
 
   function loadExpenses() {
     setIsLoading(true);
@@ -75,28 +109,27 @@ export function ExpenseManagement() {
     setIsSaving(true);
     setError(null);
     try {
-      const res = await apiFetch('/api/ledger', {
-        method: 'POST',
-        body: {
-          date: form.date,
-          type: 'Expense',
-          category: form.category,
-          description: form.description,
-          amount: Number(form.amount),
-          paymentMode: form.paymentMode,
-          referenceNumber: form.referenceNumber,
-          enteredBy: user?.name || 'Accountant',
-        },
-      });
+      const body = {
+        date: form.date,
+        type: 'Expense',
+        category: form.category,
+        description: form.description,
+        amount: Number(form.amount),
+        paymentMode: form.paymentMode,
+        referenceNumber: form.referenceNumber,
+        enteredBy: user?.name || 'Accountant',
+      };
+      const res = editingId
+        ? await apiFetch(`/api/ledger/${editingId}`, { method: 'PUT', body })
+        : await apiFetch('/api/ledger', { method: 'POST', body });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Failed to add expense');
+        throw new Error(err.error || `Failed to ${editingId ? 'update' : 'add'} expense`);
       }
-      setForm(EMPTY_FORM);
-      setShowAddForm(false);
+      resetForm();
       loadExpenses();
     } catch (err: any) {
-      setError(err.message || 'Failed to add expense.');
+      setError(err.message || `Failed to ${editingId ? 'update' : 'add'} expense.`);
     } finally {
       setIsSaving(false);
     }
@@ -109,6 +142,19 @@ export function ExpenseManagement() {
     { header: 'Amount', accessor: (expense: LedgerExpense) => formatIndianCurrency(expense.amount) },
     { header: 'Date', accessor: 'date' as const },
     { header: 'Payment Mode', accessor: 'paymentMode' as const },
+    ...(canManage ? [{
+      header: '',
+      accessor: (expense: LedgerExpense) => (
+        <div className="flex gap-1">
+          <button onClick={() => openEdit(expense)} className="rounded-lg p-1.5 hover:bg-secondary text-muted-foreground" title="Edit">
+            <Pencil className="h-4 w-4" />
+          </button>
+          <button onClick={() => handleDeleteExpense(expense)} className="rounded-lg p-1.5 hover:bg-secondary text-red-500" title="Delete">
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    }] : []),
   ];
 
   return (
@@ -134,8 +180,8 @@ export function ExpenseManagement() {
             </select>
           )}
           {canManage && (
-            <button onClick={() => setShowAddForm((v) => !v)} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90">
-              <Plus className="h-4 w-4" /> Add Expense
+            <button onClick={() => (showAddForm ? resetForm() : setShowAddForm(true))} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90">
+              <Plus className="h-4 w-4" /> {showAddForm ? 'Close' : 'Add Expense'}
             </button>
           )}
         </div>
@@ -176,10 +222,13 @@ export function ExpenseManagement() {
               <input value={form.referenceNumber} onChange={(e) => setForm((f) => ({ ...f, referenceNumber: e.target.value }))}
                 className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
             </label>
-            <div className="flex items-end">
+            <div className="flex items-end gap-2">
               <button type="submit" disabled={isSaving} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">
                 {isSaving && <Loader2 className="h-4 w-4 animate-spin" />}
-                Save Expense
+                {editingId ? 'Update Expense' : 'Save Expense'}
+              </button>
+              <button type="button" onClick={resetForm} className="rounded-xl border border-border px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary">
+                Cancel
               </button>
             </div>
           </form>

@@ -106,14 +106,17 @@ export function Attendance() {
     loadRecentAttendance();
   }, [branchFilter]);
 
-  // Fetch students for selected class, board and branch
+  // Fetch students for selected class, board and branch. Board is optional —
+  // most batches are created without one, and gating the roster on it made
+  // those batches show an empty attendance sheet even with students enrolled.
   useEffect(() => {
-    if (!selectedClass || !selectedBoard) {
+    if (!selectedClass) {
       setStudents([]);
       return;
     }
     setLoading(true);
-    const url = `/api/students?className=${encodeURIComponent(selectedClass)}&batch=${encodeURIComponent(selectedBoard)}` +
+    const url = `/api/students?className=${encodeURIComponent(selectedClass)}` +
+                (selectedBoard ? `&batch=${encodeURIComponent(selectedBoard)}` : '') +
                 (branchFilter ? `&branchId=${encodeURIComponent(branchFilter)}` : '');
 
     apiFetch(url)
@@ -418,12 +421,12 @@ export function Attendance() {
         </div>
 
         {/* ── Step 2: Mark Attendance ── */}
-        {selectedClass && selectedBoard && (
+        {selectedClass && (
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold text-foreground">
                 <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-                Mark Attendance — {selectedClass} ({selectedBoard})
+                Mark Attendance — {selectedClass}{selectedBoard ? ` (${selectedBoard})` : ''}
               </h2>
               <div className="flex gap-2">
                 <button
@@ -494,7 +497,7 @@ export function Attendance() {
             {loading ? (
               <div className="text-center py-6 text-sm text-muted-foreground">Loading class student profiles...</div>
             ) : students.length === 0 ? (
-              <div className="text-center py-6 text-sm text-muted-foreground">No students enrolled in {selectedClass} ({selectedBoard}) for this branch.</div>
+              <div className="text-center py-6 text-sm text-muted-foreground">No students enrolled in {selectedClass}{selectedBoard ? ` (${selectedBoard})` : ''} for this branch.</div>
             ) : (
               <div className="space-y-2">
                 {students.map((s) => {

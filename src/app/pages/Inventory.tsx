@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useBranches } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
-import { Package, AlertTriangle, TrendingDown, Box, Search, Plus, Trash2, Loader2 } from 'lucide-react';
+import { Package, AlertTriangle, TrendingDown, Box, Search, Plus, Trash2, Pencil, Loader2 } from 'lucide-react';
 
 interface InventoryItem {
   id: number;
@@ -46,6 +46,27 @@ export function Inventory() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [isSaving, setIsSaving] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+
+  function resetForm() {
+    setForm(EMPTY_FORM);
+    setEditingId(null);
+    setShowAddForm(false);
+  }
+
+  function openEdit(item: InventoryItem) {
+    setForm({
+      itemName: item.itemName,
+      category: item.category,
+      quantity: String(item.quantity),
+      minStock: String(item.minStock ?? 0),
+      unit: item.unit || UNIT_OPTIONS[0],
+      purchaseCost: String(item.purchaseCost),
+      supplier: item.supplier || '',
+    });
+    setEditingId(item.id);
+    setShowAddForm(true);
+  }
 
   function loadInventory() {
     setIsLoading(true);
@@ -81,27 +102,26 @@ export function Inventory() {
     setIsSaving(true);
     setError(null);
     try {
-      const res = await apiFetch('/api/inventory', {
-        method: 'POST',
-        body: {
-          itemName: form.itemName,
-          category: form.category,
-          quantity: Number(form.quantity),
-          minStock: Number(form.minStock || 0),
-          unit: form.unit,
-          purchaseCost: Number(form.purchaseCost),
-          supplier: form.supplier,
-        },
-      });
+      const body = {
+        itemName: form.itemName,
+        category: form.category,
+        quantity: Number(form.quantity),
+        minStock: Number(form.minStock || 0),
+        unit: form.unit,
+        purchaseCost: Number(form.purchaseCost),
+        supplier: form.supplier,
+      };
+      const res = editingId
+        ? await apiFetch(`/api/inventory/${editingId}`, { method: 'PUT', body })
+        : await apiFetch('/api/inventory', { method: 'POST', body });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Failed to add item');
+        throw new Error(err.error || `Failed to ${editingId ? 'update' : 'add'} item`);
       }
-      setForm(EMPTY_FORM);
-      setShowAddForm(false);
+      resetForm();
       loadInventory();
     } catch (err: any) {
-      setError(err.message || 'Failed to add item.');
+      setError(err.message || `Failed to ${editingId ? 'update' : 'add'} item.`);
     } finally {
       setIsSaving(false);
     }
@@ -146,9 +166,14 @@ export function Inventory() {
     ...(canManage ? [{
       header: '',
       accessor: (item: InventoryItem) => (
-        <button onClick={() => handleDelete(item.id)} className="rounded-lg p-1.5 hover:bg-secondary text-red-500" title="Deactivate">
-          <Trash2 className="h-4 w-4" />
-        </button>
+        <div className="flex gap-1">
+          <button onClick={() => openEdit(item)} className="rounded-lg p-1.5 hover:bg-secondary text-muted-foreground" title="Edit">
+            <Pencil className="h-4 w-4" />
+          </button>
+          <button onClick={() => handleDelete(item.id)} className="rounded-lg p-1.5 hover:bg-secondary text-red-500" title="Deactivate">
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
       ),
     }] : []),
   ];
@@ -176,8 +201,8 @@ export function Inventory() {
             </select>
           )}
           {canManage && (
-            <button onClick={() => setShowAddForm((v) => !v)} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90">
-              <Plus className="h-4 w-4" /> Add Item
+            <button onClick={() => (showAddForm ? resetForm() : setShowAddForm(true))} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90">
+              <Plus className="h-4 w-4" /> {showAddForm ? 'Close' : 'Add Item'}
             </button>
           )}
         </div>
@@ -221,10 +246,13 @@ export function Inventory() {
               <input value={form.supplier} onChange={(e) => setForm((f) => ({ ...f, supplier: e.target.value }))}
                 className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
             </label>
-            <div className="flex items-end">
+            <div className="flex items-end gap-2">
               <button type="submit" disabled={isSaving} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">
                 {isSaving && <Loader2 className="h-4 w-4 animate-spin" />}
-                Save Item
+                {editingId ? 'Update Item' : 'Save Item'}
+              </button>
+              <button type="button" onClick={resetForm} className="rounded-xl border border-border px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary">
+                Cancel
               </button>
             </div>
           </form>
