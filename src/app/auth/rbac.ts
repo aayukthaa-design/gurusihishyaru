@@ -84,6 +84,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'attendance',       // Mark attendance for assigned classes
       'exam_marks',       // Create & enter marks for assigned classes
       'homework',         // Assign homework
+      'teacher_tasks',    // View + mark done the tasks an admin assigned them (create/assign stays admin-only)
       'student_management', // Manage student records from teacher portal
       'student_progress', // View student progress
       'notification_center', // Teacher-specific notifications

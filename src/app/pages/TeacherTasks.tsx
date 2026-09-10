@@ -21,6 +21,7 @@ const STATUS_LABELS: Record<TaskRecord['status'], string> = {
 
 export function TeacherTasks() {
   const { user } = useAuth();
+  const canManageTasks = user?.role === 'admin' || user?.role === 'super_admin';
   const branches = useBranches();
   const [tasks, setTasks] = React.useState<TaskRecord[]>(taskService.getTasks());
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -96,9 +97,11 @@ export function TeacherTasks() {
             <StatsCard title="In Progress" value={String(visibleStats.inProgress)} icon={Clock} iconColor="bg-chart-4" />
             <StatsCard title="Pending" value={String(visibleStats.pending)} change="Live" changeType="negative" icon={AlertCircle} iconColor="bg-destructive" />
           </div>
-          <div className="ml-4">
-            <Button onClick={() => setCreateOpen(true)}><Plus className="mr-2 h-4 w-4" />Create Task</Button>
-          </div>
+          {canManageTasks && (
+            <div className="ml-4">
+              <Button onClick={() => setCreateOpen(true)}><Plus className="mr-2 h-4 w-4" />Create Task</Button>
+            </div>
+          )}
         </div>
 
         <div className="space-y-4">
