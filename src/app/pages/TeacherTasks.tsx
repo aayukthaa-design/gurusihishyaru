@@ -134,6 +134,7 @@ export function TeacherTasks() {
                   <>
                     <input type="range" min={0} max={100} value={task.progress ?? 0} onChange={(e) => updateProgress(task.id, Number(e.target.value))} />
                     <span className="text-xs text-muted-foreground">{task.progress ?? 0}%</span>
+                    <Button size="sm" onClick={() => updateProgress(task.id, 100)}>Mark as Done</Button>
                   </>
                 ) : (
                   <span className="text-xs text-muted-foreground">{task.progress ?? 0}% complete</span>
