@@ -127,7 +127,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
   if (role === 'teacher') {
     return [
       { label: 'Overview',  items: allowed.filter((i) => (['dashboard', 'teacher_portal'] as Module[]).includes(i.module)) },
-      { label: 'Teaching',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'homework', 'materials', 'lesson_plan', 'timetable', 'special_classes', 'school_exam_schedules'] as Module[]).includes(i.module)) },
+      { label: 'Teaching',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'homework', 'teacher_tasks', 'materials', 'lesson_plan', 'timetable', 'special_classes', 'school_exam_schedules'] as Module[]).includes(i.module)) },
       { label: 'Students',  items: allowed.filter((i) => (['student_progress'] as Module[]).includes(i.module)) },
       { label: 'Reports',   items: allowed.filter((i) => (['daily_submission', 'notification_center'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);
