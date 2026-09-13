@@ -31,6 +31,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'lesson_plan',
       'holiday_calendar',
       'school_exam_schedules',   // same oversight visibility Admin already has
+      'casual_leave',            // review/approve teacher leave requests
     ],
     permissions: [
       'create',
@@ -123,6 +124,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'expense_management',
       'inventory',
       'reports_analytics',
+      'casual_leave',            // review/approve teacher leave requests
     ],
     permissions: ['create', 'read', 'update', 'delete', 'export'],
   },
@@ -147,7 +149,7 @@ export const MODULE_ROUTES: Record<Module, string[]> = {
   event_management:    ['/events'],
   notification_center: ['/notifications'],
   parent_portal:       ['/parent'],
-  teacher_portal:      ['/teacher', '/teacher/scoreboard', '/teacher/salary-slips'],
+  teacher_portal:      ['/teacher', '/teacher/scoreboard', '/teacher/salary-slips', '/teacher/casual-leave'],
   my_classes:          ['/my-classes'],
   daily_submission:    ['/daily-submission'],
   accountant_portal:   ['/accountant'],
@@ -166,6 +168,7 @@ export const MODULE_ROUTES: Record<Module, string[]> = {
   materials:           ['/materials'],
   lesson_plan:         ['/lesson-plan'],
   holiday_calendar:    ['/holidays'],
+  casual_leave:        ['/casual-leave'],
 };
 
 // ─── RBAC helpers ─────────────────────────────────────────────────────────────

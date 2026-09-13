@@ -26,6 +26,7 @@ import {
   Library,
   NotebookPen,
   CalendarOff,
+  CalendarClock,
   TrendingUp,
   type LucideIcon,
 } from 'lucide-react';
@@ -87,6 +88,7 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
   { name: 'System Settings',  href: '/settings',         icon: Settings,        module: 'system_settings' },
   { name: 'Backup',           href: '/backup',           icon: HardDrive,       module: 'backup_restore' },
   { name: 'Theme',            href: '/theme-settings',   icon: Palette,         module: 'theme_settings' },
+  { name: 'Casual Leave',     href: '/casual-leave',     icon: CalendarClock,   module: 'casual_leave' },
 
   // Portals
   { name: 'Finance',          href: '/accountant',       icon: Wallet,          module: 'accountant_portal' },
@@ -96,6 +98,7 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
   { name: 'My Dashboard',     href: '/teacher',          icon: LayoutDashboard, module: 'teacher_portal' },
   { name: 'Scoreboard',       href: '/teacher/scoreboard', icon: BarChart3,    module: 'teacher_portal' },
   { name: 'Salary Slips',     href: '/teacher/salary-slips', icon: FileText,    module: 'teacher_portal' },
+  { name: 'Request Leave',    href: '/teacher/casual-leave', icon: CalendarClock, module: 'teacher_portal' },
   { name: 'Special Classes',  href: '/special-classes',  icon: BookOpen,        module: 'special_classes' },
   { name: 'School Exam Schedule', href: '/school-exam-schedules', icon: FileText, module: 'school_exam_schedules' },
 ];
@@ -108,7 +111,7 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
   if (role === 'super_admin') {
     return [
       { label: 'Overview',          items: allowed.filter((i) => i.module === 'dashboard') },
-      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'branch_management', 'role_management', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar'] as Module[]).includes(i.module)) },
+      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'branch_management', 'role_management', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar', 'casual_leave'] as Module[]).includes(i.module)) },
       { label: 'Finance & Reports', items: allowed.filter((i) => (['expense_management', 'accountant_portal', 'reports_analytics', 'student_performance_analytics'] as Module[]).includes(i.module)) },
       { label: 'System',            items: allowed.filter((i) => (['notification_center', 'system_settings', 'backup_restore', 'theme_settings'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);

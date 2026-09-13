@@ -35,6 +35,10 @@ export function TeacherAttendance() {
   const teachers = useTeachers();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const isReadOnly = user?.role === 'accountant' || user?.role === 'teacher';
+  // Payroll (Payslip) data is super_admin/accountant only — admin can still
+  // mark day-to-day attendance above (isAdminOrSuper), just not touch salary.
+  const canViewPayroll = user?.role === 'super_admin' || user?.role === 'accountant';
+  const canManageSalary = user?.role === 'super_admin';
 
   const [attendanceDate, setAttendanceDate] = useState(TODAY_ISO);
   const [salaryMonth, setSalaryMonth] = useState(TODAY_ISO.slice(0, 7));
@@ -96,6 +100,7 @@ export function TeacherAttendance() {
   }, [allowedTeachers, attendanceDate, isAdminOrSuper, monthAttendance]);
 
   useEffect(() => {
+    if (!canViewPayroll) return;
     const teacher = allowedTeachers.find((item) => item.id === salaryTeacherId);
     if (!teacher) {
       setSalaryRecord(null);
@@ -120,7 +125,7 @@ export function TeacherAttendance() {
       setSalarySaved(false);
     })();
     return () => { cancelled = true; };
-  }, [allowedTeachers, salaryTeacherId, salaryMonth]);
+  }, [allowedTeachers, salaryTeacherId, salaryMonth, canViewPayroll]);
 
   const filteredTeachers = useMemo(() => {
     return allowedTeachers.filter((teacher) => {
@@ -214,8 +219,8 @@ export function TeacherAttendance() {
   const salaryLocked = salaryRecord?.isLocked ?? false;
 
   const handleSaveSalaryPerClass = async () => {
-    if (!isAdminOrSuper || !selectedSalaryTeacher) {
-      alert('Only Admin and Super Admin can save salary settings.');
+    if (!canManageSalary || !selectedSalaryTeacher) {
+      alert('Only Super Admin can save salary settings.');
       return;
     }
 
@@ -401,6 +406,7 @@ export function TeacherAttendance() {
           )}
         </div>
 
+        {canViewPayroll && (
         <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
           <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
@@ -468,7 +474,7 @@ export function TeacherAttendance() {
                 min={0}
                 value={classesConducted}
                 onChange={(event) => setClassesConducted(Number(event.target.value))}
-                disabled={salaryLocked || !isAdminOrSuper}
+                disabled={salaryLocked || !canManageSalary}
                 className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
               />
             </div>
@@ -479,7 +485,7 @@ export function TeacherAttendance() {
                 min={0}
                 value={salaryPerClass}
                 onChange={(event) => setSalaryPerClass(Number(event.target.value))}
-                disabled={salaryLocked || !isAdminOrSuper}
+                disabled={salaryLocked || !canManageSalary}
                 className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
               />
             </div>
@@ -492,7 +498,7 @@ export function TeacherAttendance() {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <button type="button" onClick={handleSaveSalaryPerClass} disabled={!isAdminOrSuper || salaryLocked} className="rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button" onClick={handleSaveSalaryPerClass} disabled={!canManageSalary || salaryLocked} className="rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
               Save Salary Per Class
             </button>
             {salarySaved && (
@@ -507,6 +513,7 @@ export function TeacherAttendance() {
             )}
           </div>
         </div>
+        )}
 
         <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

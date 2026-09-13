@@ -2223,6 +2223,22 @@ async function initDb() {
       branchId TEXT,
       timestamp TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS casual_leave_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      teacherId TEXT NOT NULL,
+      teacherName TEXT,
+      branchId TEXT,
+      startDate TEXT NOT NULL,
+      endDate TEXT NOT NULL,
+      reason TEXT,
+      status TEXT DEFAULT 'Pending',
+      reviewedBy TEXT,
+      reviewedAt TEXT,
+      reviewRemarks TEXT,
+      createdAt TEXT,
+      updatedAt TEXT
+    );
   `);
 
   // Duplicate teacher-attendance entries: same reasoning as the `attendance`
@@ -7735,9 +7751,16 @@ async function main() {
   });
 
   // --- Salary / Payroll Endpoints ---
+  // Salary data is payroll-sensitive: only super_admin/accountant may browse
+  // it broadly. A teacher may only ever fetch their own records (their "My
+  // Salary Slips" self-service page) — admin/parent/other roles get nothing.
   app.get('/api/salary-records', async (req, res) => {
+    const roles = req.user.roles || [];
+    const isPayroll = roles.some((r) => ['super_admin', 'accountant'].includes(r));
+    if (!isPayroll && !roles.includes('teacher')) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { month, teacherId, status } = req.query;
+      const { month, status } = req.query;
+      const teacherId = isPayroll ? req.query.teacherId : req.user.sub;
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM salary_records WHERE 1=1';
       const params = [];
@@ -7755,6 +7778,7 @@ async function main() {
   });
 
   app.get('/api/salary-audit-log', async (req, res) => {
+    if (!req.user.roles.some((r) => ['super_admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { teacherId, month } = req.query;
       let query = 'SELECT * FROM salary_audit_log WHERE 1=1';
@@ -7781,7 +7805,7 @@ async function main() {
   // Creates or updates a Draft salary record — used by both the Teacher Attendance
   // page (saving classes/salary-per-class) and the Accountant Portal (Create Draft).
   app.post('/api/salary-records', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
       const b = req.body || {};
       if (!b.teacherId || !b.month) return res.status(400).json({ error: 'teacherId and month are required' });
@@ -7826,7 +7850,7 @@ async function main() {
   });
 
   app.post('/api/salary-records/:id/mark-paid', async (req, res) => {
-    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.user.roles.some((r) => ['accountant', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
       if (!record) return res.status(404).json({ error: 'Salary record not found' });
@@ -7880,6 +7904,85 @@ async function main() {
     }
   });
 
+  // --- Casual Leave Endpoints ---
+  // A teacher files a request for themselves; only super_admin/accountant can
+  // see the full queue and approve/reject — same payroll-adjacent access tier
+  // as salary records.
+  app.get('/api/casual-leaves', async (req, res) => {
+    const roles = req.user.roles || [];
+    const isReviewer = roles.some((r) => ['super_admin', 'accountant'].includes(r));
+    if (!isReviewer && !roles.includes('teacher')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { status } = req.query;
+      const teacherId = isReviewer ? req.query.teacherId : req.user.sub;
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = 'SELECT * FROM casual_leave_requests WHERE 1=1';
+      const params = [];
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
+      if (status) { query += ' AND status = ?'; params.push(status); }
+      query += ' ORDER BY createdAt DESC';
+      const rows = await db.all(query, ...params);
+      res.json(rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.post('/api/casual-leaves', async (req, res) => {
+    if (!req.user.roles.includes('teacher')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const b = req.body || {};
+      if (!b.startDate || !b.endDate) return res.status(400).json({ error: 'startDate and endDate are required' });
+      const now = new Date().toISOString();
+      const result = await db.run(
+        `INSERT INTO casual_leave_requests (teacherId, teacherName, branchId, startDate, endDate, reason, status, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, 'Pending', ?, ?)`,
+        req.user.sub, req.user.name, req.user.branchId || null, b.startDate, b.endDate, b.reason || '', now, now
+      );
+      const created = await db.get('SELECT * FROM casual_leave_requests WHERE id = ?', result.lastID);
+      res.status(201).json(created);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.patch('/api/casual-leaves/:id', async (req, res) => {
+    if (!req.user.roles.some((r) => ['super_admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM casual_leave_requests WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Leave request not found' });
+      const status = req.body?.status;
+      if (!['Approved', 'Rejected'].includes(status)) return res.status(400).json({ error: 'status must be Approved or Rejected' });
+      const now = new Date().toISOString();
+      await db.run(
+        `UPDATE casual_leave_requests SET status = ?, reviewedBy = ?, reviewedAt = ?, reviewRemarks = ?, updatedAt = ? WHERE id = ?`,
+        status, req.user.name, now, req.body?.reviewRemarks || '', now, req.params.id
+      );
+      const updated = await db.get('SELECT * FROM casual_leave_requests WHERE id = ?', req.params.id);
+      res.json(updated);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // A teacher may withdraw their own request while it's still awaiting review.
+  app.delete('/api/casual-leaves/:id', async (req, res) => {
+    try {
+      const record = await db.get('SELECT * FROM casual_leave_requests WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Leave request not found' });
+      if (record.teacherId !== req.user.sub) return res.status(403).json({ error: 'Forbidden' });
+      if (record.status !== 'Pending') return res.status(409).json({ error: 'Only a pending request can be withdrawn' });
+      await db.run('DELETE FROM casual_leave_requests WHERE id = ?', req.params.id);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
 
   // --- Fee Management Module Endpoints ---
   function feeRecordStatus(totalAmount, paidAmount, dueDate) {

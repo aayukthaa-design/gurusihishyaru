@@ -29,6 +29,8 @@ import { DailySubmission } from './pages/DailySubmission';
 import { ParentPortal } from './pages/ParentPortal';
 import { TeacherPortal } from './pages/TeacherPortal';
 import { TeacherSalarySlips } from './pages/TeacherSalarySlips';
+import { TeacherCasualLeave } from './pages/TeacherCasualLeave';
+import { CasualLeaveManagement } from './pages/CasualLeaveManagement';
 import { AccountantPortal } from './pages/AccountantPortal';
 import { UserManagement } from './pages/UserManagement';
 import { BranchManagement } from './pages/BranchManagement';
@@ -343,6 +345,22 @@ export const router = createBrowserRouter([
         element: (
           <Protected module="teacher_portal">
             <TeacherSalarySlips />
+          </Protected>
+        ),
+      },
+      {
+        path: 'teacher/casual-leave',
+        element: (
+          <Protected module="teacher_portal">
+            <TeacherCasualLeave />
+          </Protected>
+        ),
+      },
+      {
+        path: 'casual-leave',
+        element: (
+          <Protected module="casual_leave">
+            <CasualLeaveManagement />
           </Protected>
         ),
       },

@@ -51,7 +51,8 @@ export type Module =
   | 'school_exam_schedules'
   | 'materials'
   | 'lesson_plan'
-  | 'holiday_calendar';
+  | 'holiday_calendar'
+  | 'casual_leave';
 
 // ─── User Types ───────────────────────────────────────────────────────────────
 

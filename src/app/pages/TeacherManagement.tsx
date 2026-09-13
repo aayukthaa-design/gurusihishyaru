@@ -75,7 +75,7 @@ function TeacherForm({
     setSaving(false);
   };
 
-  const isSalaryEditable = (user?.role === 'admin' || user?.role === 'super_admin');
+  const isSalaryEditable = user?.role === 'super_admin';
 
   return (
     <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
@@ -196,6 +196,8 @@ function TeacherForm({
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
 function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () => void }) {
+  const { user } = useAuth();
+  const canSeeSalary = user?.role === 'super_admin';
   return (
     <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
       <div className="flex items-start justify-between mb-5">
@@ -233,11 +235,18 @@ function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () =>
           <p className="text-xs text-muted-foreground mb-1">Branch</p>
           <p className="text-sm font-semibold text-foreground">{getBranchName(teacher.branchId)}</p>
         </div>
-        <div className="rounded-xl border border-border bg-secondary/50 p-4">
-          <p className="text-xs text-muted-foreground mb-1">Salary Configuration</p>
-          <p className="text-sm font-semibold text-foreground">{teacher.salaryType} - ₹{teacher.salaryAmount}</p>
-          {teacher.department && <p className="text-xs text-muted-foreground mt-1">Department: {teacher.department}</p>}
-        </div>
+        {canSeeSalary ? (
+          <div className="rounded-xl border border-border bg-secondary/50 p-4">
+            <p className="text-xs text-muted-foreground mb-1">Salary Configuration</p>
+            <p className="text-sm font-semibold text-foreground">{teacher.salaryType} - ₹{teacher.salaryAmount}</p>
+            {teacher.department && <p className="text-xs text-muted-foreground mt-1">Department: {teacher.department}</p>}
+          </div>
+        ) : teacher.department && (
+          <div className="rounded-xl border border-border bg-secondary/50 p-4">
+            <p className="text-xs text-muted-foreground mb-1">Department</p>
+            <p className="text-sm font-semibold text-foreground">{teacher.department}</p>
+          </div>
+        )}
         <div className="rounded-xl border border-border bg-secondary/50 p-4">
           <p className="text-xs text-muted-foreground mb-1">Status</p>
           <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
