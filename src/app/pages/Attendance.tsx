@@ -5,13 +5,15 @@ import { useBranches, getBranchName } from '../lib/branchService';
 import { getStudentsForClass } from '../lib/studentService';
 import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceService';
 import { saveAttendanceAPI } from '../lib/attendanceService';
-import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, CalendarOff, PlaneTakeoff, Trash2 } from 'lucide-react';
+import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, CalendarOff, PlaneTakeoff, Trash2, FileDown, FileSpreadsheet } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 import { useHolidays, refreshHolidays, isHoliday, useStudentLeaves, refreshStudentLeaves, createStudentLeave, deleteStudentLeave, isOnLeave } from '../lib/holidayService';
 import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
+import { exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
 
 const TODAY = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const TODAY_ISO = new Date().toISOString().split('T')[0];
+const YESTERDAY_ISO = new Date(Date.now() - 86400000).toISOString().split('T')[0];
 
 export function Attendance() {
   const { user } = useAuth();
@@ -35,6 +37,15 @@ export function Attendance() {
   const [recentRecords, setRecentRecords] = useState<any[]>([]);
   const [showAllRecent, setShowAllRecent] = useState(false);
 
+  // Only super_admin can mark attendance for yesterday (e.g. catching up on a
+  // missed submission) — everyone else stays locked to today, as before.
+  const [markDate, setMarkDate] = useState(TODAY_ISO);
+  const isSuperAdmin = user?.role === 'super_admin';
+
+  // Monthly export for the selected batch
+  const [exportMonth, setExportMonth] = useState(TODAY_ISO.slice(0, 7));
+  const [exporting, setExporting] = useState(false);
+
   // Holidays + per-student leave
   const holidays = useHolidays();
   const leaves = useStudentLeaves();
@@ -50,11 +61,11 @@ export function Attendance() {
   }, [branchFilter]);
 
   useEffect(() => {
-    if (selectedClass) void refreshStudentLeaves({ branchId: branchFilter || undefined, date: TODAY_ISO });
-  }, [selectedClass, branchFilter]);
+    if (selectedClass) void refreshStudentLeaves({ branchId: branchFilter || undefined, date: markDate });
+  }, [selectedClass, branchFilter, markDate]);
 
-  const todaysHoliday = useMemo(() => isHoliday(holidays, TODAY_ISO, branchFilter || user?.branchId), [holidays, branchFilter, user?.branchId]);
-  const activeLeaves = useMemo(() => leaves.filter((l) => isOnLeave([l], l.studentId, TODAY_ISO)), [leaves]);
+  const todaysHoliday = useMemo(() => isHoliday(holidays, markDate, branchFilter || user?.branchId), [holidays, branchFilter, user?.branchId, markDate]);
+  const activeLeaves = useMemo(() => leaves.filter((l) => isOnLeave([l], l.studentId, markDate)), [leaves, markDate]);
 
   // WhatsApp Specific States
   const [whatsappStatus, setWhatsappStatus] = useState<Record<string, 'idle' | 'sending' | 'success' | 'failed'>>({});
@@ -137,12 +148,12 @@ export function Attendance() {
           setStudents(mapped);
 
           // Try to load existing attendance records (falls back to seeded attendance)
-          void fetchAttendanceRecords(selectedClass, TODAY_ISO).then((records) => {
+          void fetchAttendanceRecords(selectedClass, markDate).then((records) => {
             const map: Record<string, 'present' | 'absent' | 'leave'> = {};
             mapped.forEach((s: any) => {
               const r = Array.isArray(records) ? records.find((rec) => rec.studentId === s.id) : undefined;
               if (r) { map[s.id] = r.status; return; }
-              map[s.id] = isOnLeave(leaves, s.id, TODAY_ISO) ? 'leave' : 'present';
+              map[s.id] = isOnLeave(leaves, s.id, markDate) ? 'leave' : 'present';
             });
             setAttendance(map);
           });
@@ -161,7 +172,7 @@ export function Attendance() {
           }));
           setStudents(mapped);
           // Load any existing/fallback attendance records
-          void fetchAttendanceRecords(selectedClass, TODAY_ISO).then((records) => {
+          void fetchAttendanceRecords(selectedClass, markDate).then((records) => {
             if (Array.isArray(records) && records.length > 0) {
               const map: Record<string, 'present' | 'absent'> = {};
               mapped.forEach((s: any) => {
@@ -198,7 +209,7 @@ export function Attendance() {
         setSaved(false);
       })
       .finally(() => setLoading(false));
-  }, [selectedClass, selectedBoard, branchFilter]);
+  }, [selectedClass, selectedBoard, branchFilter, markDate]);
 
 
   const markAll = (status: 'present' | 'absent' | 'leave') => {
@@ -222,7 +233,7 @@ export function Attendance() {
     });
     setIsSavingLeave(false);
     if (created) {
-      if (leaveStart <= TODAY_ISO && leaveEnd >= TODAY_ISO) {
+      if (leaveStart <= markDate && leaveEnd >= markDate) {
         setAttendance((prev) => ({ ...prev, [leaveStudentId]: 'leave' }));
       }
       setShowLeaveForm(false);
@@ -237,13 +248,41 @@ export function Attendance() {
 
   const handleSave = async () => {
     if (!selectedClass) return;
-    const ok = await saveAttendanceAPI(selectedClass, TODAY_ISO, attendance, user?.name || 'Teacher');
+    const ok = await saveAttendanceAPI(selectedClass, markDate, attendance, user?.name || 'Teacher');
     if (ok) {
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
       loadRecentAttendance();
     } else {
       alert('Failed to save attendance records.');
+    }
+  };
+
+  const buildMonthlyExportRows = async (): Promise<AttendanceExportRow[]> => {
+    const records = await fetchAttendanceRecords(selectedClass, undefined, branchFilter || undefined, undefined, exportMonth);
+    const rows = new Map<string, AttendanceExportRow>();
+    students.forEach((s) => rows.set(s.id, { name: s.name, id: s.id, present: 0, absent: 0, leave: 0, total: 0 }));
+    records.forEach((r) => {
+      if (!rows.has(r.studentId)) rows.set(r.studentId, { name: r.studentId, id: r.studentId, present: 0, absent: 0, leave: 0, total: 0 });
+      const row = rows.get(r.studentId)!;
+      if (r.status === 'present') row.present += 1;
+      else if (r.status === 'absent') row.absent += 1;
+      else if (r.status === 'leave') row.leave += 1;
+      row.total += 1;
+    });
+    return Array.from(rows.values());
+  };
+
+  const handleExportMonth = async (format: 'pdf' | 'excel') => {
+    if (!selectedClass) return;
+    setExporting(true);
+    try {
+      const rows = await buildMonthlyExportRows();
+      const title = `Attendance — ${selectedClass}`;
+      if (format === 'excel') exportAttendanceToExcel(rows, title, exportMonth);
+      else await exportAttendanceToPdf(rows, title, exportMonth, user?.name || 'Admin');
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -272,8 +311,8 @@ export function Attendance() {
 
     const message = `📢 *Guru Shishyaru Tutorials*\n\n` +
       `Dear Parent,\n\n` +
-      `This is to inform you that your ward *${student.name}* studying in *${student.className || selectedClass}* has been marked *ABSENT* for today's class.\n\n` +
-      `📅 Date:\n${TODAY_ISO}\n\n` +
+      `This is to inform you that your ward *${student.name}* studying in *${student.className || selectedClass}* has been marked *ABSENT* for the class on ${markDate}.\n\n` +
+      `📅 Date:\n${markDate}\n\n` +
       `If this absence was unexpected, kindly contact the tutorial for clarification.\n\n` +
       `📞 Contact:\n${officialContact}\n\n` +
       `Thank you.\n\n` +
@@ -318,8 +357,8 @@ export function Attendance() {
 
       const message = `📢 *Guru Shishyaru Tutorials*\n\n` +
         `Dear Parent,\n\n` +
-        `This is to inform you that your ward *${student.name}* studying in *${student.className || selectedClass}* has been marked *ABSENT* for today's class.\n\n` +
-        `📅 Date:\n${TODAY_ISO}\n\n` +
+        `This is to inform you that your ward *${student.name}* studying in *${student.className || selectedClass}* has been marked *ABSENT* for the class on ${markDate}.\n\n` +
+        `📅 Date:\n${markDate}\n\n` +
         `If this absence was unexpected, kindly contact the tutorial for clarification.\n\n` +
         `📞 Contact:\n${officialContact}\n\n` +
         `Thank you.\n\n` +
@@ -368,15 +407,40 @@ export function Attendance() {
 
         {/* ── Date + Today summary ── */}
         <div className="rounded-2xl border border-border bg-card p-5">
-          <p className="text-sm font-medium text-muted-foreground">Today</p>
-          <p className="mt-1 text-lg font-bold text-foreground">{TODAY}</p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-muted-foreground">Today</p>
+              <p className="mt-1 text-lg font-bold text-foreground">{TODAY}</p>
+            </div>
+            {isSuperAdmin && (
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setMarkDate(TODAY_ISO); setSaved(false); }}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${markDate === TODAY_ISO ? 'bg-primary text-primary-foreground' : 'border border-border bg-secondary text-muted-foreground hover:bg-secondary/80'}`}
+                >
+                  Mark Today
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setMarkDate(YESTERDAY_ISO); setSaved(false); }}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${markDate === YESTERDAY_ISO ? 'bg-primary text-primary-foreground' : 'border border-border bg-secondary text-muted-foreground hover:bg-secondary/80'}`}
+                >
+                  Mark Yesterday
+                </button>
+              </div>
+            )}
+          </div>
+          {isSuperAdmin && markDate !== TODAY_ISO && (
+            <p className="mt-3 text-xs font-semibold text-amber-600 dark:text-amber-400">Marking attendance for {markDate} (yesterday).</p>
+          )}
         </div>
 
         {todaysHoliday && (
           <div className="flex items-center gap-3 rounded-2xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30 p-4">
             <CalendarOff className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
             <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
-              Today is a holiday — <span className="font-semibold">{todaysHoliday.title}</span>. Attendance isn't required, but you can still mark it below if this is a makeup class.
+              {markDate === TODAY_ISO ? 'Today' : markDate} is a holiday — <span className="font-semibold">{todaysHoliday.title}</span>. Attendance isn't required, but you can still mark it below if this is a makeup class.
             </p>
           </div>
         )}
@@ -426,7 +490,7 @@ export function Attendance() {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-base font-semibold text-foreground">
                 <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-                Mark Attendance — {selectedClass}{selectedBoard ? ` (${selectedBoard})` : ''}
+                Mark Attendance — {selectedClass}{selectedBoard ? ` (${selectedBoard})` : ''}{markDate !== TODAY_ISO ? ` — ${markDate}` : ''}
               </h2>
               <div className="flex gap-2">
                 <button
@@ -653,6 +717,32 @@ export function Attendance() {
           </div>
         )}
 
+        {/* ── Monthly Export ── */}
+        {selectedClass && (
+          <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+            <h2 className="mb-4 text-base font-semibold text-foreground">Monthly Attendance Report — {selectedClass}</h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <input type="month" value={exportMonth} onChange={(event) => setExportMonth(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+              <button
+                type="button"
+                disabled={exporting}
+                onClick={() => handleExportMonth('pdf')}
+                className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
+              >
+                <FileDown className="h-4 w-4" /> Export PDF
+              </button>
+              <button
+                type="button"
+                disabled={exporting}
+                onClick={() => handleExportMonth('excel')}
+                className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
+              >
+                <FileSpreadsheet className="h-4 w-4" /> Export Excel
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ── Recent Records ── */}
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
@@ -724,7 +814,7 @@ export function Attendance() {
               </div>
               <div className="grid grid-cols-3">
                 <span className="text-muted-foreground font-medium">Date:</span>
-                <span className="col-span-2 text-foreground font-semibold">{TODAY_ISO}</span>
+                <span className="col-span-2 text-foreground font-semibold">{markDate}</span>
               </div>
             </div>
 
@@ -738,7 +828,7 @@ export function Attendance() {
                 This is to inform you that your ward *{activeStudent.name}* studying in *{activeStudent.className || selectedClass}* has been marked *ABSENT* for today's class.
 
                 📅 Date:
-                {TODAY_ISO}
+                {markDate}
 
                 If this absence was unexpected, kindly contact the tutorial for clarification.
 

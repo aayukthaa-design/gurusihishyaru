@@ -5480,9 +5480,20 @@ async function main() {
 
   // --- Attendance API with Automatic SMS ---
   app.get('/api/attendance', async (req, res) => {
-    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const roles = req.user.roles || [];
+    // Parents only ever see attendance for their own linked children — resolved
+    // server-side via parent_student, same isolation as GET /api/students.
+    if (roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) {
+      const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+      const studentIds = linkedRows.map((r) => r.studentId);
+      if (studentIds.length === 0) return res.json([]);
+      const placeholders = studentIds.map(() => '?').join(',');
+      const rows = await db.all(`SELECT * FROM attendance WHERE studentId IN (${placeholders}) ORDER BY date DESC`, ...studentIds);
+      return res.json(rows);
+    }
+    if (!roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { className, date, branchId, board } = req.query;
+      const { className, date, month, branchId, board } = req.query;
       // branchId/board filters need a join to classes (attendance has neither
       // column); only join when actually requested so the plain className+date
       // path used by every existing caller is untouched.
@@ -5502,6 +5513,10 @@ async function main() {
       if (date) {
         conditions.push(`${dateCol} = ?`);
         params.push(date);
+      }
+      if (month) {
+        conditions.push(`${dateCol} LIKE ?`);
+        params.push(`${month}%`);
       }
       if (branchId) {
         conditions.push('c.branchId = ?');

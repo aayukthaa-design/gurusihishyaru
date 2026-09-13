@@ -15,7 +15,8 @@ import {
   validateAttendanceDuplicate,
   calculateSalaryFromClasses,
 } from '../lib/teacherSalaryService';
-import { CalendarDays, Save, ClipboardCheck, AlertCircle } from 'lucide-react';
+import { CalendarDays, Save, ClipboardCheck, AlertCircle, FileDown, FileSpreadsheet } from 'lucide-react';
+import { exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
 
 const TODAY = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const TODAY_ISO = new Date().toISOString().split('T')[0];
@@ -159,6 +160,21 @@ export function TeacherAttendance() {
     }, {});
     setAttendance((prev) => ({ ...prev, ...next }));
     setSaved(false);
+  };
+
+  const handleExportMonth = async (format: 'pdf' | 'excel') => {
+    const rows: AttendanceExportRow[] = history.map(({ teacher, history: summary }) => ({
+      name: `${teacher.firstName} ${teacher.lastName}`,
+      id: teacher.id,
+      present: summary.present,
+      absent: summary.absent,
+      halfDay: summary.halfDay,
+      leave: summary.leave,
+      total: summary.workingDays,
+    }));
+    const title = 'Teacher Attendance';
+    if (format === 'excel') exportAttendanceToExcel(rows, title, attendanceMonth);
+    else await exportAttendanceToPdf(rows, title, attendanceMonth, user?.name || 'Admin');
   };
 
   const handleSave = async () => {
@@ -493,9 +509,19 @@ export function TeacherAttendance() {
         </div>
 
         <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
-          <div className="mb-4 flex items-center gap-2">
-            <ClipboardCheck className="h-5 w-5 text-primary" />
-            <h2 className="text-lg font-semibold text-foreground">Monthly Attendance History</h2>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <ClipboardCheck className="h-5 w-5 text-primary" />
+              <h2 className="text-lg font-semibold text-foreground">Monthly Attendance History</h2>
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => handleExportMonth('pdf')} className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80">
+                <FileDown className="h-4 w-4" /> Export PDF
+              </button>
+              <button type="button" onClick={() => handleExportMonth('excel')} className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80">
+                <FileSpreadsheet className="h-4 w-4" /> Export Excel
+              </button>
+            </div>
           </div>
           <div className="grid gap-3 lg:grid-cols-2">
             {history.map(({ teacher, history: summary }) => (

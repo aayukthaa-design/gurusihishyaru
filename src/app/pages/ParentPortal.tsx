@@ -11,7 +11,10 @@ import {
   Download,
   Eye,
   Info,
-  Upload
+  Upload,
+  CheckCircle2,
+  FileDown,
+  FileSpreadsheet
 } from 'lucide-react';
 import { Link } from 'react-router';
 import { Header } from '../components/Header';
@@ -26,6 +29,10 @@ import { useSchoolExamSchedules, refreshSchoolExamSchedules, getAttachmentUrl, u
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { useFeeRecords, refreshFeeRecords } from '../lib/feeService';
+import { fetchAttendance, type AttendanceRecord } from '../lib/attendanceService';
+import { exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
+
+const CURRENT_MONTH = new Date().toISOString().slice(0, 7);
 
 export function ParentPortal() {
   const { user } = useAuth();
@@ -58,6 +65,49 @@ export function ParentPortal() {
   useEffect(() => {
     if (user) refreshFeeRecords(user);
   }, [user]);
+
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
+  const [attendanceMonth, setAttendanceMonth] = useState(CURRENT_MONTH);
+  const [exportingAttendance, setExportingAttendance] = useState(false);
+
+  useEffect(() => {
+    // The server scopes attendance to this parent's own linked children —
+    // no studentId filter is sent client-side (see GET /api/attendance).
+    fetchAttendance().then(setAttendanceRecords);
+  }, [user]);
+
+  const studentAttendance = useMemo(
+    () => attendanceRecords.filter((r) => r.studentId === selectedStudent?.id),
+    [attendanceRecords, selectedStudent?.id]
+  );
+  const attendanceTotal = studentAttendance.filter((r) => r.status !== 'leave').length;
+  const attendancePresent = studentAttendance.filter((r) => r.status === 'present').length;
+  const attendancePercentage = attendanceTotal ? Math.round((attendancePresent / attendanceTotal) * 100) : null;
+  const recentAttendance = useMemo(
+    () => [...studentAttendance].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5),
+    [studentAttendance]
+  );
+
+  const handleExportAttendance = async (format: 'pdf' | 'excel') => {
+    if (!selectedStudent) return;
+    setExportingAttendance(true);
+    try {
+      const monthRecords = studentAttendance.filter((r) => r.date.startsWith(attendanceMonth));
+      const row: AttendanceExportRow = {
+        name: selectedStudent.fullName,
+        id: selectedStudent.id,
+        present: monthRecords.filter((r) => r.status === 'present').length,
+        absent: monthRecords.filter((r) => r.status === 'absent').length,
+        leave: monthRecords.filter((r) => r.status === 'leave').length,
+        total: monthRecords.length,
+      };
+      const title = `Attendance — ${selectedStudent.fullName}`;
+      if (format === 'excel') exportAttendanceToExcel([row], title, attendanceMonth);
+      else await exportAttendanceToPdf([row], title, attendanceMonth, user?.name || 'Parent');
+    } finally {
+      setExportingAttendance(false);
+    }
+  };
 
   useEffect(() => {
     const unsubExams = subscribeExams(setExams);
@@ -366,6 +416,56 @@ export function ParentPortal() {
                     </div>
                   ) : (
                     <p className="mt-4 text-sm text-muted-foreground">No next due details available.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Attendance */}
+            <div className="rounded-[28px] border border-border bg-card p-6 shadow-sm">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-base font-semibold text-foreground">Attendance</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{selectedStudent.fullName}'s attendance record.</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input type="month" value={attendanceMonth} onChange={(event) => setAttendanceMonth(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                  <button type="button" disabled={exportingAttendance} onClick={() => handleExportAttendance('pdf')} className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-secondary disabled:opacity-50">
+                    <FileDown className="h-3.5 w-3.5" /> PDF
+                  </button>
+                  <button type="button" disabled={exportingAttendance} onClick={() => handleExportAttendance('excel')} className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-secondary disabled:opacity-50">
+                    <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <div className="rounded-3xl border border-border bg-background p-5">
+                  <p className="text-sm font-semibold text-muted-foreground">Overall attendance</p>
+                  <p className="mt-2 text-3xl font-semibold text-foreground">{attendancePercentage === null ? '—' : `${attendancePercentage}%`}</p>
+                  <p className="mt-2 text-sm text-muted-foreground">{attendanceTotal ? `${attendancePresent} present out of ${attendanceTotal} recorded days` : 'No attendance records available yet.'}</p>
+                </div>
+                <div className="rounded-3xl border border-border bg-background p-5">
+                  <p className="text-sm font-semibold text-muted-foreground">Recent days</p>
+                  {recentAttendance.length === 0 ? (
+                    <p className="mt-4 text-sm text-muted-foreground">No recent attendance to show.</p>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      {recentAttendance.map((r, i) => (
+                        <div key={i} className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">{r.date}</span>
+                          <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                            r.status === 'present'
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+                              : r.status === 'absent'
+                              ? 'bg-red-100 text-red-700 dark:bg-red-950/20 dark:text-red-400'
+                              : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400'
+                          }`}>
+                            <CheckCircle2 className="h-3 w-3" /> {r.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               </div>
