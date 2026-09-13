@@ -657,10 +657,14 @@ export function Dashboard() {
   }, [branchFilter, lessonPlans]);
 
   React.useEffect(() => {
-    if (!isSuperAdmin || !user) return;
-    void refreshSchoolExamSchedules();
-    void refreshLessonPlans(user);
-  }, [isSuperAdmin, user]);
+    if (!user) return;
+    // Teacher dashboard renders its own "Upcoming School Exams" card
+    // (teacherSchoolExams below) but this effect used to fetch that data
+    // for super_admin only, so the store stayed empty and the card always
+    // read "No upcoming school exams" for teachers.
+    if (isSuperAdmin || isTeacher) void refreshSchoolExamSchedules();
+    if (isSuperAdmin) void refreshLessonPlans(user);
+  }, [isSuperAdmin, isTeacher, user]);
 
   const todaySchoolExams = React.useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);

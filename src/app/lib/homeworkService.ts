@@ -1,7 +1,7 @@
 import { PDFTemplateService } from './pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import { createStore, useStoreValue } from './store';
-import { getStudentById, getStudentsByIds } from './studentService';
+import { getStudentById, getStudentsByIds, getStudentsForClass } from './studentService';
 import { addNotification } from './notificationService';
 import { apiFetch } from './apiClient';
 
@@ -77,7 +77,17 @@ export async function refreshHomework(user?: any): Promise<HomeworkAssignment[]>
     const data = await res.json();
     if (Array.isArray(data)) {
       // Map IDs to strings
-      const mapped = data.map(item => ({ ...item, id: String(item.id) }));
+      let mapped = data.map(item => ({ ...item, id: String(item.id) }));
+      // The server only scopes parent homework by className (a class can have
+      // several batches sharing it) — narrow further here so a parent only
+      // sees homework actually assigned to their child's own batch. Homework
+      // with no batch set applies to the whole class, so it stays visible.
+      if (user.role === 'parent' && user.linkedStudentIds?.length) {
+        mapped = mapped.filter((item: HomeworkAssignment) =>
+          getStudentsForClass(item.className, undefined, item.batch || undefined)
+            .some((s) => user.linkedStudentIds.includes(s.id))
+        );
+      }
       homeworkStore.setState(mapped);
       return mapped;
     }

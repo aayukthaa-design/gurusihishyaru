@@ -20,7 +20,7 @@ import { addNotification } from '../lib/notificationService';
 // replace the old fixed 6-slot grid so teachers/admins can set any timing.
 
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-const SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Geography', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi'];
+const SUBJECTS = ['Mathematics', 'Math', 'Physics', 'Chemistry', 'Biology', 'English', 'History', 'Geography', 'Computer Science', 'Physical Education', 'Kannada', 'Hindi', 'Accountancy', 'Business', 'Statistics', 'Economics'];
 
 const colors: { [key: string]: string } = {
   Mathematics: 'bg-primary/10 text-primary border-primary',

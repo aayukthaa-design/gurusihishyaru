@@ -328,8 +328,13 @@ export function Attendance() {
     }
   };
 
-  // Trigger manual bulk WhatsApp for all absent students via Click-to-Chat URLs
-  const sendBulkWhatsapp = async () => {
+  // Trigger manual bulk WhatsApp for all absent students via Click-to-Chat URLs.
+  // Must stay synchronous: browsers only allow window.open() while a click's
+  // "user activation" is still active. Any await (the old 800ms setTimeout
+  // delay) between calls burns that activation, so every popup after the
+  // first got silently blocked — this is why it looked like only one message
+  // sent before it "stopped".
+  const sendBulkWhatsapp = () => {
     setShowBulkModal(false);
     setBulkSending(true);
 
@@ -372,9 +377,6 @@ export function Attendance() {
         console.error(err);
         setWhatsappStatus((prev) => ({ ...prev, [student.id]: 'failed' }));
       }
-
-      // Delay slightly between opening windows to let the browser process the popups
-      await new Promise((resolve) => setTimeout(resolve, 800));
     }
 
     setBulkSending(false);
@@ -504,12 +506,6 @@ export function Attendance() {
                   className="rounded-lg bg-red-100 dark:bg-red-900/40 px-3 py-1.5 text-xs font-semibold text-red-600 dark:text-red-400 transition-colors hover:bg-red-200"
                 >
                   All Absent
-                </button>
-                <button
-                  onClick={() => markAll('leave')}
-                  className="rounded-lg bg-amber-100 dark:bg-amber-900/40 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-400 transition-colors hover:bg-amber-200"
-                >
-                  All Leave
                 </button>
                 <button
                   onClick={() => setShowLeaveForm((v) => !v)}

@@ -352,7 +352,7 @@ export function addNotification(
 export type NotificationAudience =
   | 'all_users' | 'all_admins' | 'all_teachers' | 'all_parents' | 'all_accountants'
   | 'branch_teachers' | 'branch_parents' | 'branch_accountants' | 'branch_admin'
-  | 'to_super_admin' | 'my_batch_parents' | 'my_assigned_teacher';
+  | 'to_super_admin' | 'my_batch_parents' | 'batch_parents' | 'my_assigned_teacher';
 
 export interface ComposeNotificationInput {
   title: string;
@@ -362,6 +362,8 @@ export interface ComposeNotificationInput {
   notificationType?: string;
   audience: NotificationAudience;
   scheduledFor?: string | null;
+  /** Required for audience 'batch_parents' — the classes.id of the batch Super Admin picked. */
+  classId?: string;
 }
 
 export async function sendComposedNotification(
@@ -378,6 +380,7 @@ export async function sendComposedNotification(
         priority: input.priority || 'medium',
         notificationType: input.notificationType || 'General Announcement',
         audience: input.audience,
+        classId: input.classId,
         status: input.scheduledFor ? 'scheduled' : 'unread',
         scheduledFor: input.scheduledFor || null,
       },

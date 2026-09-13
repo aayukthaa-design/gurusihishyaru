@@ -27,6 +27,8 @@ import {
 import { useAuth } from '../auth/AuthContext';
 import { sendBirthdayWhatsAppWish } from '../lib/birthdayService';
 import { getFileUrl } from '../lib/apiClient';
+import { useClasses } from '../lib/classService';
+import { getBranchName } from '../lib/branchService';
 import { fetchFeeApprovalRequestsAPI, approveFeeApprovalRequestAPI, rejectFeeApprovalRequestAPI } from '../lib/feeService';
 import { fetchRoleChangeRequestsAPI, approveRoleChangeRequestAPI, rejectRoleChangeRequestAPI } from '../lib/teacherService';
 import type { Role } from '../auth/types';
@@ -49,6 +51,7 @@ const AUDIENCE_OPTIONS_BY_ROLE: Partial<Record<Role, { value: NotificationAudien
     { value: 'all_teachers', label: 'All Teachers' },
     { value: 'all_parents', label: 'All Parents' },
     { value: 'all_accountants', label: 'All Accountants' },
+    { value: 'batch_parents', label: 'Parents of a Specific Batch' },
   ],
   admin: [
     { value: 'branch_teachers', label: 'All Teachers in My Branch' },
@@ -93,7 +96,9 @@ export function NotificationsPage() {
     notificationType: 'General Announcement',
     priority: 'medium',
     schedule: '',
+    classId: '',
   });
+  const classes = useClasses();
   const [sendError, setSendError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
 
@@ -261,11 +266,15 @@ export function NotificationsPage() {
   const resetComposeForm = () => setComposeForm({
     title: '', message: '', description: '',
     audience: (audienceOptions[0]?.value ?? '') as NotificationAudience | '',
-    notificationType: 'General Announcement', priority: 'medium', schedule: '',
+    notificationType: 'General Announcement', priority: 'medium', schedule: '', classId: '',
   });
 
   const handleSendNotification = async () => {
     if (!auth.user || !composeForm.title.trim() || !composeForm.message.trim() || !composeForm.audience) return;
+    if (composeForm.audience === 'batch_parents' && !composeForm.classId) {
+      setSendError('Select a batch to notify.');
+      return;
+    }
     setSending(true);
     setSendError(null);
     const result = await sendComposedNotification({
@@ -276,6 +285,7 @@ export function NotificationsPage() {
       notificationType: composeForm.notificationType,
       audience: composeForm.audience,
       scheduledFor: composeForm.schedule || null,
+      classId: composeForm.classId || undefined,
     });
     setSending(false);
     if (!result.success) {
@@ -829,7 +839,7 @@ export function NotificationsPage() {
                 <label className="mb-1 block text-sm font-medium">Send To *</label>
                 <select
                   value={composeForm.audience}
-                  onChange={(e) => setComposeForm((prev) => ({ ...prev, audience: e.target.value as NotificationAudience }))}
+                  onChange={(e) => setComposeForm((prev) => ({ ...prev, audience: e.target.value as NotificationAudience, classId: '' }))}
                   className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
                 >
                   {audienceOptions.length === 0 && <option value="">No recipients available for your role</option>}
@@ -842,6 +852,18 @@ export function NotificationsPage() {
                   {composeForm.audience === 'my_assigned_teacher' && "Automatically resolved from your child's batch."}
                   {(composeForm.audience === 'branch_teachers' || composeForm.audience === 'branch_parents' || composeForm.audience === 'branch_accountants' || composeForm.audience === 'branch_admin') && 'Automatically limited to your own branch.'}
                 </p>
+                {composeForm.audience === 'batch_parents' && (
+                  <select
+                    value={composeForm.classId}
+                    onChange={(e) => setComposeForm((prev) => ({ ...prev, classId: e.target.value }))}
+                    className="mt-2 w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+                  >
+                    <option value="">Select batch…</option>
+                    {classes.map((c) => (
+                      <option key={c.id} value={c.id}>{c.className} — {getBranchName(c.branchId)}</option>
+                    ))}
+                  </select>
+                )}
               </div>
               <div>
                 <label className="mb-1 block text-sm font-medium">Priority</label>
@@ -870,7 +892,7 @@ export function NotificationsPage() {
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setComposerOpen(false)}>Cancel</Button>
             <Button
-              disabled={!composeForm.title.trim() || !composeForm.message.trim() || !composeForm.audience || sending}
+              disabled={!composeForm.title.trim() || !composeForm.message.trim() || !composeForm.audience || (composeForm.audience === 'batch_parents' && !composeForm.classId) || sending}
               onClick={handleSendNotification}
             >
               <Send className="mr-2 h-4 w-4" />

@@ -1,7 +1,7 @@
 import { Header } from '../components/Header';
 import { StatsCard } from '../components/StatsCard';
 import { DataTable } from '../components/DataTable';
-import { GraduationCap, Award, TrendingUp, BookOpen, Trash2 } from 'lucide-react';
+import { GraduationCap, Award, TrendingUp, BookOpen, Trash2, Plus } from 'lucide-react';
 import { subscribeExams, deleteExamAPI, Exam } from '../lib/examService';
 import { subscribeMarks, refreshMarks, MarkRecord } from '../lib/examMarksService';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
@@ -221,8 +221,16 @@ export function ExamsManagement() {
   return (
     <div className="flex-1">
       <Header title="Exam & Marks Management" />
-      
+
       <div className="p-6 space-y-6">
+        <div className="flex justify-end">
+          <Link
+            to="/teacher/exams/create"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            <Plus className="h-4 w-4" /> New Exam
+          </Link>
+        </div>
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
           <StatsCard
             title="Total Exams"

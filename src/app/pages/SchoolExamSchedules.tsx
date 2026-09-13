@@ -15,7 +15,7 @@ import {
 } from '../lib/schoolExamScheduleService';
 import { CalendarDays, Download, Eye, RefreshCcw, Search, Trash2, Upload } from 'lucide-react';
 
-const EXAM_OPTIONS = ['Mid-Term', 'Quarterly', 'Half-Yearly', 'Annual', 'Board Exam', 'Custom'];
+const EXAM_OPTIONS = ['Mid-Term', 'Quarterly', 'Half-Yearly', 'Annual', 'Board Exam', 'Result', 'Custom'];
 
 export function SchoolExamSchedulesPage() {
   const { user } = useAuth();

@@ -1,7 +1,7 @@
 import { createStore, useStoreValue } from './store';
 import { addNotification } from './notificationService';
 import { apiFetch } from './apiClient';
-import { getStudentsByIds, refreshStudents } from './studentService';
+import { getStudentsByIds, getStudentsForClass, refreshStudents } from './studentService';
 
 export interface StudyMaterial {
   id: number;
@@ -51,8 +51,19 @@ export async function refreshMaterials(user?: any): Promise<StudyMaterial[]> {
     if (!res.ok) throw new Error('Backend failed');
     const data = await res.json();
     if (Array.isArray(data)) {
-      materialsStore.setState(data);
-      return data;
+      // The server only scopes parent materials by className (a class can have
+      // several batches sharing it) — narrow further here so a parent only
+      // sees materials actually shared with their child's own batch. Materials
+      // with no batch set apply to the whole class, so they stay visible.
+      let scoped: StudyMaterial[] = data;
+      if (user.role === 'parent' && user.linkedStudentIds?.length) {
+        scoped = data.filter((item: StudyMaterial) =>
+          getStudentsForClass(item.className, undefined, item.batch || undefined)
+            .some((s) => user.linkedStudentIds.includes(s.id))
+        );
+      }
+      materialsStore.setState(scoped);
+      return scoped;
     }
     return [];
   } catch (e) {

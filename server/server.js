@@ -2233,6 +2233,16 @@ async function initDb() {
     await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_attendance_unique ON teacher_attendance(teacherId, date);`);
   } catch (e) { console.error('teacher_attendance de-dup migration failed:', e); }
 
+  // Duplicate salary entries: same reasoning as the `attendance` de-dup above
+  // — a pre-existing salary_records table created before UNIQUE(teacherId, month)
+  // was added to the schema never got the constraint, so POST /api/salary-records'
+  // ON CONFLICT upsert silently fell back to plain inserts, giving a teacher more
+  // than one salary row for the same month.
+  try {
+    await db.exec(`DELETE FROM salary_records WHERE id NOT IN (SELECT MAX(id) FROM salary_records GROUP BY teacherId, month);`);
+    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_salary_records_unique ON salary_records(teacherId, month);`);
+  } catch (e) { console.error('salary_records de-dup migration failed:', e); }
+
   return db;
 }
 
@@ -4032,6 +4042,7 @@ async function main() {
     branch_admin: ['teacher', 'parent', 'accountant'],
     to_super_admin: ['admin', 'teacher', 'parent', 'accountant'],
     my_batch_parents: ['teacher'],
+    batch_parents: ['super_admin'],
     my_assigned_teacher: ['parent'],
   };
 
@@ -4077,6 +4088,16 @@ async function main() {
         const classNames = rows.map((r) => r.className).filter(Boolean);
         if (!classNames.length) return { error: 'You have no assigned batches yet — nothing to notify parents about.' };
         return { roles: [], classNames, branchId: senderBranchId };
+      }
+      // Unlike the other audiences above (all derived purely from the sender's
+      // own identity), Super Admin picks an arbitrary batch to target — so the
+      // client supplies a classId, and the actual className/branchId targeting
+      // fields still only ever come from THIS server-side lookup, never from
+      // the client directly.
+      case 'batch_parents': {
+        const classRow = await db.get('SELECT className, branchId FROM classes WHERE id = ?', req.body?.classId);
+        if (!classRow) return { error: 'Select a valid batch to notify.' };
+        return { roles: ['parent'], classNames: [classRow.className], branchId: classRow.branchId };
       }
       case 'my_assigned_teacher': {
         const rows = await db.all(
