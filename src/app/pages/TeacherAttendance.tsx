@@ -35,9 +35,9 @@ export function TeacherAttendance() {
   const teachers = useTeachers();
   const isAdminOrSuper = user?.role === 'admin' || user?.role === 'super_admin';
   const isReadOnly = user?.role === 'accountant' || user?.role === 'teacher';
-  // Payroll (Payslip) data is super_admin/accountant only — admin can still
-  // mark day-to-day attendance above (isAdminOrSuper), just not touch salary.
-  const canViewPayroll = user?.role === 'super_admin' || user?.role === 'accountant';
+  // Total days worked (classesConducted) is visible to every role that reaches this
+  // page; only the money fields (salary per class, gross salary) stay payroll-only.
+  const canViewPayrollMoney = user?.role === 'super_admin' || user?.role === 'accountant';
   const canManageSalary = user?.role === 'super_admin';
 
   const [attendanceDate, setAttendanceDate] = useState(TODAY_ISO);
@@ -70,10 +70,15 @@ export function TeacherAttendance() {
   }, [branchFilter, teachers, user]);
 
   useEffect(() => {
+    // A teacher only ever sees their own payroll row, never a colleague's.
+    if (user?.role === 'teacher') {
+      if (user.id && salaryTeacherId !== user.id) setSalaryTeacherId(user.id);
+      return;
+    }
     if (!salaryTeacherId && allowedTeachers.length) {
       setSalaryTeacherId(allowedTeachers[0].id);
     }
-  }, [allowedTeachers, salaryTeacherId]);
+  }, [allowedTeachers, salaryTeacherId, user]);
 
   const attendanceMonth = attendanceDate.slice(0, 7);
   const branchIdForQuery = user?.role === 'super_admin' ? (branchFilter || undefined) : user?.branchId;
@@ -406,18 +411,19 @@ export function TeacherAttendance() {
           )}
         </div>
 
-        {canViewPayroll && (
         <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
           <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="text-lg font-semibold text-foreground">Payroll Reference</h2>
-              <p className="text-sm text-muted-foreground">Create a pending salary record for the selected teacher and month.</p>
+              <p className="text-sm text-muted-foreground">
+                {canManageSalary ? 'Create a pending salary record for the selected teacher and month.' : 'Read-only view of attendance-driven payroll days.'}
+              </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div>
                 <label className="mb-1 block text-sm font-medium text-foreground">Teacher</label>
-                <select value={salaryTeacherId} onChange={(event) => setSalaryTeacherId(event.target.value)} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm">
-                  {allowedTeachers.map((teacher) => (
+                <select value={salaryTeacherId} onChange={(event) => setSalaryTeacherId(event.target.value)} disabled={user?.role === 'teacher'} className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm disabled:opacity-70">
+                  {(user?.role === 'teacher' ? allowedTeachers.filter((teacher) => teacher.id === user.id) : allowedTeachers).map((teacher) => (
                     <option key={teacher.id} value={teacher.id}>{teacher.firstName} {teacher.lastName}</option>
                   ))}
                 </select>
@@ -461,44 +467,51 @@ export function TeacherAttendance() {
           </div>
 
           <div className="mt-5 grid gap-4 lg:grid-cols-4">
-            <div>
-              <label className="mb-1 block text-sm font-medium text-foreground">Salary Type</label>
-              <div className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm text-foreground">
-                {selectedSalaryTeacher?.salaryType || '—'}
+            {canViewPayrollMoney && (
+              <div>
+                <label className="mb-1 block text-sm font-medium text-foreground">Salary Type</label>
+                <div className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm text-foreground">
+                  {selectedSalaryTeacher?.salaryType || '—'}
+                </div>
               </div>
-            </div>
+            )}
             <div>
-              <label className="mb-1 block text-sm font-medium text-foreground">Classes Conducted</label>
+              <label className="mb-1 block text-sm font-medium text-foreground">Total Number of Days</label>
               <input
                 type="number"
                 min={0}
                 value={classesConducted}
                 onChange={(event) => setClassesConducted(Number(event.target.value))}
                 disabled={salaryLocked || !canManageSalary}
-                className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+                className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm disabled:opacity-70"
               />
             </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-foreground">Salary Per Class</label>
-              <input
-                type="number"
-                min={0}
-                value={salaryPerClass}
-                onChange={(event) => setSalaryPerClass(Number(event.target.value))}
-                disabled={salaryLocked || !canManageSalary}
-                className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="lg:col-span-2">
-              <label className="mb-1 block text-sm font-medium text-foreground">Estimated Gross Salary</label>
-              <div className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm text-foreground">
-                {selectedSalaryTeacher ? `₹${calculateSalaryFromClasses(classesConducted, salaryPerClass)}` : '—'}
-              </div>
-            </div>
+            {canViewPayrollMoney && (
+              <>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-foreground">Salary Per Class</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={salaryPerClass}
+                    onChange={(event) => setSalaryPerClass(Number(event.target.value))}
+                    disabled={salaryLocked || !canManageSalary}
+                    className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm"
+                  />
+                </div>
+                <div className="lg:col-span-2">
+                  <label className="mb-1 block text-sm font-medium text-foreground">Estimated Gross Salary</label>
+                  <div className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm text-foreground">
+                    {selectedSalaryTeacher ? `₹${calculateSalaryFromClasses(classesConducted, salaryPerClass)}` : '—'}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
 
+          {canManageSalary && (
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <button type="button" onClick={handleSaveSalaryPerClass} disabled={!canManageSalary || salaryLocked} className="rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button" onClick={handleSaveSalaryPerClass} disabled={salaryLocked} className="rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
               Save Salary Per Class
             </button>
             {salarySaved && (
@@ -512,8 +525,8 @@ export function TeacherAttendance() {
               </div>
             )}
           </div>
+          )}
         </div>
-        )}
 
         <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

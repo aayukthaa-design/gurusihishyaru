@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
-import { fetchCasualLeaves, requestCasualLeave, cancelCasualLeave, type CasualLeaveRequest } from '../lib/casualLeaveService';
+import { fetchCasualLeaves, requestCasualLeave, cancelCasualLeave, fetchCasualLeaveBalances, type CasualLeaveRequest } from '../lib/casualLeaveService';
 import { CalendarClock, X } from 'lucide-react';
 
 const STATUS_STYLES: Record<CasualLeaveRequest['status'], string> = {
@@ -18,10 +18,12 @@ export function TeacherCasualLeave() {
   const [reason, setReason] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [leavesTaken, setLeavesTaken] = useState(0);
 
   const load = () => {
     if (!user) return;
     fetchCasualLeaves({ teacherId: user.id }).then(setRequests);
+    fetchCasualLeaveBalances().then((rows) => setLeavesTaken(rows[0]?.leavesTaken ?? 0));
   };
 
   useEffect(load, [user]);
@@ -59,6 +61,11 @@ export function TeacherCasualLeave() {
     <div className="flex-1 bg-background">
       <Header title="Casual Leave" />
       <div className="max-w-3xl mx-auto p-6 space-y-6">
+        <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+          <p className="text-sm text-muted-foreground">Casual Leaves Taken (set by Super Admin)</p>
+          <p className="mt-1 text-2xl font-bold text-foreground">{leavesTaken}</p>
+        </div>
+
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
           <h2 className="mb-4 flex items-center gap-2 text-base font-semibold text-foreground">
             <CalendarClock className="h-5 w-5 text-primary" /> Request Leave

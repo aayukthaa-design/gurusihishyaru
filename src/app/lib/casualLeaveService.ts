@@ -46,3 +46,28 @@ export async function cancelCasualLeave(id: number): Promise<void> {
   const res = await apiFetch(`/api/casual-leaves/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to withdraw leave request');
 }
+
+export interface CasualLeaveBalance {
+  userId: string;
+  name: string;
+  roles: string[];
+  branchId?: string;
+  leavesTaken: number;
+  updatedAt?: string;
+}
+
+export async function fetchCasualLeaveBalances(params?: { branchId?: string }): Promise<CasualLeaveBalance[]> {
+  const qs = new URLSearchParams();
+  if (params?.branchId) qs.set('branchId', params.branchId);
+  const query = qs.toString();
+  const res = await apiFetch(`/api/casual-leave-balances${query ? `?${query}` : ''}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+export async function updateCasualLeaveBalance(userId: string, leavesTaken: number): Promise<CasualLeaveBalance> {
+  const res = await apiFetch(`/api/casual-leave-balances/${userId}`, { method: 'PUT', body: { leavesTaken } });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to update leave balance');
+  return res.json();
+}

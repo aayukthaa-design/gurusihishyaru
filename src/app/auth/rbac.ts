@@ -71,6 +71,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'lesson_plan',              // oversight of all teachers' lesson plans
       'holiday_calendar',
       'school_exam_schedules',   // the dashboard's own "Upcoming School Exams" card links here
+      'casual_leave',            // read-only: super_admin owns approvals/leave-balance edits
     ],
     permissions: ['create', 'read', 'update', 'delete', 'export'],
   },

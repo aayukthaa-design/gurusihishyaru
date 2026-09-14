@@ -2241,6 +2241,18 @@ async function initDb() {
     );
   `);
 
+  // A plain running "leaves taken" counter per admin/teacher, distinct from the
+  // request/approval queue above — super_admin maintains it directly (e.g. to
+  // record leave taken outside the request flow or correct a miscount).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS casual_leave_balances (
+      userId TEXT PRIMARY KEY,
+      leavesTaken INTEGER NOT NULL DEFAULT 0,
+      updatedAt TEXT,
+      updatedBy TEXT
+    );
+  `);
+
   // Duplicate teacher-attendance entries: same reasoning as the `attendance`
   // de-dup above — guard against a pre-existing table created without the
   // UNIQUE(teacherId, date) constraint.
@@ -2914,7 +2926,12 @@ async function main() {
       if (branchId) { query += ' AND u.branchId = ?'; params.push(branchId); }
       query += ' ORDER BY u.name';
       const rows = await db.all(query, ...params);
-      res.json(rows.map(mapTeacherRow));
+      // Salary is payroll-sensitive: super_admin sets it and accountant needs it to run
+      // payroll, but admin only manages the non-financial parts of a teacher's profile —
+      // stripped here so it never reaches the client, not just hidden in the admin UI.
+      const canSeeSalary = req.user.roles.some((r) => ['super_admin', 'accountant'].includes(r));
+      const mapped = rows.map(mapTeacherRow);
+      res.json(canSeeSalary ? mapped : mapped.map(({ salaryType, salaryAmount, monthlySalary, salaryPerClass, ...rest }) => rest));
     } catch (err) {
       console.error('List teachers error:', err);
       res.status(500).json({ error: 'Failed to load teachers' });
@@ -7751,16 +7768,19 @@ async function main() {
   });
 
   // --- Salary / Payroll Endpoints ---
-  // Salary data is payroll-sensitive: only super_admin/accountant may browse
-  // it broadly. A teacher may only ever fetch their own records (their "My
-  // Salary Slips" self-service page) — admin/parent/other roles get nothing.
+  // Salary data is payroll-sensitive: only super_admin/accountant may browse the money
+  // fields broadly. Admin may browse the roster to see attendance-driven fields (e.g.
+  // classesConducted, used as "total days" for Monthly Fixed teachers) but not amounts.
+  // A teacher may only ever fetch their own records (their "My Salary Slips" self-service
+  // page, which does need the money fields) — parent/other roles get nothing.
   app.get('/api/salary-records', async (req, res) => {
     const roles = req.user.roles || [];
     const isPayroll = roles.some((r) => ['super_admin', 'accountant'].includes(r));
-    if (!isPayroll && !roles.includes('teacher')) return res.status(403).json({ error: 'Forbidden' });
+    const isAdmin = roles.includes('admin');
+    if (!isPayroll && !isAdmin && !roles.includes('teacher')) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { month, status } = req.query;
-      const teacherId = isPayroll ? req.query.teacherId : req.user.sub;
+      const teacherId = (isPayroll || isAdmin) ? req.query.teacherId : req.user.sub;
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM salary_records WHERE 1=1';
       const params = [];
@@ -7770,7 +7790,11 @@ async function main() {
       if (status) { query += ' AND status = ?'; params.push(status); }
       query += ' ORDER BY month DESC, teacherName ASC';
       const rows = await db.all(query, ...params);
-      res.json(rows.map((r) => ({ ...r, isLocked: !!r.isLocked })));
+      const mapped = rows.map((r) => ({ ...r, isLocked: !!r.isLocked }));
+      const result = isAdmin && !isPayroll
+        ? mapped.map(({ salaryAmount, salaryPerClass, calculatedSalary, remarks, ...rest }) => rest)
+        : mapped;
+      res.json(result);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -7978,6 +8002,67 @@ async function main() {
       if (record.status !== 'Pending') return res.status(409).json({ error: 'Only a pending request can be withdrawn' });
       await db.run('DELETE FROM casual_leave_requests WHERE id = ?', req.params.id);
       res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // --- Casual Leave Balances ("leaves taken" counter) ---
+  // super_admin edits the count for any admin/teacher; admin sees its branch's
+  // admins/teachers read-only; a teacher sees only their own.
+  app.get('/api/casual-leave-balances', async (req, res) => {
+    const roles = req.user.roles || [];
+    const isSuperAdmin = roles.includes('super_admin');
+    const isAdmin = roles.includes('admin');
+    if (!isSuperAdmin && !isAdmin && !roles.includes('teacher')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const branchId = resolveBranchId(req, req.query.branchId);
+      let query = `
+        SELECT u.id as userId, u.name, u.roles, u.branchId, COALESCE(b.leavesTaken, 0) as leavesTaken, b.updatedAt
+        FROM users u
+        LEFT JOIN casual_leave_balances b ON b.userId = u.id
+        WHERE (u.roles LIKE '%"admin"%' OR u.roles LIKE '%"teacher"%')
+      `;
+      const params = [];
+      if (!isSuperAdmin && !isAdmin) {
+        query += ' AND u.id = ?';
+        params.push(req.user.sub);
+      } else if (branchId) {
+        query += ' AND u.branchId = ?';
+        params.push(branchId);
+      }
+      query += ' ORDER BY u.name';
+      const rows = await db.all(query, ...params);
+      res.json(rows.map((r) => ({
+        userId: r.userId,
+        name: r.name,
+        roles: parseJsonList(r.roles),
+        branchId: r.branchId || undefined,
+        leavesTaken: r.leavesTaken,
+        updatedAt: r.updatedAt || undefined,
+      })));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  app.put('/api/casual-leave-balances/:userId', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const leavesTaken = Number(req.body?.leavesTaken);
+      if (!Number.isFinite(leavesTaken) || leavesTaken < 0) return res.status(400).json({ error: 'leavesTaken must be a non-negative number' });
+      const target = await db.get('SELECT id FROM users WHERE id = ?', req.params.userId);
+      if (!target) return res.status(404).json({ error: 'User not found' });
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO casual_leave_balances (userId, leavesTaken, updatedAt, updatedBy)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET leavesTaken = excluded.leavesTaken, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
+        req.params.userId, leavesTaken, now, req.user.name
+      );
+      res.json({ userId: req.params.userId, leavesTaken, updatedAt: now });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });

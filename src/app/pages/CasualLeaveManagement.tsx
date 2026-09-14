@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { useBranches } from '../lib/branchService';
-import { fetchCasualLeaves, reviewCasualLeave, type CasualLeaveRequest } from '../lib/casualLeaveService';
+import {
+  fetchCasualLeaves, reviewCasualLeave, type CasualLeaveRequest,
+  fetchCasualLeaveBalances, updateCasualLeaveBalance, type CasualLeaveBalance,
+} from '../lib/casualLeaveService';
 import { CalendarClock, Check, X } from 'lucide-react';
 
 const STATUS_STYLES: Record<CasualLeaveRequest['status'], string> = {
@@ -14,17 +17,31 @@ const STATUS_STYLES: Record<CasualLeaveRequest['status'], string> = {
 export function CasualLeaveManagement() {
   const { user } = useAuth();
   const isSuperAdmin = user?.role === 'super_admin';
+  // Reviewing requests is super_admin/accountant only, matching the backend —
+  // admin reaches this page only to view the leave-balance roster read-only.
+  const canReview = user?.role === 'super_admin' || user?.role === 'accountant';
   const branches = useBranches();
   const [branchFilter, setBranchFilter] = useState(isSuperAdmin ? '' : user?.branchId ?? '');
   const [statusFilter, setStatusFilter] = useState('');
   const [requests, setRequests] = useState<CasualLeaveRequest[]>([]);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [balances, setBalances] = useState<CasualLeaveBalance[]>([]);
+  const [balanceDrafts, setBalanceDrafts] = useState<Record<string, number>>({});
+  const [savingUserId, setSavingUserId] = useState<string | null>(null);
 
   const load = () => {
     fetchCasualLeaves({ branchId: branchFilter || undefined, status: statusFilter || undefined }).then(setRequests);
   };
 
+  const loadBalances = () => {
+    fetchCasualLeaveBalances({ branchId: branchFilter || undefined }).then((rows) => {
+      setBalances(rows);
+      setBalanceDrafts(Object.fromEntries(rows.map((row) => [row.userId, row.leavesTaken])));
+    });
+  };
+
   useEffect(load, [branchFilter, statusFilter]);
+  useEffect(loadBalances, [branchFilter]);
 
   const handleReview = async (id: number, status: 'Approved' | 'Rejected') => {
     setBusyId(id);
@@ -33,6 +50,18 @@ export function CasualLeaveManagement() {
       load();
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const handleSaveBalance = async (userId: string) => {
+    setSavingUserId(userId);
+    try {
+      await updateCasualLeaveBalance(userId, balanceDrafts[userId] ?? 0);
+      loadBalances();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update leave balance.');
+    } finally {
+      setSavingUserId(null);
     }
   };
 
@@ -72,7 +101,7 @@ export function CasualLeaveManagement() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`rounded-full px-3 py-1 text-xs font-semibold ${STATUS_STYLES[r.status]}`}>{r.status}</span>
-                    {r.status === 'Pending' && (
+                    {r.status === 'Pending' && canReview && (
                       <>
                         <button type="button" onClick={() => handleReview(r.id, 'Approved')} disabled={busyId === r.id} title="Approve" className="rounded-lg bg-emerald-100 p-1.5 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-400">
                           <Check className="h-4 w-4" />
@@ -83,6 +112,48 @@ export function CasualLeaveManagement() {
                       </>
                     )}
                   </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+          <h2 className="mb-1 text-base font-semibold text-foreground">Casual Leaves Taken</h2>
+          <p className="mb-4 text-sm text-muted-foreground">
+            {isSuperAdmin ? 'Edit the running leave count for any admin or teacher.' : 'Read-only view of leaves taken so far.'}
+          </p>
+          {balances.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No admins or teachers found.</p>
+          ) : (
+            <div className="space-y-2">
+              {balances.map((row) => (
+                <div key={row.userId} className="flex items-center justify-between rounded-xl border border-border p-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">{row.name}</p>
+                    <p className="text-xs text-muted-foreground capitalize">{row.roles.join(', ').replace(/_/g, ' ')}</p>
+                  </div>
+                  {isSuperAdmin ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={0}
+                        value={balanceDrafts[row.userId] ?? 0}
+                        onChange={(e) => setBalanceDrafts((prev) => ({ ...prev, [row.userId]: Number(e.target.value) }))}
+                        className="w-20 rounded-lg border border-input bg-input-background px-2 py-1.5 text-sm text-right"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSaveBalance(row.userId)}
+                        disabled={savingUserId === row.userId || balanceDrafts[row.userId] === row.leavesTaken}
+                        className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {savingUserId === row.userId ? 'Saving…' : 'Save'}
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="text-sm font-semibold text-foreground">{row.leavesTaken} taken</span>
+                  )}
                 </div>
               ))}
             </div>
