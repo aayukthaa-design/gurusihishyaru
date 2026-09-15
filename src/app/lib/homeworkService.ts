@@ -1,7 +1,7 @@
 import { PDFTemplateService } from './pdfTemplateService';
 import { utils, writeFile } from 'xlsx';
 import { createStore, useStoreValue } from './store';
-import { getStudentById, getStudentsByIds, getStudentsForClass } from './studentService';
+import { getStudentById, getStudentsByIds, getStudentsForClass, refreshStudents } from './studentService';
 import { addNotification } from './notificationService';
 import { apiFetch } from './apiClient';
 
@@ -67,6 +67,10 @@ export async function refreshHomework(user?: any): Promise<HomeworkAssignment[]>
     
     // For parent portal homework, fetch children class names
     if (user.role === 'parent' && user.linkedStudentIds?.length) {
+      // The shared student cache may still hold its pre-login (unauthenticated,
+      // silently-failed) empty snapshot the first time a parent hits this page,
+      // which would otherwise scope classNames to [] and hide every homework.
+      await refreshStudents();
       const students = getStudentsByIds(user.linkedStudentIds);
       const classes = Array.from(new Set(students.map(s => s.className)));
       params.set('classNames', classes.join(','));

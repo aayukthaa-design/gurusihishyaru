@@ -82,10 +82,18 @@ export function TeacherAttendance() {
 
   const attendanceMonth = attendanceDate.slice(0, 7);
   const branchIdForQuery = user?.role === 'super_admin' ? (branchFilter || undefined) : user?.branchId;
+  // Saving re-sends a status for every visible teacher, defaulting anyone not
+  // explicitly touched to 'present' — if that happens while this month's real
+  // data (which may include already-saved 'leave'/'absent' records) hasn't
+  // finished loading yet, the save silently overwrites those records with
+  // 'present'. Blocking Save until the fetch settles closes that window.
+  const [loadingMonthAttendance, setLoadingMonthAttendance] = useState(true);
 
   const loadMonthAttendance = async () => {
+    setLoadingMonthAttendance(true);
     const entries = await fetchTeacherAttendance({ month: attendanceMonth, branchId: branchIdForQuery });
     setMonthAttendance(entries);
+    setLoadingMonthAttendance(false);
   };
 
   useEffect(() => {
@@ -105,7 +113,6 @@ export function TeacherAttendance() {
   }, [allowedTeachers, attendanceDate, isAdminOrSuper, monthAttendance]);
 
   useEffect(() => {
-    if (!canViewPayroll) return;
     const teacher = allowedTeachers.find((item) => item.id === salaryTeacherId);
     if (!teacher) {
       setSalaryRecord(null);
@@ -130,7 +137,7 @@ export function TeacherAttendance() {
       setSalarySaved(false);
     })();
     return () => { cancelled = true; };
-  }, [allowedTeachers, salaryTeacherId, salaryMonth, canViewPayroll]);
+  }, [allowedTeachers, salaryTeacherId, salaryMonth]);
 
   const filteredTeachers = useMemo(() => {
     return allowedTeachers.filter((teacher) => {
@@ -200,6 +207,11 @@ export function TeacherAttendance() {
       branchId: teacher.branchId,
       department: teacher.department,
     }));
+
+    if (loadingMonthAttendance) {
+      alert('Still loading this month\'s attendance — please wait a moment and try again.');
+      return;
+    }
 
     const duplicateError = validateAttendanceDuplicate(entries);
     if (duplicateError) {
@@ -347,9 +359,9 @@ export function TeacherAttendance() {
               <h2 className="text-lg font-semibold text-foreground">Teacher Attendance Register</h2>
               <p className="text-sm text-muted-foreground">Teachers shown are limited to the active branch scope.</p>
             </div>
-            <button type="button" onClick={handleSave} disabled={!isAdminOrSuper || isReadOnly || saving} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button" onClick={handleSave} disabled={!isAdminOrSuper || isReadOnly || saving || loadingMonthAttendance} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
               <Save className="h-4 w-4" />
-              {saving ? 'Saving…' : saved ? 'Saved' : 'Save Attendance'}
+              {saving ? 'Saving…' : loadingMonthAttendance ? 'Loading…' : saved ? 'Saved' : 'Save Attendance'}
             </button>
           </div>
 
