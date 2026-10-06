@@ -14,7 +14,8 @@ import {
   Upload,
   CheckCircle2,
   FileDown,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Package
 } from 'lucide-react';
 import { Link } from 'react-router';
 import { Header } from '../components/Header';
@@ -61,10 +62,19 @@ export function ParentPortal() {
   const [exams, setExams] = useState<Exam[]>([]);
   const [allMarks, setAllMarks] = useState<MarkRecord[]>([]);
   const feeRecords = useFeeRecords();
+  const [inventoryAllocations, setInventoryAllocations] = useState<any[]>([]);
 
   useEffect(() => {
     if (user) refreshFeeRecords(user);
   }, [user]);
+
+  useEffect(() => {
+    if (!selectedStudent?.id) return;
+    apiFetch('/api/inventory/allocations')
+      .then(async (res) => res.ok ? res.json() : [])
+      .then((rows) => setInventoryAllocations(Array.isArray(rows) ? rows.filter((row: any) => row.studentId === selectedStudent.id) : []))
+      .catch(() => setInventoryAllocations([]));
+  }, [selectedStudent?.id]);
 
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [attendanceMonth, setAttendanceMonth] = useState(CURRENT_MONTH);
@@ -420,6 +430,27 @@ export function ParentPortal() {
                 </div>
               </div>
             </div>
+
+            {/* Attendance */}
+            <section className="rounded-2xl border border-border bg-card p-5 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-base font-semibold text-foreground">Inventory allocations</p>
+                  <p className="mt-1 text-sm text-muted-foreground">Items allocated to {selectedStudent.fullName}.</p>
+                </div>
+                <Package className="h-5 w-5 text-primary" />
+              </div>
+              {inventoryAllocations.length === 0 ? (
+                <p className="mt-4 text-sm text-muted-foreground">No inventory allocations recorded.</p>
+              ) : (
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead><tr className="border-b border-border text-xs uppercase text-muted-foreground"><th className="py-2">Item</th><th className="py-2">Quantity</th><th className="py-2">Size</th><th className="py-2">Date</th></tr></thead>
+                    <tbody>{inventoryAllocations.map((row) => <tr key={row.id} className="border-b border-border/60"><td className="py-2 font-medium">{row.itemName}</td><td className="py-2">{row.quantity}</td><td className="py-2">{row.uniformSize || '—'}</td><td className="py-2">{row.allocatedDate}</td></tr>)}</tbody>
+                  </table>
+                </div>
+              )}
+            </section>
 
             {/* Attendance */}
             <div className="rounded-[28px] border border-border bg-card p-6 shadow-sm">

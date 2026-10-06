@@ -111,6 +111,7 @@ interface AllocationRecord {
   allocatedDate: string;
   allocatedBy: string;
   remarks: string;
+  uniformSize?: string;
 }
 
 interface MonthlyReport {
@@ -247,7 +248,8 @@ export function AccountantPortal() {
     studentId: '',
     itemId: '',
     quantity: '1',
-    remarks: ''
+    remarks: '',
+    uniformSize: ''
   });
 
   // Report Compilation Month
@@ -837,6 +839,16 @@ export function AccountantPortal() {
       return;
     }
     const finalSize = allocateForm.uniformSize === 'Other' ? customUniformSize : allocateForm.uniformSize;
+    const selectedItem = inventory.find(i => i.id === Number(allocateForm.itemId));
+    const requestedQuantity = Number(allocateForm.quantity);
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1) {
+      alert('Quantity must be a whole number greater than zero.');
+      return;
+    }
+    if (selectedItem && requestedQuantity > selectedItem.availableQuantity) {
+      alert(`Insufficient stock. Only ${selectedItem.availableQuantity} ${selectedItem.unit} available.`);
+      return;
+    }
 
     const payload = {
       studentId: allocateForm.studentId,
@@ -844,7 +856,7 @@ export function AccountantPortal() {
       admissionNumber: studentObj.admissionNumber || '',
       branchId: studentObj.branchId || branchFilter || myBranchId,
       itemId: Number(allocateForm.itemId),
-      quantity: Number(allocateForm.quantity),
+      quantity: requestedQuantity,
       allocatedBy: user?.name || 'Accountant',
       remarks: allocateForm.remarks,
       uniformSize: isUniform ? finalSize : ''
@@ -858,7 +870,7 @@ export function AccountantPortal() {
 
       if (res.ok) {
         setShowAllocateModal(false);
-        setAllocateForm({ studentId: '', itemId: '', quantity: '1', remarks: '' });
+        setAllocateForm({ studentId: '', itemId: '', quantity: '1', remarks: '', uniformSize: '' });
         await Promise.all([fetchInventory(), fetchAllocations()]);
       } else {
         const err = await res.json();
@@ -2552,6 +2564,21 @@ export function AccountantPortal() {
                   required
                 />
               </div>
+
+              {(inventory.find(i => i.id === Number(allocateForm.itemId))?.category === 'Uniform' ||
+                inventory.find(i => i.id === Number(allocateForm.itemId))?.category === 'Uniforms') && (
+                <div>
+                  <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Uniform Size</label>
+                  <input
+                    type="text"
+                    value={allocateForm.uniformSize}
+                    onChange={(e) => setAllocateForm(prev => ({ ...prev, uniformSize: e.target.value }))}
+                    placeholder="e.g. XS, S, M, 32"
+                    className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
+                    required
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Remarks / Notes</label>

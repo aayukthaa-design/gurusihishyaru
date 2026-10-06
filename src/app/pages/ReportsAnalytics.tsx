@@ -46,6 +46,7 @@ export function ReportsAnalytics() {
   const [attendanceRecords, setAttendanceRecords] = useState<any[]>([]);
   const [examMarks, setExamMarks] = useState<MarkRecord[]>([]);
   const [feeStats, setFeeStats] = useState<FeeStats>(EMPTY_FEE_STATS);
+  const [feeRecords, setFeeRecords] = useState<any[]>([]);
   const exams = useExams();
 
   const fetchReports = async () => {
@@ -69,13 +70,14 @@ export function ReportsAnalytics() {
     const loadAnalyticsData = async () => {
       try {
         const branchParam = branchFilter ? `?branchId=${branchFilter}` : '';
-        const [resTeachers, resParents, resUsers, records, marks, stats] = await Promise.all([
+        const [resTeachers, resParents, resUsers, records, marks, stats, feesResponse] = await Promise.all([
           apiFetch(`/api/teachers${branchParam}`),
           apiFetch(`/api/parents${branchParam}`),
           apiFetch(`/api/users`),
           fetchAttendance(),
           refreshMarks(),
           fetchFeeStats(branchFilter ? { branchId: branchFilter } : {}),
+          apiFetch(`/api/fees/records${branchParam}`),
         ]);
         if (resTeachers.ok) setAnalyticsTeachers(await resTeachers.json());
         if (resParents.ok) setAnalyticsParents(await resParents.json());
@@ -90,6 +92,10 @@ export function ReportsAnalytics() {
         setAttendanceRecords(Array.isArray(records) ? records : []);
         setExamMarks(Array.isArray(marks) ? marks : []);
         setFeeStats(stats);
+        if (feesResponse.ok) {
+          const fees = await feesResponse.json();
+          setFeeRecords(Array.isArray(fees) ? fees : []);
+        }
       } catch (err) {
         console.error('Failed to load analytics data in reports', err);
       }
@@ -378,8 +384,9 @@ export function ReportsAnalytics() {
     activeBatches: activeBatchesCount,
     pendingFees: feeStats.totalPending,
     branchName: activeBranchLabel,
-    smsLogs: whatsappLogs
-  }), [monthlyData, attendanceData, feeCollectionData, examPerformanceData, activeBranchLabel, user?.name, whatsappLogs, analyticsTeachers, analyticsParents, accountantsCount, examsConductedCount, activeBatchesCount, feeStats]);
+    smsLogs: whatsappLogs,
+    feeRecords
+  }), [monthlyData, attendanceData, feeCollectionData, examPerformanceData, activeBranchLabel, user?.name, whatsappLogs, feeRecords, analyticsTeachers, analyticsParents, accountantsCount, examsConductedCount, activeBatchesCount, feeStats]);
 
   const exportPdf = async () => {
     if (!reportData.summaryCards.length) {

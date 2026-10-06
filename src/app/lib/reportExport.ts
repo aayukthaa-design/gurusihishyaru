@@ -33,6 +33,7 @@ export interface ReportExportData {
   executiveSummary: string;
   recommendations: string[];
   smsLogs?: any[];
+  feeRecords?: any[];
 }
 
 function formatCurrency(value: number) {
@@ -97,6 +98,7 @@ export function buildReportExportData(params: {
   pendingFees: number;
   branchName?: string;
   smsLogs?: any[];
+  feeRecords?: any[];
 }): ReportExportData {
   const revenueSeries = params.monthlyData;
   const lastRevenue = Number(revenueSeries.at(-1)?.revenue ?? 0);
@@ -210,6 +212,7 @@ export function buildReportExportData(params: {
     executiveSummary,
     recommendations,
     smsLogs: params.smsLogs,
+    feeRecords: params.feeRecords,
   };
 }
 
@@ -432,6 +435,14 @@ export async function exportReportToPdf(
     ['Trend', getTrendLabel(revenueDelta)],
     ['Business Insight', revenueInsight],
   ]);
+  if (data.feeRecords?.length) {
+    pdfService.addSectionHeading('Student Fee Records');
+    pdfService.addTable(['Student', 'Student ID', 'Fee Type', 'Total', 'Paid', 'Balance', 'Status'], data.feeRecords.slice(0, 100).map((record) => [
+      pdfSafe(String(record.studentName || '')), String(record.studentId || ''), pdfSafe(String(record.feeType || '')),
+      pdfSafe(formatCurrency(Number(record.totalAmount || 0))), pdfSafe(formatCurrency(Number(record.paidAmount || 0))),
+      pdfSafe(formatCurrency(Math.max(0, Number(record.totalAmount || 0) - Number(record.paidAmount || 0)))), String(record.status || '')
+    ]));
+  }
 
   // Student Enrollment Analysis
   pdfService.addMainHeading('Student Enrollment Analysis');
@@ -558,6 +569,10 @@ export function exportReportToExcel(data: ReportExportData) {
   addSheetWithRows(wb, 'Fees', [
     ['Metric', 'Value'],
     ['Pending Fees', data.summaryCards.find((item) => item.label === 'Pending Fees')?.value ?? ''],
+    ...(data.feeRecords?.length ? [
+      [], ['Student', 'Student ID', 'Fee Type', 'Total Amount', 'Paid Amount', 'Balance', 'Status', 'Due Date'],
+      ...data.feeRecords.map((record) => [record.studentName || '', record.studentId || '', record.feeType || '', Number(record.totalAmount || 0), Number(record.paidAmount || 0), Math.max(0, Number(record.totalAmount || 0) - Number(record.paidAmount || 0)), record.status || '', record.dueDate || ''])
+    ] : [])
   ]);
 
   addSheetWithRows(wb, 'Revenue', [

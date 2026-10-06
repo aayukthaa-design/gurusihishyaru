@@ -7517,15 +7517,21 @@ async function main() {
 
   // --- Inventory Allocations Endpoints ---
   app.get('/api/inventory/allocations', async (req, res) => {
-    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    const isParent = req.user.roles.includes('parent');
+    if (!req.user.roles.some((r) => ['accountant', 'admin', 'super_admin', 'parent'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM inventory_allocations';
       const params = [];
-      if (branchId) {
-        query += ' WHERE branchId = ?';
-        params.push(branchId);
+      const clauses = [];
+      if (branchId && !isParent) { clauses.push('branchId = ?'); params.push(branchId); }
+      if (isParent) {
+        const linkedStudentIds = Array.isArray(req.user.linkedStudentIds) ? req.user.linkedStudentIds : [];
+        if (!linkedStudentIds.length) return res.json([]);
+        clauses.push(`studentId IN (${linkedStudentIds.map(() => '?').join(',')})`);
+        params.push(...linkedStudentIds);
       }
+      if (clauses.length) query += ` WHERE ${clauses.join(' AND ')}`;
       const rows = await db.all(query, ...params);
       res.json(rows);
     } catch (err) {
@@ -7554,21 +7560,21 @@ async function main() {
       const newAllocated = item.allocatedQuantity + qty;
       const newAvailable = item.availableQuantity - qty;
 
-      // Update inventory stock levels
-      await db.run(`
-        UPDATE inventory_items 
-        SET allocatedQuantity = ?, availableQuantity = ?
-        WHERE id = ?
-      `, newAllocated, newAvailable, itemId);
-
-      // Create allocation record
-      const stmt = await db.prepare(`
-        INSERT INTO inventory_allocations (studentId, studentName, admissionNumber, branchId, itemId, itemName, quantity, allocatedDate, allocatedBy, remarks)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const now = new Date().toISOString().split('T')[0];
-      await stmt.run(studentId, studentName, admissionNumber || '', branchId || '', itemId, item.itemName, qty, now, allocatedBy || 'Accountant', remarks || '');
-      await stmt.finalize();
+      await db.run('BEGIN TRANSACTION');
+      try {
+        await db.run(`UPDATE inventory_items SET allocatedQuantity = ?, availableQuantity = ? WHERE id = ?`, newAllocated, newAvailable, itemId);
+        const stmt = await db.prepare(`
+          INSERT INTO inventory_allocations (studentId, studentName, admissionNumber, branchId, itemId, itemName, quantity, allocatedDate, allocatedBy, remarks, uniformSize)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const now = new Date().toISOString().split('T')[0];
+        await stmt.run(studentId, studentName, admissionNumber || '', branchId || '', itemId, item.itemName, qty, now, allocatedBy || 'Accountant', remarks || '', uniformSize || '');
+        await stmt.finalize();
+        await db.run('COMMIT');
+      } catch (transactionError) {
+        await db.run('ROLLBACK');
+        throw transactionError;
+      }
 
       // Low Stock Notification Trigger
       if (newAvailable <= item.minStock) {
