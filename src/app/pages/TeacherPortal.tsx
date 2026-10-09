@@ -149,13 +149,13 @@ export function TeacherPortal() {
             {pendingTasks.map((task) => {
               const urgent = task.dueDate ? task.dueDate <= new Date().toISOString().split('T')[0] : false;
               return (
-                <div key={task.id} className="flex items-center gap-3 rounded-xl border border-border bg-secondary/50 px-4 py-3">
+                <Link to="/tasks" key={task.id} className="flex items-center gap-3 rounded-xl border border-border bg-secondary/50 px-4 py-3 transition-colors hover:bg-secondary">
                   <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-foreground">{task.title}</p>
                     <p className={`text-xs font-medium ${urgent ? 'text-red-500' : 'text-muted-foreground'}`}>Due: {formatDueDate(task.dueDate)}</p>
                   </div>
-                </div>
+                </Link>
               );
             })}
           </div>

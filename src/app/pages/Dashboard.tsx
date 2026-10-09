@@ -777,7 +777,7 @@ export function Dashboard() {
       notificationType: 'General Announcement',
       priority: 'high',
       recipientRole: 'teacher',
-      classNames: [result.class?.className].filter(Boolean) as string[],
+      classNames: [result.class?.board ? `${result.class.className}|${result.class.board}` : result.class?.className].filter(Boolean) as string[],
     });
     setFeedback('Class created successfully.');
     setClassModalOpen(false);

@@ -86,7 +86,7 @@ export function Batches() {
         message: `${result.class?.className} was updated.`,
         type: 'info', roles: ['teacher', 'admin', 'super_admin'], branchId,
         recipient: 'Teachers', notificationType: 'General Announcement', priority: 'medium',
-        recipientRole: 'teacher', classNames: [result.class?.className].filter(Boolean) as string[],
+        recipientRole: 'teacher', classNames: [result.class?.board ? `${result.class.className}|${result.class.board}` : result.class?.className].filter(Boolean) as string[],
       });
     } else {
       addNotification({
@@ -94,7 +94,7 @@ export function Batches() {
         message: `${result.class?.className} was created${result.class?.subject ? ` for ${result.class.subject}` : ''}.`,
         type: 'info', roles: ['teacher', 'admin', 'super_admin'], branchId,
         recipient: 'Teachers', notificationType: 'General Announcement', priority: 'high',
-        recipientRole: 'teacher', classNames: [result.class?.className].filter(Boolean) as string[],
+        recipientRole: 'teacher', classNames: [result.class?.board ? `${result.class.className}|${result.class.board}` : result.class?.className].filter(Boolean) as string[],
       });
     }
     setFormOpen(false);
@@ -110,7 +110,7 @@ export function Batches() {
       message: `${batch.className} was archived.`,
       type: 'warning', roles: ['teacher', 'admin', 'super_admin'], branchId: batch.branchId,
       recipient: 'Teachers', notificationType: 'General Announcement', priority: 'medium',
-      recipientRole: 'teacher', classNames: [batch.className],
+      recipientRole: 'teacher', classNames: [batch.board ? `${batch.className}|${batch.board}` : batch.className],
     });
   }
 
@@ -152,7 +152,7 @@ export function Batches() {
       message: `${saved.fullName} was added to ${studentsBatch.className}.`,
       type: 'info', roles: ['teacher', 'parent', 'admin'], branchId: studentsBatch.branchId,
       recipient: 'Teachers', notificationType: 'General Announcement', priority: 'low',
-      recipientRole: 'teacher', classNames: [studentsBatch.className], studentIds: [saved.id],
+      recipientRole: 'teacher', classNames: [studentsBatch.board ? `${studentsBatch.className}|${studentsBatch.board}` : studentsBatch.className], studentIds: [saved.id],
     });
     setSelectedStudentId('');
   }
@@ -171,7 +171,7 @@ export function Batches() {
       message: `${student.fullName} was removed from ${studentsBatch.className}.`,
       type: 'warning', roles: ['teacher', 'parent', 'admin'], branchId: studentsBatch.branchId,
       recipient: 'Teachers', notificationType: 'General Announcement', priority: 'low',
-      recipientRole: 'teacher', classNames: [studentsBatch.className], studentIds: [student.id],
+      recipientRole: 'teacher', classNames: [studentsBatch.board ? `${studentsBatch.className}|${studentsBatch.board}` : studentsBatch.className], studentIds: [student.id],
     });
   }
 

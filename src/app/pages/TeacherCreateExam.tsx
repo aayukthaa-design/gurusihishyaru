@@ -199,7 +199,8 @@ export function TeacherCreateExam() {
       message: `${exam.subject} exam for ${exam.className} on ${exam.date}. Maximum marks: ${exam.maxMarks}`,
       type: 'info',
       roles: ['parent'],
-      classNames: [exam.className],
+      // 'Class|Board' so a 10th CBSE/State exam never reaches a 10th ICSE parent.
+      classNames: [exam.batch ? `${exam.className}|${exam.batch}` : exam.className],
       branchId: exam.branchId,
     });
 

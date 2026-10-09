@@ -86,7 +86,7 @@ export async function uploadMaterialAPI(formData: FormData, user: any): Promise<
     description: `Subject: ${created.subject}`,
     type: 'info',
     roles: ['parent'],
-    classNames: [created.className],
+    classNames: [created.batch ? `${created.className}|${created.batch}` : created.className],
     sender: created.teacherName || 'Teacher',
     notificationType: 'Materials',
     branchId: created.branchId,

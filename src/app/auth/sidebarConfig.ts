@@ -106,12 +106,13 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
 // ─── Role-specific sidebar groups ────────────────────────────────────────────
 
 export function getSidebarGroups(role: Role): SidebarGroup[] {
-  const allowed = ALL_SIDEBAR_ITEMS.filter((i) => hasModuleAccess(role, i.module));
+  // Teachers get no Teacher Attendance page: it is an admin payroll register, read-only and empty for them.
+  const allowed = ALL_SIDEBAR_ITEMS.filter((i) => hasModuleAccess(role, i.module) && !(role === 'teacher' && i.href === '/teacher-attendance'));
 
   if (role === 'super_admin') {
     return [
       { label: 'Overview',          items: allowed.filter((i) => i.module === 'dashboard') },
-      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'branch_management', 'role_management', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar', 'casual_leave'] as Module[]).includes(i.module)) },
+      { label: 'Management',        items: allowed.filter((i) => (['user_management', 'student_management', 'teacher_management', 'branch_management', 'role_management', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar', 'casual_leave'] as Module[]).includes(i.module)) },
       { label: 'Finance & Reports', items: allowed.filter((i) => (['expense_management', 'accountant_portal', 'reports_analytics', 'student_performance_analytics'] as Module[]).includes(i.module)) },
       { label: 'System',            items: allowed.filter((i) => (['notification_center', 'system_settings', 'backup_restore', 'theme_settings'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);
@@ -121,9 +122,8 @@ export function getSidebarGroups(role: Role): SidebarGroup[] {
     return [
       { label: 'Overview',  items: allowed.filter((i) => i.module === 'dashboard') },
       { label: 'People',    items: allowed.filter((i) => (['student_management', 'teacher_management', 'parent_management', 'class_allocation'] as Module[]).includes(i.module)) },
-      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar', 'school_exam_schedules', 'casual_leave'] as Module[]).includes(i.module)) },
-      { label: 'Finance',   items: allowed.filter((i) => (['fee_management', 'expense_management', 'inventory'] as Module[]).includes(i.module)) },
-      { label: 'More',      items: allowed.filter((i) => (['event_management', 'notification_center', 'reports_analytics'] as Module[]).includes(i.module)) },
+      { label: 'Academic',  items: allowed.filter((i) => (['attendance', 'exam_marks', 'timetable', 'admission_crm', 'teacher_tasks', 'special_classes', 'materials', 'lesson_plan', 'holiday_calendar', 'school_exam_schedules'] as Module[]).includes(i.module)) },
+      { label: 'More',      items: allowed.filter((i) => (['event_management', 'notification_center'] as Module[]).includes(i.module)) },
     ].filter((g) => g.items.length > 0);
   }
 

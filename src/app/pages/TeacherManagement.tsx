@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { useBranches, getBranchName, filterByBranch } from '../lib/branchService';
+import { exportRowsToExcel } from '../lib/reportExport';
 import {
   BookOpen, Plus, Search, Eye, Edit2, ChevronRight, X,
   Phone, Mail, Award, GraduationCap, Cake,
@@ -304,6 +305,17 @@ export function TeacherManagement() {
     return matchesSearch;
   });
 
+  const [exportScope, setExportScope] = useState<'Active' | 'Inactive' | 'All'>('Active');
+  const handleExportTeachers = () => {
+    const rows = filterByBranch(teachers, user, branchFilter)
+      .filter((t) => exportScope === 'All' || t.status === exportScope)
+      .map((t) => ({
+        'Teacher ID': t.id, Name: `${t.firstName} ${t.lastName}`.trim(), Mobile: t.mobile, Email: t.email, Qualification: t.qualification,
+        Experience: t.experience, Subjects: t.subjects, Department: t.department ?? '', Status: t.status,
+      }));
+    exportRowsToExcel(rows, 'Teachers', `teachers-${exportScope.toLowerCase()}.xlsx`);
+  };
+
   const handleAdd = async (data: Omit<Teacher, 'id'>) => {
     if (!data.firstName.trim() || !data.mobile.trim()) {
       setFormError('First name and mobile are required.');
@@ -407,6 +419,12 @@ export function TeacherManagement() {
               {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
             </select>
           )}
+          <select value={exportScope} onChange={(e) => setExportScope(e.target.value as 'Active' | 'Inactive' | 'All')} className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none">
+            <option value="Active">Active</option>
+            <option value="Inactive">Inactive / discontinued</option>
+            <option value="All">All</option>
+          </select>
+          <button onClick={handleExportTeachers} className="rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary/80">Export Excel</button>
           <button
             onClick={() => setPanel('add')}
             className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-95"

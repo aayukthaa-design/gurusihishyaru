@@ -65,7 +65,7 @@ export function TeacherAttendance() {
       // not just 'admin'.
       const branchMatches = user?.role === 'super_admin' ? true : teacher.branchId === user?.branchId;
       const branchFilterMatches = !branchFilter || teacher.branchId === branchFilter;
-      return branchMatches && branchFilterMatches;
+      return branchMatches && branchFilterMatches && teacher.status !== 'Inactive';
     });
   }, [branchFilter, teachers, user]);
 
@@ -179,8 +179,10 @@ export function TeacherAttendance() {
     setSaved(false);
   };
 
+  const [exportMonth, setExportMonth] = useState(attendanceMonth);
   const handleExportMonth = async (format: 'pdf' | 'excel') => {
-    const rows: AttendanceExportRow[] = history.map(({ teacher, history: summary }) => ({
+    const monthEntries = exportMonth === attendanceMonth ? monthAttendance : await fetchTeacherAttendance({ month: exportMonth, branchId: branchIdForQuery });
+    const rows: AttendanceExportRow[] = allowedTeachers.map((teacher) => ({ teacher, history: summarizeTeacherAttendance(monthEntries, teacher.id, exportMonth) })).map(({ teacher, history: summary }) => ({
       name: `${teacher.firstName} ${teacher.lastName}`,
       id: teacher.id,
       present: summary.present,
@@ -190,8 +192,8 @@ export function TeacherAttendance() {
       total: summary.workingDays,
     }));
     const title = 'Teacher Attendance';
-    if (format === 'excel') exportAttendanceToExcel(rows, title, attendanceMonth);
-    else await exportAttendanceToPdf(rows, title, attendanceMonth, user?.name || 'Admin');
+    if (format === 'excel') exportAttendanceToExcel(rows, title, exportMonth);
+    else await exportAttendanceToPdf(rows, title, exportMonth, user?.name || 'Admin');
   };
 
   const handleSave = async () => {
@@ -547,6 +549,7 @@ export function TeacherAttendance() {
               <h2 className="text-lg font-semibold text-foreground">Monthly Attendance History</h2>
             </div>
             <div className="flex gap-2">
+              <input type="month" value={exportMonth} onChange={(event) => setExportMonth(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm" />
               <button type="button" onClick={() => handleExportMonth('pdf')} className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80">
                 <FileDown className="h-4 w-4" /> Export PDF
               </button>

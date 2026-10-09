@@ -47,10 +47,14 @@ export function Inventory() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [isSaving, setIsSaving] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  // Restock: picking an existing item of the chosen category adds to its stock instead of making a duplicate.
+  const [restockId, setRestockId] = useState('');
+  const [categoryNames, setCategoryNames] = useState<string[]>([]);
 
   function resetForm() {
     setForm(EMPTY_FORM);
     setEditingId(null);
+    setRestockId('');
     setShowAddForm(false);
   }
 
@@ -81,6 +85,13 @@ export function Inventory() {
   }
 
   useEffect(() => {
+    apiFetch('/api/inventory-categories')
+      .then((res) => (res.ok ? res.json() : []))
+      .then((rows) => setCategoryNames(Array.isArray(rows) ? rows.filter((c: any) => c.status !== 'Inactive').map((c: any) => c.name) : []))
+      .catch(() => setCategoryNames([]));
+  }, []);
+
+  useEffect(() => {
     loadInventory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branchFilter]);
@@ -95,24 +106,25 @@ export function Inventory() {
 
   async function handleAddItem(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.itemName || !form.category || !form.quantity || !form.purchaseCost) {
+    if ((!form.itemName && !restockId) || !form.category || !form.quantity || !form.purchaseCost) {
       setError('Item name, category, quantity and purchase cost are required.');
       return;
     }
     setIsSaving(true);
     setError(null);
     try {
+      const restockItem = !editingId && restockId ? items.find((i) => String(i.id) === restockId) : null;
       const body = {
-        itemName: form.itemName,
+        itemName: restockItem ? restockItem.itemName : form.itemName,
         category: form.category,
-        quantity: Number(form.quantity),
+        quantity: Number(form.quantity) + (restockItem ? restockItem.quantity : 0),
         minStock: Number(form.minStock || 0),
         unit: form.unit,
         purchaseCost: Number(form.purchaseCost),
         supplier: form.supplier,
       };
-      const res = editingId
-        ? await apiFetch(`/api/inventory/${editingId}`, { method: 'PUT', body })
+      const res = editingId || restockItem
+        ? await apiFetch(`/api/inventory/${editingId ?? restockItem!.id}`, { method: 'PUT', body })
         : await apiFetch('/api/inventory', { method: 'POST', body });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -210,17 +222,37 @@ export function Inventory() {
         {showAddForm && canManage && (
           <form onSubmit={handleAddItem} className="rounded-2xl border border-border bg-card p-6 shadow-sm grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <label className="flex flex-col gap-1.5 text-sm">
-              <span className="font-medium text-foreground">Item Name</span>
-              <input value={form.itemName} onChange={(e) => setForm((f) => ({ ...f, itemName: e.target.value }))}
-                className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
-            </label>
-            <label className="flex flex-col gap-1.5 text-sm">
               <span className="font-medium text-foreground">Category</span>
-              <input value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
-                className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+              <select value={form.category} onChange={(e) => { setRestockId(''); setForm((f) => ({ ...f, category: e.target.value, itemName: '' })); }}
+                className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
+                <option value="">Select category</option>
+                {Array.from(new Set([...categoryNames, ...items.map((i) => i.category)])).filter(Boolean).map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
             </label>
+            {!editingId && (
+              <label className="flex flex-col gap-1.5 text-sm">
+                <span className="font-medium text-foreground">Item</span>
+                <select value={restockId} onChange={(e) => {
+                  const item = items.find((i) => String(i.id) === e.target.value);
+                  setRestockId(e.target.value);
+                  setForm((f) => item
+                    ? { ...f, itemName: item.itemName, quantity: '', minStock: String(item.minStock ?? 0), unit: item.unit || f.unit, purchaseCost: String(item.purchaseCost), supplier: item.supplier || '' }
+                    : { ...f, itemName: '' });
+                }} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
+                  <option value="">+ New item</option>
+                  {items.filter((i) => i.category === form.category && i.status !== 'Inactive').map((i) => <option key={i.id} value={i.id}>{i.itemName} (stock {i.quantity})</option>)}
+                </select>
+              </label>
+            )}
+            {(editingId || !restockId) && (
+              <label className="flex flex-col gap-1.5 text-sm">
+                <span className="font-medium text-foreground">Item Name</span>
+                <input value={form.itemName} onChange={(e) => setForm((f) => ({ ...f, itemName: e.target.value }))}
+                  className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+              </label>
+            )}
             <label className="flex flex-col gap-1.5 text-sm">
-              <span className="font-medium text-foreground">Quantity</span>
+              <span className="font-medium text-foreground">{restockId ? 'Quantity to add' : 'Quantity'}</span>
               <input type="number" min={0} value={form.quantity} onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))}
                 className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary" />
             </label>

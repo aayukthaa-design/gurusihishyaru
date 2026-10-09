@@ -91,7 +91,7 @@ export function TeacherEnterMarks() {
             <div key={s.id} className="flex items-center justify-between rounded-md border p-3">
               <div>
                 <p className="text-sm font-medium">{s.name}</p>
-                <p className="text-xs text-muted-foreground">Roll: {s.roll}</p>
+                <p className="text-xs text-muted-foreground">Max marks: {exam.maxMarks ?? 100}</p>
               </div>
               <div>
                 <input

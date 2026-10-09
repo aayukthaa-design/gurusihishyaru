@@ -96,7 +96,7 @@ export async function publishExam(id: string): Promise<void> {
       message: `${exam.name} for ${exam.className} has been published and added to the student portal.`,
       type: 'success',
       roles: ['admin', 'parent'],
-      classNames: [exam.className],
+      classNames: [exam.batch ? `${exam.className}|${exam.batch}` : exam.className],
     });
   }
 }

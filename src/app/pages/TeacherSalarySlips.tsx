@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { useTeachers } from '../lib/teacherService';
-import { fetchSalaryRecords, type SalaryRecord } from '../lib/teacherSalaryService';
+import { describeSalaryBreakdown, fetchSalaryRecords, type SalaryRecord } from '../lib/teacherSalaryService';
+import { fetchCasualLeaveBalances } from '../lib/casualLeaveService';
 import { generateSalarySlipData } from '../lib/reportExport';
 import { formatIndianCurrency } from '../lib/currency';
 import { getBranchName } from '../lib/branchService';
@@ -11,7 +12,7 @@ import { Download, FileText } from 'lucide-react';
 export function TeacherSalarySlips() {
   const { user } = useAuth();
   const teachers = useTeachers();
-  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [selectedMonth, setSelectedMonth] = useState(''); // empty = all months
   const [records, setRecords] = useState<SalaryRecord[]>([]);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
 
@@ -28,16 +29,17 @@ export function TeacherSalarySlips() {
     setDownloadingId(record.id);
     try {
       const teacherName = record.teacherName || `${selectedTeacher?.firstName ?? ''} ${selectedTeacher?.lastName ?? ''}`.trim();
-      const attendanceStr = `${record.classesConducted} Classes × ₹${record.salaryPerClass} = ${formatIndianCurrency(record.calculatedSalary)}`;
+      const clRow = (await fetchCasualLeaveBalances())[0];
+      const attendanceStr = describeSalaryBreakdown(record, clRow ? Math.max(0, clRow.annualAllotment - clRow.leavesTaken) : undefined);
       const base64 = await generateSalarySlipData(
         teacherName,
         record.teacherId,
         getBranchName(record.branchId),
         record.month,
         record.salaryType || 'Per Class',
-        `₹${record.salaryPerClass}`,
+        record.salaryType === 'Monthly Fixed' ? formatIndianCurrency(record.salaryAmount ?? 0) : `₹${record.salaryPerClass}`,
         attendanceStr,
-        formatIndianCurrency(record.calculatedSalary),
+        formatIndianCurrency(record.salaryType === 'Monthly Fixed' ? (record.salaryAmount ?? record.calculatedSalary) : record.calculatedSalary),
         formatIndianCurrency(record.calculatedSalary),
         record.paidBy || 'Accountant'
       );
@@ -75,7 +77,7 @@ export function TeacherSalarySlips() {
 
         {records.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-border bg-secondary/30 p-8 text-center text-sm text-muted-foreground">
-            No salary record found for {selectedMonth}. Ask your accountant if your salary for this month has been processed.
+            No salary record found{selectedMonth ? ` for ${selectedMonth}` : ''}. Ask your accountant if your salary for this month has been processed.
           </div>
         ) : (
           <div className="grid gap-4">

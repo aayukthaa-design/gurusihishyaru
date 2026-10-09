@@ -431,6 +431,7 @@ export function markNotificationAsRead(id: string, actor?: NotificationActor): v
         ...notification,
         status: 'read',
         read: true,
+        isReadByMe: true,
         readAt: timestamp,
         readBy: actor?.name ?? 'System',
         readByRole: actor?.role ?? 'system',
@@ -449,13 +450,14 @@ export function markNotificationAsRead(id: string, actor?: NotificationActor): v
 export function markAllRead(actor?: NotificationActor): void {
   const timestamp = new Date().toISOString();
   const current = getNotifications();
-  const ids = current.filter((notification) => notification.status !== 'deleted' && notification.status !== 'read').map((notification) => notification.id);
+  const ids = current.filter((notification) => isUnreadForMe(notification)).map((notification) => notification.id);
   applyNotificationUpdate((prev) => prev.map((notification) => {
-    if (notification.status === 'deleted' || notification.status === 'read') return notification;
+    if (!isUnreadForMe(notification)) return notification;
     return {
       ...notification,
       status: 'read',
       read: true,
+      isReadByMe: true,
       readAt: timestamp,
       readBy: actor?.name ?? 'System',
       readByRole: actor?.role ?? 'system',
@@ -541,7 +543,7 @@ export function getVisibleNotificationsForUser(
 
     if (user.role === 'teacher') {
       const assignedClasses = user.assignedClassIds ?? [];
-      if (notification.classNames?.some((className) => assignedClasses.includes(className))) return true;
+      if (notification.classNames?.some((className) => assignedClasses.includes(className.split('|')[0]))) return true;
       if (explicitRoles.includes('teacher')) return true;
       return false;
     }
@@ -555,7 +557,8 @@ export function getVisibleNotificationsForUser(
       // own child is actually in, not just "this parent has some child".
       if (notification.studentIds?.length) return false;
       if (notification.classNames?.length) {
-        const childClassNames = getStudentsByIds(user.linkedStudentIds ?? []).map((s) => s.className);
+        // 'Class' (any board) and 'Class|Board' (board-specific) keys, mirroring the server.
+        const childClassNames = getStudentsByIds(user.linkedStudentIds ?? []).flatMap((s) => (s.batch ? [s.className, `${s.className}|${s.batch}`] : [s.className]));
         return notification.classNames.some((className) => childClassNames.includes(className));
       }
       if (explicitRoles.includes('parent')) return true;

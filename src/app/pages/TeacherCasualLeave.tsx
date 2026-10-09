@@ -19,11 +19,12 @@ export function TeacherCasualLeave() {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [leavesTaken, setLeavesTaken] = useState(0);
+  const [allotment, setAllotment] = useState(12);
 
   const load = () => {
     if (!user) return;
     fetchCasualLeaves({ teacherId: user.id }).then(setRequests);
-    fetchCasualLeaveBalances().then((rows) => setLeavesTaken(rows[0]?.leavesTaken ?? 0));
+    fetchCasualLeaveBalances().then((rows) => { setLeavesTaken(rows[0]?.leavesTaken ?? 0); setAllotment(rows[0]?.annualAllotment ?? 12); });
   };
 
   useEffect(load, [user]);
@@ -63,7 +64,7 @@ export function TeacherCasualLeave() {
       <div className="max-w-3xl mx-auto p-6 space-y-6">
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
           <p className="text-sm text-muted-foreground">Casual Leaves Taken (set by Super Admin)</p>
-          <p className="mt-1 text-2xl font-bold text-foreground">{leavesTaken}</p>
+          <p className="mt-1 text-2xl font-bold text-foreground">{leavesTaken} <span className="text-sm font-normal text-muted-foreground">of {allotment} per year · {Math.max(0, allotment - leavesTaken)} remaining</span></p>
         </div>
 
         <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">

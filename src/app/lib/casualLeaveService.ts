@@ -53,6 +53,7 @@ export interface CasualLeaveBalance {
   roles: string[];
   branchId?: string;
   leavesTaken: number;
+  annualAllotment: number;
   updatedAt?: string;
 }
 
@@ -66,8 +67,8 @@ export async function fetchCasualLeaveBalances(params?: { branchId?: string }): 
   return Array.isArray(data) ? data : [];
 }
 
-export async function updateCasualLeaveBalance(userId: string, leavesTaken: number): Promise<CasualLeaveBalance> {
-  const res = await apiFetch(`/api/casual-leave-balances/${userId}`, { method: 'PUT', body: { leavesTaken } });
+export async function updateCasualLeaveBalance(userId: string, leavesTaken: number, annualAllotment?: number): Promise<CasualLeaveBalance> {
+  const res = await apiFetch(`/api/casual-leave-balances/${userId}`, { method: 'PUT', body: { leavesTaken, annualAllotment } });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to update leave balance');
   return res.json();
 }

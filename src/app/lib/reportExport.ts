@@ -629,6 +629,18 @@ export function exportAttendanceToExcel(rows: AttendanceExportRow[], title: stri
   writeFile(wb, `${title.replace(/\s+/g, '-')}-${month}.xlsx`);
 }
 
+export function exportRowsToExcel(rows: Array<Record<string, unknown>>, sheetName: string, fileName: string) {
+  const wb: WorkBook = utils.book_new();
+  utils.book_append_sheet(wb, utils.json_to_sheet(rows), sheetName);
+  writeFile(wb, fileName);
+}
+
+export function exportDailyAttendanceToExcel(rows: Array<{ name: string; id: string; status: string }>, title: string, date: string) {
+  const wb: WorkBook = utils.book_new();
+  addSheetWithRows(wb, 'Attendance', [['Name', 'ID', 'Status'], ...rows.map((r) => [r.name, r.id, r.status])]);
+  writeFile(wb, `${title.replace(/\s+/g, '-')}-${date}.xlsx`);
+}
+
 export async function exportAttendanceToPdf(rows: AttendanceExportRow[], title: string, month: string, generatedBy: string) {
   const pdfService = new PDFTemplateService();
   pdfService.addTitle(title);

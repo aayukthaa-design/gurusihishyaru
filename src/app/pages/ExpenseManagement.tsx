@@ -90,9 +90,11 @@ export function ExpenseManagement() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branchFilter]);
 
+  const [monthFilter, setMonthFilter] = useState('');
   const filtered = useMemo(() => expenses.filter((expense) =>
     `${expense.category} ${expense.description}`.toLowerCase().includes(search.toLowerCase())
-  ), [expenses, search]);
+    && (!monthFilter || expense.date.startsWith(monthFilter))
+  ), [expenses, search, monthFilter]);
 
   const totalExpenses = filtered.reduce((sum, expense) => sum + expense.amount, 0);
   const thisMonthTotal = filtered
@@ -173,6 +175,7 @@ export function ExpenseManagement() {
             <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input type="search" placeholder="Search expenses" value={search} onChange={(event) => setSearch(event.target.value)} className="w-full rounded-xl border border-input bg-input-background py-2.5 pl-10 pr-4 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" />
           </div>
+          <input type="month" value={monthFilter} onChange={(event) => setMonthFilter(event.target.value)} title="Filter by month" className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none" />
           {user?.role === 'super_admin' && (
             <select value={branchFilter} onChange={(event) => setBranchFilter(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none">
               <option value="">All Branches</option>

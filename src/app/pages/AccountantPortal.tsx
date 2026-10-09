@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router';
 import { useTeachers } from '../lib/teacherService';
 import { generateSalarySlipData } from '../lib/reportExport';
-import { fetchSalaryRecords, fetchTeacherAttendance, markSalaryRecordPaid, summarizeTeacherAttendance, unlockSalaryRecord, type SalaryRecord, type TeacherAttendanceEntry } from '../lib/teacherSalaryService';
+import { fetchCasualLeaveBalances } from '../lib/casualLeaveService';
+import { describeSalaryBreakdown, fetchSalaryRecords, fetchTeacherAttendance, markSalaryRecordPaid, summarizeTeacherAttendance, unlockSalaryRecord, type SalaryRecord, type TeacherAttendanceEntry } from '../lib/teacherSalaryService';
 import { Header } from '../components/Header';
 import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
@@ -242,6 +243,8 @@ export function AccountantPortal() {
     status: 'Active' as 'Active' | 'Inactive',
     damagedQuantity: '0'
   });
+  // When set, the modal restocks this existing item (adds to its quantity) instead of creating a new one.
+  const [restockItemId, setRestockItemId] = useState('');
 
   const [showAllocateModal, setShowAllocateModal] = useState(false);
   const [allocateForm, setAllocateForm] = useState({
@@ -366,16 +369,17 @@ export function AccountantPortal() {
 
   const buildSalarySlipPdf = async (record: SalaryRecord) => {
     const teacherName = record.teacherName;
-    const attendanceStr = `${record.classesConducted} Classes × ₹${record.salaryPerClass} = ${formatIndianCurrency(record.calculatedSalary)}`;
+    const clRow = isSuperAdmin ? (await fetchCasualLeaveBalances()).find((r) => r.userId === record.teacherId) : undefined;
+    const attendanceStr = describeSalaryBreakdown(record, clRow ? Math.max(0, clRow.annualAllotment - clRow.leavesTaken) : undefined);
     return generateSalarySlipData(
       teacherName,
       record.teacherId,
       getBranchName(record.branchId),
       record.month,
       record.salaryType || 'Per Class',
-      `₹${record.salaryPerClass}`,
+      record.salaryType === 'Monthly Fixed' ? formatIndianCurrency(record.salaryAmount ?? 0) : `₹${record.salaryPerClass}`,
       attendanceStr,
-      formatIndianCurrency(record.calculatedSalary),
+      formatIndianCurrency(record.salaryType === 'Monthly Fixed' ? (record.salaryAmount ?? record.calculatedSalary) : record.calculatedSalary),
       formatIndianCurrency(record.calculatedSalary),
       user?.name || 'Accountant'
     );
@@ -760,11 +764,12 @@ export function AccountantPortal() {
       return;
     }
 
+    const restockItem = !editingInvItem && restockItemId ? inventory.find((i) => String(i.id) === restockItemId) : null;
     const payload = {
       itemName: invForm.itemName,
       category: invForm.category,
       description: invForm.description,
-      quantity: Number(invForm.quantity),
+      quantity: Number(invForm.quantity) + (restockItem ? restockItem.quantity : 0),
       uniformSize: invForm.uniformSize,
       minStock: Number(invForm.minStock || 0),
       unit: invForm.unit,
@@ -778,10 +783,10 @@ export function AccountantPortal() {
 
     try {
       let res;
-      if (editingInvItem) {
-        res = await apiFetch(`/api/inventory/${editingInvItem.id}`, {
+      if (editingInvItem || restockItem) {
+        res = await apiFetch(`/api/inventory/${(editingInvItem ?? restockItem)!.id}`, {
           method: 'PUT',
-          body: payload
+          body: restockItem ? { ...payload, damagedQuantity: restockItem.damagedQuantity } : payload
         });
       } else {
         res = await apiFetch('/api/inventory', {
@@ -793,6 +798,7 @@ export function AccountantPortal() {
       if (res.ok) {
         setShowAddInvModal(false);
         setEditingInvItem(null);
+        setRestockItemId('');
         setInvForm({
           uniformSize: '',
           itemName: '',
@@ -823,6 +829,12 @@ export function AccountantPortal() {
   };
 
   // Handle Inventory Allocation
+  // Category/name match is case-insensitive ('Uniform', 'uniforms', 'School Uniform' ...) so the size field always appears for uniforms.
+  const isUniformItem = (itemId: number) => {
+    const item = inventory.find((i) => i.id === itemId);
+    return !!item && /uniform/i.test(`${item.category} ${item.itemName}`);
+  };
+
   const handleAllocateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!allocateForm.studentId || !allocateForm.itemId || !allocateForm.quantity) {
@@ -833,7 +845,7 @@ export function AccountantPortal() {
     const studentObj = students.find(s => s.id === allocateForm.studentId);
     if (!studentObj) return;
 
-    const isUniform = inventory.find(i => i.id === Number(allocateForm.itemId))?.category === 'Uniform' || inventory.find(i => i.id === Number(allocateForm.itemId))?.category === 'Uniforms';
+    const isUniform = isUniformItem(Number(allocateForm.itemId));
     if (isUniform && !allocateForm.uniformSize) {
       alert('Uniform size is required for uniforms.');
       return;
@@ -1028,7 +1040,7 @@ export function AccountantPortal() {
             { id: 'allocations', label: 'Student Allocations' },
             { id: 'salaries', label: 'Teacher Salaries' },
             { id: 'reports', label: 'Weekly Report' }
-          ].map(tab => (
+          ].filter(tab => !(isSuperAdmin && tab.id === 'reports')).map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
@@ -1159,8 +1171,8 @@ export function AccountantPortal() {
                       <span className="text-xs font-bold text-foreground text-center">Teacher Salaries</span>
                     </div>
 
-                    {/* 7. Submit Weekly Report */}
-                    <div
+                    {/* 7. Submit Weekly Report — accountants only; the Super Admin reviews these, never submits */}
+                    {!isSuperAdmin && <div
                       onClick={() => {
                         if (currentMonthReportSubmitted) {
                           alert("Weekly Report Already Submitted");
@@ -1175,7 +1187,7 @@ export function AccountantPortal() {
                         <FileSpreadsheet className="h-6 w-6" />
                       </span>
                       <span className="text-xs font-bold text-foreground text-center">Submit Weekly Report</span>
-                    </div>
+                    </div>}
                   </div>
                 </div>
 
@@ -1518,6 +1530,7 @@ export function AccountantPortal() {
                   <button
                     onClick={() => {
                       setEditingInvItem(null);
+                      setRestockItemId('');
                       setInvForm({
                         itemName: '',
                         category: 'Books',
@@ -1564,6 +1577,7 @@ export function AccountantPortal() {
                           <td className="px-4 py-3 font-mono text-xs">{item.itemCode}</td>
                           <td className="px-4 py-3 font-medium text-foreground">{item.itemName}</td>
                           <td className="px-4 py-3">{item.category}</td>
+                          <td className="px-4 py-3 text-center">{item.uniformSize || '—'}</td>
                           <td className="px-4 py-3 text-center font-semibold">{item.quantity} {item.unit}</td>
                           <td className="px-4 py-3 text-center text-amber-600 font-semibold">{item.allocatedQuantity}</td>
                           <td className="px-4 py-3 text-center text-emerald-600 font-semibold">{item.availableQuantity}</td>
@@ -2353,6 +2367,26 @@ export function AccountantPortal() {
               <button type="button" onClick={() => setShowAddInvModal(false)} className="text-sm text-muted-foreground hover:text-foreground">?</button>
             </div>
 
+            {!editingInvItem && (
+              <div>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Restock existing item (optional)</label>
+                <select
+                  value={restockItemId}
+                  onChange={(e) => {
+                    const item = inventory.find((i) => String(i.id) === e.target.value);
+                    setRestockItemId(e.target.value);
+                    setInvForm((prev) => item
+                      ? { ...prev, itemName: item.itemName, category: item.category, unit: item.unit, minStock: String(item.minStock), purchaseCost: String(item.purchaseCost), supplier: item.supplier || '', description: item.description || '', uniformSize: item.uniformSize || '', quantity: '' }
+                      : { ...prev, itemName: '', quantity: '' })
+                  }}
+                  className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
+                >
+                  <option value="">— New item —</option>
+                  {inventory.filter((i) => i.status !== 'Inactive').map((i) => <option key={i.id} value={i.id}>{i.itemName} (in stock: {i.quantity})</option>)}
+                </select>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Item Code</label>
@@ -2362,7 +2396,7 @@ export function AccountantPortal() {
                   value={invForm.itemCode}
                   onChange={(e) => setInvForm(prev => ({ ...prev, itemCode: e.target.value }))}
                   className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
-                  required
+                  required={!restockItemId}
                 />
               </div>
 
@@ -2401,9 +2435,8 @@ export function AccountantPortal() {
                     type="text"
                     value={invForm.uniformSize}
                     onChange={(e) => setInvForm(prev => ({ ...prev, uniformSize: e.target.value }))}
-                    placeholder="e.g. S, M, L, XL, 32, 34"
+                    placeholder="e.g. S, M, L, XL, 32, 34 (optional)"
                     className="w-full rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:outline-none"
-                    required
                   />
                 </div>
               )}
@@ -2424,7 +2457,7 @@ export function AccountantPortal() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Initial Quantity Bought</label>
+                <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">{restockItemId ? 'Quantity to add' : 'Initial Quantity Bought'}</label>
                 <input
                   type="number"
                   placeholder="e.g. 100"
@@ -2565,8 +2598,7 @@ export function AccountantPortal() {
                 />
               </div>
 
-              {(inventory.find(i => i.id === Number(allocateForm.itemId))?.category === 'Uniform' ||
-                inventory.find(i => i.id === Number(allocateForm.itemId))?.category === 'Uniforms') && (
+              {isUniformItem(Number(allocateForm.itemId)) && (
                 <div>
                   <label className="block text-xs font-semibold text-muted-foreground mb-1 uppercase">Uniform Size</label>
                   <input

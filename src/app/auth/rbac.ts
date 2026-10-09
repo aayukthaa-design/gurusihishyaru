@@ -32,6 +32,8 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'holiday_calendar',
       'school_exam_schedules',   // same oversight visibility Admin already has
       'casual_leave',            // review/approve teacher leave requests
+      'student_management',      // view + export student lists (active/inactive)
+      'teacher_management',      // view + export teacher/staff lists (active/inactive)
     ],
     permissions: [
       'create',
@@ -55,7 +57,6 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'teacher_management',     // manage teacher profiles & assignments
       'parent_management',      // manage parent records
       'class_allocation',       // create/edit batches, assign teachers, manage batch students
-      'fee_management',         // collect and track fees
       'attendance',             // daily attendance
       'exam_marks',             // exams and results
       'teacher_tasks',          // assign teacher work
@@ -63,15 +64,11 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'admission_crm',          // new admissions
       'event_management',       // events and meetings
       'notification_center',    // send notifications
-      'reports_analytics',      // operational reports
-      'expense_management',     // day-to-day expenses
-      'inventory',              // inventory management
       'special_classes',
       'materials',               // oversight of all teachers' uploaded materials
       'lesson_plan',              // oversight of all teachers' lesson plans
       'holiday_calendar',
       'school_exam_schedules',   // the dashboard's own "Upcoming School Exams" card links here
-      'casual_leave',            // read-only: super_admin owns approvals/leave-balance edits
     ],
     permissions: ['create', 'read', 'update', 'delete', 'export'],
   },
@@ -199,7 +196,7 @@ export function canAccessRoute(role: Role, path: string): boolean {
   // and teachers still get in via the 'attendance' module below, but the page
   // itself (TeacherAttendance.tsx) renders everything read-only for them.
   if (path === '/teacher-attendance' || path.startsWith('/teacher-attendance')) {
-    return role === 'admin' || role === 'super_admin' || role === 'teacher' || role === 'accountant';
+    return role === 'admin' || role === 'super_admin' || role === 'accountant';
   }
 
   for (const [module, routes] of Object.entries(MODULE_ROUTES)) {

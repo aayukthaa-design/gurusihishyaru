@@ -134,7 +134,7 @@ export function Timetable() {
       message: `${selectedClass}'s timetable was updated for ${editSlot.day}.`,
       type: 'info', roles: ['teacher', 'admin', 'super_admin'], branchId: selectedBatch?.branchId,
       recipient: 'Teachers', notificationType: 'General Announcement', priority: 'low',
-      recipientRole: 'teacher', classNames: [selectedClass],
+      recipientRole: 'teacher', classNames: [selectedBatch?.board ? `${selectedClass}|${selectedBatch.board}` : selectedClass],
     });
     setEditSlot(null);
   };

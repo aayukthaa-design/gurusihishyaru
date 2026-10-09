@@ -50,12 +50,18 @@ function ExamsList() {
       .map((grade) => ({ grade, count: counts[grade], percent: Math.round((counts[grade] / total) * 100) }));
   }, [marks]);
 
+  const today = new Date().toISOString().slice(0, 10);
+  const upcomingExams = React.useMemo(
+    () => exams.filter((e) => String(e.date) >= today).sort((a, b) => String(a.date).localeCompare(String(b.date))),
+    [exams, today]
+  );
+
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       <div className="rounded-xl border border-border bg-card p-6 transition-colors duration-200">
         <h3 className="mb-4 text-lg font-semibold text-card-foreground">Upcoming Exams</h3>
         <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
-          {exams.map((exam) => (
+          {upcomingExams.map((exam) => (
             <div key={exam.id} className="flex items-center justify-between rounded-lg border border-border bg-secondary p-4">
               <div>
                 <p className="font-medium text-card-foreground">{exam.name} — {exam.subject}</p>
@@ -80,7 +86,7 @@ function ExamsList() {
               </div>
             </div>
           ))}
-          {exams.length === 0 && <p className="text-sm text-muted-foreground">No upcoming exams</p>}
+          {upcomingExams.length === 0 && <p className="text-sm text-muted-foreground">No upcoming exams</p>}
         </div>
       </div>
 
@@ -112,6 +118,13 @@ export function ExamsManagement() {
   const [exams, setExams] = React.useState<Exam[]>([]);
   const [marks, setMarks] = React.useState<MarkRecord[]>([]);
   const [selectedExamId, setSelectedExamId] = React.useState<string>('');
+  const [classFilter, setClassFilter] = React.useState('');
+  const [monthFilter, setMonthFilter] = React.useState('');
+  const classOptions = React.useMemo(() => Array.from(new Set(exams.map((e) => e.className).filter(Boolean))).sort(), [exams]);
+  const filteredExams = React.useMemo(
+    () => exams.filter((e) => (!classFilter || e.className === classFilter) && (!monthFilter || String(e.date).startsWith(monthFilter))),
+    [exams, classFilter, monthFilter]
+  );
 
   React.useEffect(() => {
     const unsub = subscribeExams((items) => setExams(items));
@@ -121,11 +134,11 @@ export function ExamsManagement() {
   }, []);
 
   React.useEffect(() => {
-    if (!selectedExamId && exams.length > 0) {
-      const sorted = [...exams].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    if (filteredExams.length > 0 && !filteredExams.some((e) => String(e.id) === selectedExamId)) {
+      const sorted = [...filteredExams].sort((a, b) => String(b.date).localeCompare(String(a.date)));
       setSelectedExamId(String(sorted[0].id));
     }
-  }, [exams, selectedExamId]);
+  }, [filteredExams, selectedExamId]);
 
   const selectedExam = exams.find((e) => String(e.id) === selectedExamId);
 
@@ -183,8 +196,11 @@ export function ExamsManagement() {
   const exportResultsToExcel = (rows: ExamResult[]) => {
     const workbook = utils.book_new();
     const sheetData = [
-      ['Student ID', 'Student Name', 'Subject', 'Max Marks', 'Obtained', 'Percentage', 'Grade'],
+      ['Exam', 'Class', 'Exam Date', 'Student ID', 'Student Name', 'Subject', 'Max Marks', 'Obtained', 'Percentage', 'Grade'],
       ...rows.map((row) => [
+        selectedExam?.name ?? '',
+        selectedExam?.className ?? '',
+        selectedExam?.date ?? '',
         row.studentId,
         row.studentName,
         row.subject,
@@ -267,12 +283,27 @@ export function ExamsManagement() {
             <div className="flex items-center gap-3">
               <h3 className="text-lg font-semibold text-foreground">Results</h3>
               <select
+                value={classFilter}
+                onChange={(e) => setClassFilter(e.target.value)}
+                className="rounded-lg border border-input bg-input-background px-3 py-1.5 text-sm focus:outline-none focus:border-primary"
+              >
+                <option value="">All classes / batches</option>
+                {classOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <input
+                type="month"
+                value={monthFilter}
+                onChange={(e) => setMonthFilter(e.target.value)}
+                className="rounded-lg border border-input bg-input-background px-3 py-1.5 text-sm focus:outline-none focus:border-primary"
+              />
+              <span className="text-xs text-muted-foreground">{filteredExams.length} test{filteredExams.length === 1 ? '' : 's'} conducted</span>
+              <select
                 value={selectedExamId}
                 onChange={(e) => setSelectedExamId(e.target.value)}
                 className="rounded-lg border border-input bg-input-background px-3 py-1.5 text-sm focus:outline-none focus:border-primary"
               >
-                {exams.length === 0 && <option value="">No exams yet</option>}
-                {[...exams].sort((a, b) => String(b.date).localeCompare(String(a.date))).map((exam) => (
+                {filteredExams.length === 0 && <option value="">No exams for this filter</option>}
+                {[...filteredExams].sort((a, b) => String(b.date).localeCompare(String(a.date))).map((exam) => (
                   <option key={exam.id} value={String(exam.id)}>{exam.name} — {exam.subject} ({exam.className})</option>
                 ))}
               </select>

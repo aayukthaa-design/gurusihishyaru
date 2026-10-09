@@ -54,6 +54,7 @@ export interface SalaryRecord {
   classesConducted: number;
   presentDays: number;
   halfDays: number;
+  absentDays?: number;
   calculatedSalary: number;
   status: SalaryStatus;
   paidDate?: string;
@@ -141,8 +142,17 @@ export function summarizeTeacherAttendance(entries: TeacherAttendanceEntry[], te
     absent: filtered.filter((entry) => entry.status === 'absent').length,
     halfDay: filtered.filter((entry) => entry.status === 'half_day').length,
     leave: filtered.filter((entry) => entry.status === 'leave').length,
-    workingDays: filtered.length,
+    // Holidays count as working days (the teacher is paid for them); only Sundays are off.
+    workingDays: month ? nonSundayDaysInMonth(month) : filtered.length,
   };
+}
+
+function nonSundayDaysInMonth(month: string): number {
+  const [y, m] = month.split('-').map(Number);
+  const days = new Date(y, m, 0).getDate();
+  let count = 0;
+  for (let d = 1; d <= days; d++) if (new Date(y, m - 1, d).getDay() !== 0) count++;
+  return count;
 }
 
 export function describeAttendanceSummary(summary: AttendanceSummary): string {
@@ -205,11 +215,27 @@ export async function saveSalaryRecord(params: {
       salaryPerClass: params.teacher.salaryType === 'Monthly Fixed' ? 0 : params.salaryPerClass,
       presentDays: params.attendance.present,
       halfDays: params.attendance.halfDay,
+      absentDays: params.attendance.absent,
       remarks: params.remarks ?? '',
     },
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to save salary record');
   return res.json();
+}
+
+// Payslip breakdown line: per-day rate, working days, loss of pay and casual leave left — all derived from the saved record.
+export function describeSalaryBreakdown(record: SalaryRecord, casualLeaveRemaining?: number): string {
+  if (record.salaryType !== 'Monthly Fixed') return `${record.classesConducted} Classes × ₹${record.salaryPerClass} = ₹${record.calculatedSalary}`;
+  const fixed = record.salaryAmount ?? 0;
+  const perDay = record.classesConducted > 0 ? fixed / record.classesConducted : 0;
+  const lopDays = record.absentDays ?? 0;
+  return [
+    `Per day ₹${perDay.toFixed(2)}`,
+    `Working days ${record.classesConducted}`,
+    `Present ${record.presentDays}`,
+    `Loss of pay ${lopDays} day(s) = ₹${Math.max(0, fixed - record.calculatedSalary)}`,
+    casualLeaveRemaining !== undefined ? `Casual leave remaining ${casualLeaveRemaining}` : '',
+  ].filter(Boolean).join(' | ');
 }
 
 export async function markSalaryRecordPaid(id: number): Promise<SalaryRecord> {

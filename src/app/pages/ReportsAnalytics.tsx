@@ -484,6 +484,8 @@ export function ReportsAnalytics() {
           item.availableQuantity <= item.minStock ? 'Low Stock' : 'Normal'
         ]);
         pdfService.addTable([headers], body);
+        // Who each item was allocated to.
+        pdfService.addTable([['Student', 'Admission No', 'Item', 'Qty', 'Size', 'Date']], allocations.map(a => [a.studentName, a.admissionNumber || '', a.itemName, String(a.quantity), a.uniformSize || '', a.allocatedDate]));
       } else if (reportCategory === 'monthly') {
         pdfService.addTitle(`Monthly Financial Report - ${filterMonth}/${filterYear} (${branchName})`);
         if (selectedMonthlyReport) {
@@ -523,6 +525,8 @@ export function ReportsAnalytics() {
         sheetData = filteredIncome.map(t => ({
           Date: t.date,
           'Voucher Number': t.voucherNumber,
+          // Fee receipts are written as "<fee> payment received from <student>" — surface the student so the sheet can be filtered by name.
+          Student: /received from (.+)$/.exec(t.description || '')?.[1] ?? '',
           Category: t.category,
           Description: t.description,
           Amount: t.amount,
@@ -573,6 +577,12 @@ export function ReportsAnalytics() {
       const wb = utils.book_new();
       const ws = utils.json_to_sheet(sheetData);
       utils.book_append_sheet(wb, ws, 'Report Data');
+      if (reportCategory === 'inventory') {
+        utils.book_append_sheet(wb, utils.json_to_sheet(allocations.map(a => ({
+          Student: a.studentName, 'Admission No': a.admissionNumber || '', Item: a.itemName, Quantity: a.quantity,
+          Size: a.uniformSize || '', 'Allocated Date': a.allocatedDate, 'Allocated By': a.allocatedBy, Remarks: a.remarks || ''
+        }))), 'Allocations');
+      }
       const fileBranch = branchFilter || myBranchId || 'all';
       writeFile(wb, `${reportCategory}_report_${fileBranch}_${filterYear}_${filterMonth}.xlsx`);
     } catch (e) {
@@ -699,6 +709,7 @@ export function ReportsAnalytics() {
                     <tr className="bg-secondary/40 border-b border-border text-xs font-semibold uppercase tracking-wider text-muted-foreground font-sans">
                       <th className="px-6 py-3">Date</th>
                       <th className="px-6 py-3">Voucher Number</th>
+                      <th className="px-6 py-3">Student</th>
                       <th className="px-6 py-3">Description</th>
                       <th className="px-6 py-3">Category</th>
                       <th className="px-6 py-3 text-right">Amount</th>
@@ -710,6 +721,7 @@ export function ReportsAnalytics() {
                       <tr key={t.id} className="hover:bg-secondary/10 transition-colors">
                         <td className="px-6 py-3 font-mono text-xs whitespace-nowrap">{t.date}</td>
                         <td className="px-6 py-3 font-semibold text-foreground font-mono text-xs">{t.voucherNumber}</td>
+                        <td className="px-6 py-3 font-medium text-foreground whitespace-nowrap">{/received from (.+)$/.exec(t.description || '')?.[1] ?? '—'}</td>
                         <td className="px-6 py-3 max-w-[250px] truncate text-muted-foreground" title={t.description}>{t.description}</td>
                         <td className="px-6 py-3 text-xs text-muted-foreground">{t.category}</td>
                         <td className="px-6 py-3 text-right font-bold text-green-600">{formatIndianCurrency(t.amount)}</td>
@@ -726,7 +738,7 @@ export function ReportsAnalytics() {
                     ))}
                     {filteredIncome.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="text-center py-12 text-muted-foreground">No income transactions found for this period.</td>
+                        <td colSpan={7} className="text-center py-12 text-muted-foreground">No income transactions found for this period.</td>
                       </tr>
                     )}
                   </tbody>
@@ -813,6 +825,32 @@ export function ReportsAnalytics() {
                       <tr>
                         <td colSpan={5} className="text-center py-12 text-muted-foreground">No inventory items found.</td>
                       </tr>
+                    )}
+                  </tbody>
+                </table>
+                <h4 className="px-6 pt-6 pb-2 text-sm font-semibold text-foreground">Student Allocations</h4>
+                <table className="w-full text-left text-sm border-collapse min-w-[700px]">
+                  <thead>
+                    <tr className="bg-secondary/40 border-b border-border text-xs font-semibold uppercase tracking-wider text-muted-foreground font-sans">
+                      <th className="px-6 py-3">Student</th>
+                      <th className="px-6 py-3">Item</th>
+                      <th className="px-6 py-3">Qty</th>
+                      <th className="px-6 py-3">Size</th>
+                      <th className="px-6 py-3">Date</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/60">
+                    {allocations.map(a => (
+                      <tr key={a.id}>
+                        <td className="px-6 py-3 font-semibold text-foreground">{a.studentName}</td>
+                        <td className="px-6 py-3 text-muted-foreground">{a.itemName}</td>
+                        <td className="px-6 py-3">{a.quantity}</td>
+                        <td className="px-6 py-3">{a.uniformSize || '—'}</td>
+                        <td className="px-6 py-3 font-mono text-xs">{a.allocatedDate}</td>
+                      </tr>
+                    ))}
+                    {allocations.length === 0 && (
+                      <tr><td colSpan={5} className="text-center py-8 text-muted-foreground">No allocations recorded.</td></tr>
                     )}
                   </tbody>
                 </table>

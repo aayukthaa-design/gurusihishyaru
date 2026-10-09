@@ -9,7 +9,7 @@ import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSq
 import { apiFetch } from '../lib/apiClient';
 import { useHolidays, refreshHolidays, isHoliday, useStudentLeaves, refreshStudentLeaves, createStudentLeave, deleteStudentLeave, isOnLeave } from '../lib/holidayService';
 import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
-import { exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
+import { exportDailyAttendanceToExcel, exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
 
 const TODAY = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const TODAY_ISO = new Date().toISOString().split('T')[0];
@@ -40,7 +40,7 @@ export function Attendance() {
   // Only super_admin can mark attendance for yesterday (e.g. catching up on a
   // missed submission) — everyone else stays locked to today, as before.
   const [markDate, setMarkDate] = useState(TODAY_ISO);
-  const isSuperAdmin = user?.role === 'super_admin';
+  const isSuperAdmin = user?.role === 'super_admin' || user?.role === 'admin'; // admins may also correct yesterday's attendance
 
   // Monthly export for the selected batch
   const [exportMonth, setExportMonth] = useState(TODAY_ISO.slice(0, 7));
@@ -192,7 +192,7 @@ export function Attendance() {
       })
       .catch((err) => {
         console.error('Failed to load students for class (API), falling back to local cache', err);
-        const local = getStudentsForClass(selectedClass, branchFilter, selectedBoard);
+        const local = getStudentsForClass(selectedClass, branchFilter, selectedBoard).filter((s: any) => s.status !== 'Inactive');
         const mapped = local.map((s) => ({
           id: s.id,
           name: `${s.firstName} ${s.lastName}`,
@@ -263,6 +263,7 @@ export function Attendance() {
     const rows = new Map<string, AttendanceExportRow>();
     students.forEach((s) => rows.set(s.id, { name: s.name, id: s.id, present: 0, absent: 0, leave: 0, total: 0 }));
     records.forEach((r) => {
+      if (isHoliday(holidays, r.date, branchFilter || user?.branchId)) return; // holidays are not class days
       if (!rows.has(r.studentId)) rows.set(r.studentId, { name: r.studentId, id: r.studentId, present: 0, absent: 0, leave: 0, total: 0 });
       const row = rows.get(r.studentId)!;
       if (r.status === 'present') row.present += 1;
@@ -271,6 +272,17 @@ export function Attendance() {
       row.total += 1;
     });
     return Array.from(rows.values());
+  };
+
+  const handleExportDay = async () => {
+    if (!selectedClass) return;
+    const records = await fetchAttendanceRecords(selectedClass, markDate, branchFilter || undefined);
+    const byId = new Map(records.map((r) => [r.studentId, r.status]));
+    exportDailyAttendanceToExcel(
+      students.map((s) => ({ name: s.name, id: s.id, status: byId.get(s.id) ?? 'not marked' })),
+      `Attendance — ${selectedClass}`,
+      markDate,
+    );
   };
 
   const handleExportMonth = async (format: 'pdf' | 'excel') => {
@@ -734,6 +746,13 @@ export function Attendance() {
                 className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
               >
                 <FileSpreadsheet className="h-4 w-4" /> Export Excel
+              </button>
+              <button
+                type="button"
+                onClick={handleExportDay}
+                className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80"
+              >
+                <FileSpreadsheet className="h-4 w-4" /> Daily Excel ({markDate})
               </button>
             </div>
           </div>

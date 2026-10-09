@@ -7,6 +7,7 @@ import { enrollAdmissionByApplicantName } from '../lib/admissionService';
 import { useStudents, addStudentAPI, updateStudentAPI, deleteStudentAPI, refreshStudents } from '../lib/studentService';
 import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
 import { BOARDS } from '../lib/classConstants';
+import { exportRowsToExcel } from '../lib/reportExport';
 import {
   Users, Plus, Search, Eye, Edit2, Trash2, ChevronRight,
   X, GraduationCap, Phone, MapPin, CalendarDays, Mail,
@@ -437,6 +438,17 @@ export function StudentManagement() {
     });
   }, [branchFilter, classFilter, search, students, user]);
 
+  const [exportScope, setExportScope] = useState<'Active' | 'Inactive' | 'All'>('Active');
+  const handleExportStudents = () => {
+    const rows = filterByBranch(students, user, branchFilter)
+      .filter((s) => exportScope === 'All' || s.status === exportScope)
+      .map((s) => ({
+        'Student ID': s.id, Name: `${s.firstName} ${s.lastName}`.trim(), Class: s.class, Board: s.batch, Gender: s.gender, DOB: s.dob,
+        Parent: s.parentName, 'Parent Mobile': s.parentMobile, Address: s.address, 'Admission Date': s.admissionDate, Status: s.status,
+      }));
+    exportRowsToExcel(rows, 'Students', `students-${exportScope.toLowerCase()}.xlsx`);
+  };
+
   const visible = filtered.slice(0, 10); // Show more students in page
 
   const handleAdd = async (data: Omit<Student, 'id'>) => {
@@ -554,6 +566,12 @@ export function StudentManagement() {
               {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
             </select>
           )}
+          <select value={exportScope} onChange={(e) => setExportScope(e.target.value as 'Active' | 'Inactive' | 'All')} className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none">
+            <option value="Active">Active</option>
+            <option value="Inactive">Inactive / discontinued</option>
+            <option value="All">All</option>
+          </select>
+          <button onClick={handleExportStudents} className="rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary/80">Export Excel</button>
           <button onClick={() => setPanel('add')} className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-95">
             <Plus className="h-4 w-4" />
             Add Student

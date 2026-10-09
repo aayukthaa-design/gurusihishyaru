@@ -27,6 +27,7 @@ export function CasualLeaveManagement() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [balances, setBalances] = useState<CasualLeaveBalance[]>([]);
   const [balanceDrafts, setBalanceDrafts] = useState<Record<string, number>>({});
+  const [allotmentDrafts, setAllotmentDrafts] = useState<Record<string, number>>({});
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
 
   const load = () => {
@@ -37,6 +38,7 @@ export function CasualLeaveManagement() {
     fetchCasualLeaveBalances({ branchId: branchFilter || undefined }).then((rows) => {
       setBalances(rows);
       setBalanceDrafts(Object.fromEntries(rows.map((row) => [row.userId, row.leavesTaken])));
+      setAllotmentDrafts(Object.fromEntries(rows.map((row) => [row.userId, row.annualAllotment])));
     });
   };
 
@@ -56,7 +58,7 @@ export function CasualLeaveManagement() {
   const handleSaveBalance = async (userId: string) => {
     setSavingUserId(userId);
     try {
-      await updateCasualLeaveBalance(userId, balanceDrafts[userId] ?? 0);
+      await updateCasualLeaveBalance(userId, balanceDrafts[userId] ?? 0, allotmentDrafts[userId]);
       loadBalances();
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update leave balance.');
@@ -135,6 +137,15 @@ export function CasualLeaveManagement() {
                   </div>
                   {isSuperAdmin ? (
                     <div className="flex items-center gap-2">
+                      <label className="text-xs text-muted-foreground">Allotted/yr</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={allotmentDrafts[row.userId] ?? 12}
+                        onChange={(e) => setAllotmentDrafts((prev) => ({ ...prev, [row.userId]: Number(e.target.value) }))}
+                        className="w-16 rounded-lg border border-input bg-input-background px-2 py-1.5 text-sm text-right"
+                      />
+                      <label className="text-xs text-muted-foreground">Taken</label>
                       <input
                         type="number"
                         min={0}
@@ -145,14 +156,15 @@ export function CasualLeaveManagement() {
                       <button
                         type="button"
                         onClick={() => handleSaveBalance(row.userId)}
-                        disabled={savingUserId === row.userId || balanceDrafts[row.userId] === row.leavesTaken}
+                        disabled={savingUserId === row.userId || (balanceDrafts[row.userId] === row.leavesTaken && allotmentDrafts[row.userId] === row.annualAllotment)}
                         className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {savingUserId === row.userId ? 'Saving…' : 'Save'}
                       </button>
+                      <span className="text-xs font-semibold text-foreground">{Math.max(0, (allotmentDrafts[row.userId] ?? row.annualAllotment) - (balanceDrafts[row.userId] ?? row.leavesTaken))} left</span>
                     </div>
                   ) : (
-                    <span className="text-sm font-semibold text-foreground">{row.leavesTaken} taken</span>
+                    <span className="text-sm font-semibold text-foreground">{row.leavesTaken} taken · {Math.max(0, row.annualAllotment - row.leavesTaken)} left of {row.annualAllotment}</span>
                   )}
                 </div>
               ))}

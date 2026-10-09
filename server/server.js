@@ -633,7 +633,10 @@ function matchesUserScope(notification, user) {
 
   if (user.role === 'teacher') {
     const assignedClasses = user.assignedClassIds ?? [];
-    if (notification.classNames?.some((className) => assignedClasses.includes(className))) return true;
+    // classNames entries are 'Class' (any board) or 'Class|Board'. When the teacher's real batches are
+    // known (assignedClassKeys, resolved from the DB) a board-specific entry must match their own board.
+    const keys = user.assignedClassKeys;
+    if (notification.classNames?.some((className) => (keys ? keys.includes(className) : assignedClasses.includes(String(className).split('|')[0])))) return true;
     // Role-broadcast to 'teacher' still needs to respect the notification's own
     // branch — otherwise a broadcast sent from one branch reaches every teacher
     // in every branch (mirrors the admin/accountant branch check below).
@@ -2252,6 +2255,8 @@ async function initDb() {
       updatedBy TEXT
     );
   `);
+  // Yearly casual-leave allotment per person (remaining = allotment - leavesTaken).
+  try { await db.exec("ALTER TABLE casual_leave_balances ADD COLUMN annualAllotment INTEGER NOT NULL DEFAULT 12;"); } catch (e) {}
 
   // Duplicate teacher-attendance entries: same reasoning as the `attendance`
   // de-dup above — guard against a pre-existing table created without the
@@ -2457,6 +2462,17 @@ async function main() {
     const isSuperAdmin = roles.includes('super_admin');
     if (isStaffScopedRole && !isSuperAdmin && !req.user?.branchId) {
       return res.status(403).json({ error: 'Your account has no branch assigned. Contact your Super Admin to assign one before you can access branch data.' });
+    }
+    next();
+  });
+
+  // Admin accounts have no money access (fees, ledger, inventory, financial reports) — blocked
+  // here once rather than per handler. Anyone who also holds super_admin/accountant/parent keeps theirs.
+  app.use((req, res, next) => {
+    if (!/^\/api\/(fees|inventory|ledger|financial-reports)(\/|$)/.test(req.path)) return next();
+    const roles = req.user?.roles || [];
+    if (roles.includes('admin') && !roles.some((r) => ['super_admin', 'accountant', 'parent'].includes(r))) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
     next();
   });
@@ -3987,11 +4003,13 @@ async function main() {
         // Class-scoped parent notifications (materials, special classes) only
         // actually reach parents of students in those specific classes — not
         // every parent in the branch, so count against that narrower set.
-        const placeholders = notification.classNames.map(() => '?').join(',');
-        const params = notification.branchId ? [...notification.classNames, notification.branchId] : notification.classNames;
+        const keys = notification.classNames;
+        const placeholders = keys.map(() => '?').join(',');
+        const classMatch = `(s.className IN (${placeholders}) OR (s.className || '|' || COALESCE(s.batch, '')) IN (${placeholders}))`;
+        const params = notification.branchId ? [...keys, ...keys, notification.branchId] : [...keys, ...keys];
         const query = notification.branchId
-          ? `SELECT DISTINCT ps.parentId FROM parent_student ps JOIN students s ON s.id = ps.studentId WHERE s.className IN (${placeholders}) AND s.branchId = ?`
-          : `SELECT DISTINCT ps.parentId FROM parent_student ps JOIN students s ON s.id = ps.studentId WHERE s.className IN (${placeholders})`;
+          ? `SELECT DISTINCT ps.parentId FROM parent_student ps JOIN students s ON s.id = ps.studentId WHERE ${classMatch} AND s.branchId = ?`
+          : `SELECT DISTINCT ps.parentId FROM parent_student ps JOIN students s ON s.id = ps.studentId WHERE ${classMatch}`;
         const rows = await db.all(query, ...params);
         count += rows.length;
       } else {
@@ -4040,10 +4058,15 @@ async function main() {
     const user = deriveNotificationUser(req);
     if (user.role === 'parent' && user.linkedStudentIds.length) {
       const placeholders = user.linkedStudentIds.map(() => '?').join(',');
-      const rows = await db.all(`SELECT DISTINCT className FROM students WHERE id IN (${placeholders})`, ...user.linkedStudentIds);
-      user.studentClassNames = rows.map((r) => r.className);
+      const rows = await db.all(`SELECT DISTINCT className, COALESCE(batch, '') AS batch FROM students WHERE id IN (${placeholders})`, ...user.linkedStudentIds);
+      // Plain 'Class' (legacy, board-agnostic notices) and 'Class|Board' (board-specific notices).
+      user.studentClassNames = rows.flatMap((r) => (r.batch ? [r.className, `${r.className}|${r.batch}`] : [r.className]));
     } else {
       user.studentClassNames = [];
+    }
+    if (user.role === 'teacher') {
+      const rows = await db.all("SELECT className, COALESCE(board, '') AS board FROM classes WHERE assignedTeacherId = ?", user.id);
+      user.assignedClassKeys = rows.flatMap((r) => (r.board ? [r.className, `${r.className}|${r.board}`] : [r.className]));
     }
     return user;
   }
@@ -4117,8 +4140,9 @@ async function main() {
         return { roles: ['super_admin'], branchId: null };
       case 'my_batch_parents': {
         if (!senderBranchId) return { error: 'Your account has no branch assigned. Contact your Super Admin.' };
-        const rows = await db.all('SELECT DISTINCT className FROM classes WHERE assignedTeacherId = ? AND branchId = ?', senderId, senderBranchId);
-        const classNames = rows.map((r) => r.className).filter(Boolean);
+        const rows = await db.all("SELECT DISTINCT className, COALESCE(board, '') AS board FROM classes WHERE assignedTeacherId = ? AND branchId = ?", senderId, senderBranchId);
+        // 'Class|Board' so a 10th ICSE notice never reaches 10th CBSE / State parents.
+        const classNames = rows.filter((r) => r.className).map((r) => (r.board ? `${r.className}|${r.board}` : r.className));
         if (!classNames.length) return { error: 'You have no assigned batches yet — nothing to notify parents about.' };
         return { roles: [], classNames, branchId: senderBranchId };
       }
@@ -4128,9 +4152,9 @@ async function main() {
       // fields still only ever come from THIS server-side lookup, never from
       // the client directly.
       case 'batch_parents': {
-        const classRow = await db.get('SELECT className, branchId FROM classes WHERE id = ?', req.body?.classId);
+        const classRow = await db.get('SELECT className, board, branchId FROM classes WHERE id = ?', req.body?.classId);
         if (!classRow) return { error: 'Select a valid batch to notify.' };
-        return { roles: ['parent'], classNames: [classRow.className], branchId: classRow.branchId };
+        return { roles: ['parent'], classNames: [classRow.board ? `${classRow.className}|${classRow.board}` : classRow.className], branchId: classRow.branchId };
       }
       case 'my_assigned_teacher': {
         const rows = await db.all(
@@ -5127,14 +5151,22 @@ async function main() {
         if (teacherClassNames.length === 0) return res.json([]);
         if (className && !teacherClassNames.includes(className)) return res.json([]);
         const teacherClassIds = await getTeacherAssignedClassIds(req);
-        const namePlaceholders = teacherClassNames.map(() => '?').join(',');
+        // Match (className, board) pairs, not className alone: "9th" exists on
+        // several boards, and a teacher of 9th ICSE must not see 9th CBSE students.
+        // A batch with no board set still matches any student of that className.
+        const teacherBatches = await db.all(
+          "SELECT DISTINCT className, COALESCE(board, '') AS board FROM classes WHERE assignedTeacherId = ? AND status != 'Archived'",
+          req.user.sub
+        );
+        const pairSql = teacherBatches.map((b) => (b.board ? '(className = ? AND COALESCE(batch, \'\') IN (?, \'\'))' : '(className = ?)')).join(' OR ');
+        const pairParams = teacherBatches.flatMap((b) => (b.board ? [b.className, b.board] : [b.className]));
         if (teacherClassIds.length > 0) {
           const idPlaceholders = teacherClassIds.map(() => '?').join(',');
-          conditions.push(`(className IN (${namePlaceholders}) OR id IN (SELECT studentId FROM student_batches WHERE classId IN (${idPlaceholders})))`);
-          params.push(...teacherClassNames, ...teacherClassIds);
+          conditions.push(`((${pairSql}) OR id IN (SELECT studentId FROM student_batches WHERE classId IN (${idPlaceholders})))`);
+          params.push(...pairParams, ...teacherClassIds);
         } else {
-          conditions.push(`className IN (${namePlaceholders})`);
-          params.push(...teacherClassNames);
+          conditions.push(`(${pairSql})`);
+          params.push(...pairParams);
         }
       }
 
@@ -6595,13 +6627,13 @@ async function main() {
       await db.run(`
         INSERT INTO notifications (id, title, message, type, priority, roles, branchId, classNames, status, createdAt)
         VALUES (?, ?, ?, 'info', 'medium', '["parent"]', ?, ?, 'unread', ?)
-      `, `${notifId}-par`, notifTitle, notifMsg, branchId, JSON.stringify([className]), now);
+      `, `${notifId}-par`, notifTitle, notifMsg, branchId, JSON.stringify([batch ? `${className}|${batch}` : className]), now);
 
       // 4. Teachers/General notification
       await db.run(`
         INSERT INTO notifications (id, title, message, type, priority, roles, branchId, classNames, status, createdAt)
         VALUES (?, ?, ?, 'info', 'medium', '["teacher"]', ?, ?, 'unread', ?)
-      `, `${notifId}-tchr`, notifTitle, notifMsg, branchId, JSON.stringify([className]), now);
+      `, `${notifId}-tchr`, notifTitle, notifMsg, branchId, JSON.stringify([batch ? `${className}|${batch}` : className]), now);
 
       res.json({ success: true, classId });
     } catch (err) {
@@ -7451,11 +7483,11 @@ async function main() {
       const itemCode = `INV-${suffix}`;
 
       const stmt = await db.prepare(`
-        INSERT INTO inventory_items (itemName, category, itemCode, description, quantity, allocatedQuantity, availableQuantity, damagedQuantity, minStock, unit, purchaseDate, supplier, purchaseCost, branchId, status)
-        VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO inventory_items (itemName, category, itemCode, description, quantity, allocatedQuantity, availableQuantity, damagedQuantity, minStock, unit, purchaseDate, supplier, purchaseCost, branchId, status, uniformSize)
+        VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const result = await stmt.run(
-        itemName, category, itemCode, description || '', Number(quantity), Number(quantity), Number(minStock || 0), unit, purchaseDate || '', supplier || '', Number(purchaseCost), branchId, status || 'Active'
+        itemName, category, itemCode, description || '', Number(quantity), Number(quantity), Number(minStock || 0), unit, purchaseDate || '', supplier || '', Number(purchaseCost), branchId, status || 'Active', req.body.uniformSize || ''
       );
       await stmt.finalize();
 
@@ -7484,14 +7516,14 @@ async function main() {
 
       const stmt = await db.prepare(`
         UPDATE inventory_items SET 
-          itemName = ?, category = ?, description = ?, quantity = ?, availableQuantity = ?, damagedQuantity = ?, minStock = ?, unit = ?, purchaseDate = ?, supplier = ?, purchaseCost = ?, branchId = ?, status = ?
+          itemName = ?, category = ?, description = ?, quantity = ?, availableQuantity = ?, damagedQuantity = ?, minStock = ?, unit = ?, purchaseDate = ?, supplier = ?, purchaseCost = ?, branchId = ?, status = ?, uniformSize = ?
         WHERE id = ?
       `);
       await stmt.run(
         itemName || item.itemName, category || item.category, description !== undefined ? description : item.description,
         newQty, newAvail, newDmg, minStock !== undefined ? Number(minStock) : item.minStock, unit || item.unit,
         purchaseDate || item.purchaseDate, supplier || item.supplier, purchaseCost !== undefined ? Number(purchaseCost) : item.purchaseCost,
-        branchId || item.branchId, status || item.status, id
+        branchId || item.branchId, status || item.status, req.body.uniformSize !== undefined ? req.body.uniformSize : item.uniformSize, id
       );
       await stmt.finalize();
 
@@ -7524,9 +7556,10 @@ async function main() {
       let query = 'SELECT * FROM inventory_allocations';
       const params = [];
       const clauses = [];
-      if (branchId && !isParent) { clauses.push('branchId = ?'); params.push(branchId); }
+      if (branchId && !isParent) { clauses.push("(branchId = ? OR branchId = '' OR branchId IS NULL)"); params.push(branchId); }
       if (isParent) {
-        const linkedStudentIds = Array.isArray(req.user.linkedStudentIds) ? req.user.linkedStudentIds : [];
+        // Live parent_student links, not the JWT snapshot — a child linked after login would otherwise never show their kit.
+        const linkedStudentIds = (await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub)).map((r) => r.studentId);
         if (!linkedStudentIds.length) return res.json([]);
         clauses.push(`studentId IN (${linkedStudentIds.map(() => '?').join(',')})`);
         params.push(...linkedStudentIds);
@@ -7568,7 +7601,7 @@ async function main() {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         const now = new Date().toISOString().split('T')[0];
-        await stmt.run(studentId, studentName, admissionNumber || '', branchId || '', itemId, item.itemName, qty, now, allocatedBy || 'Accountant', remarks || '', uniformSize || '');
+        await stmt.run(studentId, studentName, admissionNumber || '', branchId || item.branchId || '', itemId, item.itemName, qty, now, allocatedBy || 'Accountant', remarks || '', uniformSize || '');
         await stmt.finalize();
         await db.run('COMMIT');
       } catch (transactionError) {
@@ -7790,7 +7823,8 @@ async function main() {
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM salary_records WHERE 1=1';
       const params = [];
-      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+      // A teacher's own slips are scoped by teacherId alone — a branch clause would hide slips from a branch they were since moved from.
+      if (branchId && (isPayroll || isAdmin)) { query += ' AND branchId = ?'; params.push(branchId); }
       if (month) { query += ' AND month = ?'; params.push(month); }
       if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
       if (status) { query += ' AND status = ?'; params.push(status); }
@@ -7832,6 +7866,8 @@ async function main() {
     );
   }
 
+  try { await db.exec("ALTER TABLE salary_records ADD COLUMN absentDays INTEGER DEFAULT 0;"); } catch (e) {}
+
   // Creates or updates a Draft salary record — used by both the Teacher Attendance
   // page (saving classes/salary-per-class) and the Accountant Portal (Create Draft).
   app.post('/api/salary-records', async (req, res) => {
@@ -7845,22 +7881,25 @@ async function main() {
       if (existing && existing.isLocked) return res.status(409).json({ error: 'Salary is locked for this teacher and month.' });
 
       const now = new Date().toISOString();
+      // Monthly Fixed: loss of pay = per-day rate (salary / working days) x absent days. Approved leave is not LOP.
+      const absentDays = Number(b.absentDays || 0);
+      const monthlyWorkingDays = Number(b.classesConducted || 0);
       const calculatedSalary = b.salaryType === 'Monthly Fixed'
-        ? Number(b.salaryAmount || 0)
+        ? Math.max(0, Math.round(Number(b.salaryAmount || 0) - (monthlyWorkingDays > 0 ? (Number(b.salaryAmount || 0) / monthlyWorkingDays) * absentDays : 0)))
         : Number(b.classesConducted || 0) * Number(b.salaryPerClass || 0);
 
       await db.run(
-        `INSERT INTO salary_records (teacherId, teacherName, employeeId, branchId, department, designation, month, salaryType, salaryAmount, salaryPerClass, classesConducted, presentDays, halfDays, calculatedSalary, status, remarks, isLocked, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, 0, ?, ?)
+        `INSERT INTO salary_records (teacherId, teacherName, employeeId, branchId, department, designation, month, salaryType, salaryAmount, salaryPerClass, classesConducted, presentDays, halfDays, calculatedSalary, absentDays, status, remarks, isLocked, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, 0, ?, ?)
          ON CONFLICT(teacherId, month) DO UPDATE SET
            teacherName=excluded.teacherName, employeeId=excluded.employeeId, branchId=excluded.branchId,
            department=excluded.department, designation=excluded.designation, salaryType=excluded.salaryType,
            salaryAmount=excluded.salaryAmount, salaryPerClass=excluded.salaryPerClass, classesConducted=excluded.classesConducted,
-           presentDays=excluded.presentDays, halfDays=excluded.halfDays, calculatedSalary=excluded.calculatedSalary,
+           presentDays=excluded.presentDays, halfDays=excluded.halfDays, calculatedSalary=excluded.calculatedSalary, absentDays=excluded.absentDays,
            remarks=excluded.remarks, updatedAt=excluded.updatedAt`,
         b.teacherId, b.teacherName || '', b.employeeId || b.teacherId, branchId, b.department || null, b.designation || null,
         b.month, b.salaryType || null, Number(b.salaryAmount || 0), Number(b.salaryPerClass || 0), Number(b.classesConducted || 0),
-        Number(b.presentDays || 0), Number(b.halfDays || 0), calculatedSalary, b.remarks || '', now, now
+        Number(b.presentDays || 0), Number(b.halfDays || 0), calculatedSalary, absentDays, b.remarks || '', now, now
       );
 
       const saved = await db.get('SELECT * FROM salary_records WHERE teacherId = ? AND month = ?', b.teacherId, b.month);
@@ -8025,7 +8064,7 @@ async function main() {
     try {
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = `
-        SELECT u.id as userId, u.name, u.roles, u.branchId, COALESCE(b.leavesTaken, 0) as leavesTaken, b.updatedAt
+        SELECT u.id as userId, u.name, u.roles, u.branchId, COALESCE(b.leavesTaken, 0) as leavesTaken, COALESCE(b.annualAllotment, 12) as annualAllotment, b.updatedAt
         FROM users u
         LEFT JOIN casual_leave_balances b ON b.userId = u.id
         WHERE (u.roles LIKE '%"admin"%' OR u.roles LIKE '%"teacher"%')
@@ -8046,6 +8085,7 @@ async function main() {
         roles: parseJsonList(r.roles),
         branchId: r.branchId || undefined,
         leavesTaken: r.leavesTaken,
+        annualAllotment: r.annualAllotment,
         updatedAt: r.updatedAt || undefined,
       })));
     } catch (err) {
@@ -8059,16 +8099,18 @@ async function main() {
     try {
       const leavesTaken = Number(req.body?.leavesTaken);
       if (!Number.isFinite(leavesTaken) || leavesTaken < 0) return res.status(400).json({ error: 'leavesTaken must be a non-negative number' });
+      const annualAllotment = req.body?.annualAllotment === undefined ? 12 : Number(req.body.annualAllotment);
+      if (!Number.isFinite(annualAllotment) || annualAllotment < 0) return res.status(400).json({ error: 'annualAllotment must be a non-negative number' });
       const target = await db.get('SELECT id FROM users WHERE id = ?', req.params.userId);
       if (!target) return res.status(404).json({ error: 'User not found' });
       const now = new Date().toISOString();
       await db.run(
-        `INSERT INTO casual_leave_balances (userId, leavesTaken, updatedAt, updatedBy)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(userId) DO UPDATE SET leavesTaken = excluded.leavesTaken, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
-        req.params.userId, leavesTaken, now, req.user.name
+        `INSERT INTO casual_leave_balances (userId, leavesTaken, annualAllotment, updatedAt, updatedBy)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET leavesTaken = excluded.leavesTaken, annualAllotment = excluded.annualAllotment, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
+        req.params.userId, leavesTaken, annualAllotment, now, req.user.name
       );
-      res.json({ userId: req.params.userId, leavesTaken, updatedAt: now });
+      res.json({ userId: req.params.userId, leavesTaken, annualAllotment, updatedAt: now });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -8790,6 +8832,36 @@ async function main() {
       res.json({ success: true });
     } catch (err) { console.error(err); res.status(500).json({ error: 'failed' }); }
   });
+
+  // Notifications older than a month are auto-deleted (keeps the inbox fast); checked at startup, then daily.
+  const purgeOldNotifications = async () => {
+    try {
+      const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
+      await db.run('DELETE FROM notification_reads WHERE notificationId IN (SELECT id FROM notifications WHERE createdAt < ?)', cutoff);
+      await db.run('DELETE FROM notifications WHERE createdAt < ?', cutoff);
+    } catch (err) { console.error('purgeOldNotifications failed:', err); }
+  };
+  // One-time-safe cleanup of legacy parent notices whose class name is shared by several boards in the
+  // same branch (so they were wrongly delivered across boards). They are soft-deleted — still listed
+  // under "Deleted" and restorable — never removed. Idempotent: already-deleted rows are skipped.
+  const hideAmbiguousLegacyParentNotices = async () => {
+    try {
+      const rows = await db.all(`SELECT id, roles, classNames, branchId FROM notifications WHERE status != 'deleted' AND classNames IS NOT NULL AND classNames != '[]' AND roles LIKE '%"parent"%' AND createdAt < '2026-10-10'`); // only notices from before board-aware targeting shipped
+      const boardCounts = await db.all(`SELECT className, branchId, COUNT(DISTINCT board) AS boards FROM classes WHERE board IS NOT NULL AND board != '' GROUP BY className, branchId`);
+      const ambiguous = new Set(boardCounts.filter((b) => b.boards > 1).map((b) => `${b.branchId}::${b.className}`));
+      const now = new Date().toISOString();
+      for (const row of rows) {
+        const names = parseJsonList(row.classNames);
+        if (!names.length || names.some((n) => String(n).includes('|'))) continue;
+        if (names.every((n) => ambiguous.has(`${row.branchId}::${n}`))) {
+          await db.run(`UPDATE notifications SET status='deleted', read=0, deletedAt=?, deletedBy='system: ambiguous class notice' WHERE id = ?`, now, row.id);
+        }
+      }
+    } catch (err) { console.error('hideAmbiguousLegacyParentNotices failed:', err); }
+  };
+  void hideAmbiguousLegacyParentNotices();
+  void purgeOldNotifications();
+  setInterval(purgeOldNotifications, 24 * 60 * 60 * 1000);
 
   app.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
 }

@@ -85,6 +85,9 @@ export function NotificationsPage() {
   const auth = useAuth();
   const [search, setSearch] = React.useState('');
   const [filter, setFilter] = React.useState<'all' | 'unread' | 'deleted'>('all');
+  // Rendering every notification at once is what made this page hang; show a page at a time.
+  const [shown, setShown] = React.useState(25);
+  const [openNotificationId, setOpenNotificationId] = React.useState<string | null>(null);
   const [mailbox, setMailbox] = React.useState<'inbox' | 'sent'>('inbox');
   const [composerOpen, setComposerOpen] = React.useState(false);
   const audienceOptions = (auth.user?.role && AUDIENCE_OPTIONS_BY_ROLE[auth.user.role]) || [];
@@ -496,19 +499,18 @@ export function NotificationsPage() {
               <CardContent className="py-8 text-center text-sm text-muted-foreground">No active notifications match your current scope.</CardContent>
             </Card>
           )}
-          {activeNotifications.map((notification) => (
+          {activeNotifications.slice(0, shown).map((notification) => (
             <Card key={notification.id} className={`transition-all duration-300 hover:shadow-lg ${isUnreadForMe(notification) ? 'border-l-4 border-l-primary bg-primary/5' : ''}`}>
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 space-y-1">
+                  <div className="flex-1 cursor-pointer space-y-1" onClick={() => setOpenNotificationId(notification.id)} title="Click to read the full notification">
                     <div className="flex items-center gap-2">
                       <CardTitle className="text-base">{notification.title}</CardTitle>
                       <Badge variant={notification.status === 'scheduled' ? 'secondary' : 'default'} className="h-5 px-1.5 text-[10px] uppercase">
                         {notification.status === 'scheduled' ? 'scheduled' : isUnreadForMe(notification) ? 'unread' : 'read'}
                       </Badge>
                     </div>
-                    <CardDescription>{notification.message}</CardDescription>
-                    <p className="whitespace-pre-line text-xs text-muted-foreground">{notification.description}</p>
+                    <CardDescription className="line-clamp-2">{notification.message}</CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
                     {notification.type === 'info' && <Info className="h-5 w-5 text-primary" />}
@@ -665,7 +667,7 @@ export function NotificationsPage() {
               <CardContent className="py-8 text-center text-sm text-muted-foreground">No history entries are available for the current selection.</CardContent>
             </Card>
           )}
-          {historyNotifications.map((notification) => (
+          {historyNotifications.slice(0, shown).map((notification) => (
             <Card key={notification.id} className="transition-all duration-300 hover:shadow-lg">
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-3">
@@ -795,6 +797,38 @@ export function NotificationsPage() {
               )}
             </Card>
           ))}
+          {(() => {
+            const open = visibleNotifications.find((n) => n.id === openNotificationId);
+            return (
+              <Dialog open={!!open} onOpenChange={(isOpen) => { if (!isOpen) setOpenNotificationId(null); }}>
+                <DialogContent>
+                  {open && (
+                    <>
+                      <DialogHeader><DialogTitle>{open.title}</DialogTitle></DialogHeader>
+                      <div className="max-h-[60vh] space-y-3 overflow-y-auto text-sm">
+                        <p className="whitespace-pre-line text-foreground">{open.message}</p>
+                        {open.description && <p className="whitespace-pre-line text-muted-foreground">{open.description}</p>}
+                        <p className="text-xs text-muted-foreground">Sent: {formatDateTime(open.createdAt)} • Type: {open.notificationType ?? open.type}</p>
+                      </div>
+                      <DialogFooter>
+                        {isUnreadForMe(open) && open.status !== 'scheduled' && (
+                          <Button variant="outline" onClick={() => markNotificationAsRead(open.id, auth.user ?? undefined)}>
+                            <Check className="mr-1 h-3 w-3" /> Mark as Read
+                          </Button>
+                        )}
+                        <Button variant="outline" onClick={() => { deleteNotification(open.id, auth.user ?? undefined); setOpenNotificationId(null); }}>
+                          <Trash2 className="mr-1 h-3 w-3" /> Delete
+                        </Button>
+                      </DialogFooter>
+                    </>
+                  )}
+                </DialogContent>
+              </Dialog>
+            );
+          })()}
+          {Math.max(activeNotifications.length, historyNotifications.length) > shown && (
+            <Button variant="outline" onClick={() => setShown((n) => n + 25)}>Show more</Button>
+          )}
         </div>
       </div>
       </>

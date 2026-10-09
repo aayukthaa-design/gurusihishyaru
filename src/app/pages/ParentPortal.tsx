@@ -27,9 +27,12 @@ import { refreshHomework } from '../lib/homeworkService';
 import { subscribeMarks, MarkRecord } from '../lib/examMarksService';
 import { subscribeExams, Exam } from '../lib/examService';
 import { useSchoolExamSchedules, refreshSchoolExamSchedules, getAttachmentUrl, updateSchoolExamSchedule, createSchoolExamSchedule } from '../lib/schoolExamScheduleService';
-import { formatIndianCurrency } from '../lib/currency';
+import { formatIndianCurrency, formatIndianCurrencyForPdf } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
-import { useFeeRecords, refreshFeeRecords } from '../lib/feeService';
+import { useFeeRecords, refreshFeeRecords, fetchFeePayments, type FeePayment } from '../lib/feeService';
+import { PDFTemplateService } from '../lib/pdfTemplateService';
+import { exportRowsToExcel } from '../lib/reportExport';
+import { useHolidays, refreshHolidays, isHoliday } from '../lib/holidayService';
 import { fetchAttendance, type AttendanceRecord } from '../lib/attendanceService';
 import { exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
 
@@ -86,16 +89,27 @@ export function ParentPortal() {
     fetchAttendance().then(setAttendanceRecords);
   }, [user]);
 
+  const holidays = useHolidays();
+  useEffect(() => {
+    void refreshHolidays({ branchId: selectedStudent?.branchId });
+  }, [selectedStudent?.branchId]);
+
   const studentAttendance = useMemo(
     () => attendanceRecords.filter((r) => r.studentId === selectedStudent?.id),
     [attendanceRecords, selectedStudent?.id]
   );
-  const attendanceTotal = studentAttendance.filter((r) => r.status !== 'leave').length;
-  const attendancePresent = studentAttendance.filter((r) => r.status === 'present').length;
+  // Month-scoped; holidays never count as working days (an absent mark on a holiday is ignored).
+  const monthAttendance = useMemo(
+    () => studentAttendance.filter((r) => r.date.startsWith(attendanceMonth) && !isHoliday(holidays, r.date, selectedStudent?.branchId)),
+    [studentAttendance, attendanceMonth, holidays, selectedStudent?.branchId]
+  );
+  const attendanceTotal = monthAttendance.filter((r) => r.status !== 'leave').length;
+  const attendancePresent = monthAttendance.filter((r) => r.status === 'present').length;
+  const attendanceAbsent = attendanceTotal - attendancePresent;
   const attendancePercentage = attendanceTotal ? Math.round((attendancePresent / attendanceTotal) * 100) : null;
   const recentAttendance = useMemo(
-    () => [...studentAttendance].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5),
-    [studentAttendance]
+    () => [...monthAttendance].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5),
+    [monthAttendance]
   );
 
   const handleExportAttendance = async (format: 'pdf' | 'excel') => {
@@ -267,6 +281,31 @@ export function ParentPortal() {
     return { total, paid, status, dueDate: upcoming?.dueDate || '' };
   }, [studentFeeRecords]);
 
+  // Payment receipts for the selected child — the only place parents get them.
+  const [payments, setPayments] = useState<Array<FeePayment & { feeType: string }>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(studentFeeRecords.map((r) => fetchFeePayments(r.id).then((ps) => ps.map((p) => ({ ...p, feeType: r.feeType })))))
+      .then((lists) => { if (!cancelled) setPayments(lists.flat().sort((a, b) => b.paymentDate.localeCompare(a.paymentDate))); });
+    return () => { cancelled = true; };
+  }, [studentFeeRecords]);
+
+  const downloadReceipt = async (p: FeePayment & { feeType: string }) => {
+    const pdf = new PDFTemplateService();
+    pdf.addTitle('Fee Payment Receipt');
+    pdf.addTable(['Field', 'Details'], [
+      ['Receipt No', p.receiptNumber],
+      ['Date', p.paymentDate],
+      ['Student', selectedStudent?.fullName ?? ''],
+      ['Fee Type', p.feeType],
+      ['Amount Paid', formatIndianCurrencyForPdf(p.amount)],
+      ['Payment Mode', p.paymentMode],
+      ['Reference', p.referenceNumber || '—'],
+      ['Received By', p.receivedBy],
+    ]);
+    await pdf.exportWithLetterhead(`Receipt_${p.receiptNumber}.pdf`);
+  };
+
   const feeDueAmount = selectedStudentFee ? selectedStudentFee.total - selectedStudentFee.paid : 0;
   const feeStatusLabel = selectedStudentFee?.status ?? 'Not available';
   const feeSummaryText = selectedStudentFee
@@ -344,7 +383,7 @@ export function ParentPortal() {
                     >
                       {students.map((student) => (
                         <option key={student.id} value={student.id}>
-                          {student.fullName} · {student.className}
+                          {student.fullName} · {student.className}{student.batch ? ` (${student.batch})` : ''}
                         </option>
                       ))}
                     </select>
@@ -431,6 +470,20 @@ export function ParentPortal() {
               </div>
             </div>
 
+            {payments.length > 0 && (
+              <section className="rounded-2xl border border-border bg-card p-5 shadow-sm">
+                <p className="text-base font-semibold text-foreground">Fee receipts</p>
+                <div className="mt-3 divide-y divide-border">
+                  {payments.map((p) => (
+                    <div key={p.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                      <span className="text-foreground">{p.feeType} · {formatIndianCurrency(p.amount)} <span className="text-muted-foreground">· {p.paymentDate} · {p.receiptNumber}</span></span>
+                      <button type="button" onClick={() => downloadReceipt(p)} className="rounded-xl border border-border bg-background px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary">Download</button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {/* Attendance */}
             <section className="rounded-2xl border border-border bg-card p-5 shadow-sm">
               <div className="flex items-start justify-between gap-3">
@@ -472,9 +525,9 @@ export function ParentPortal() {
 
               <div className="mt-5 grid gap-4 sm:grid-cols-2">
                 <div className="rounded-3xl border border-border bg-background p-5">
-                  <p className="text-sm font-semibold text-muted-foreground">Overall attendance</p>
+                  <p className="text-sm font-semibold text-muted-foreground">Attendance for {attendanceMonth}</p>
                   <p className="mt-2 text-3xl font-semibold text-foreground">{attendancePercentage === null ? '—' : `${attendancePercentage}%`}</p>
-                  <p className="mt-2 text-sm text-muted-foreground">{attendanceTotal ? `${attendancePresent} present out of ${attendanceTotal} recorded days` : 'No attendance records available yet.'}</p>
+                  <p className="mt-2 text-sm text-muted-foreground">{attendanceTotal ? `${attendancePresent} present, ${attendanceAbsent} absent out of ${attendanceTotal} class days (holidays excluded)` : 'No attendance records for this month.'}</p>
                 </div>
                 <div className="rounded-3xl border border-border bg-background p-5">
                   <p className="text-sm font-semibold text-muted-foreground">Recent days</p>
@@ -504,9 +557,19 @@ export function ParentPortal() {
 
             {/* Academic Exam Results */}
             <div className="rounded-[28px] border border-border bg-card p-6 shadow-sm">
-              <div>
-                <p className="text-base font-semibold text-foreground">Academic Exam Results</p>
-                <p className="mt-1 text-sm text-muted-foreground">This section shows your child's published exam results and performance status.</p>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-base font-semibold text-foreground">Academic Exam Results</p>
+                  <p className="mt-1 text-sm text-muted-foreground">This section shows your child's published exam results and performance status.</p>
+                </div>
+                {studentResults.length > 0 && (
+                  <button type="button" onClick={() => exportRowsToExcel(
+                    studentResults.map((r) => ({ Exam: r.examName, 'Max Marks': r.maxMarks, 'Passing Marks': r.passingMarks, 'Marks Obtained': r.marksObtained, Result: r.result })),
+                    'Exam Results', `exam-results-${selectedStudent?.fullName ?? 'student'}.xlsx`)}
+                    className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary">
+                    <FileSpreadsheet className="h-4 w-4" /> Excel
+                  </button>
+                )}
               </div>
 
               <div className="mt-5">

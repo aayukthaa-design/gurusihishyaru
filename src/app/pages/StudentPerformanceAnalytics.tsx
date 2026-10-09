@@ -8,6 +8,7 @@ import { subscribeExams, refreshExams } from '../lib/examService';
 import { subscribeMarks, refreshMarks } from '../lib/examMarksService';
 import { getStudentsForClass } from '../lib/studentService';
 import { PDFTemplateService } from '../lib/pdfTemplateService';
+import { exportRowsToExcel } from '../lib/reportExport';
 import {
   BarChart3,
   PieChart as PieIcon,
@@ -395,6 +396,32 @@ export function StudentPerformanceAnalytics() {
   }, [strugglingStudents, top10Students, subjectPerformanceChart, branchSelection, branchAverageChart]);
 
   // Export PDF functionality
+  // One flat row per student result so it can be sorted/filtered in Excel.
+  const exportExcelReport = () => {
+    exportRowsToExcel(
+      rankedRecords.map((r, i) => {
+        const exam = exams.find((e) => e.id === r.examId);
+        return {
+          Rank: i + 1,
+          Student: r.studentName,
+          'Student ID': r.studentId,
+          Exam: exam?.name ?? '',
+          Subject: exam?.subject ?? '',
+          Class: exam?.className ?? '',
+          Branch: getBranchName(exam?.branchId || '') || '',
+          'Exam Date': exam?.date ?? '',
+          'Max Marks': exam?.maxMarks ?? '',
+          'Marks Obtained': r.marksObtained,
+          'Passing Marks': exam?.passingMarks ?? 35,
+          'Percentage': Number(r.percentage.toFixed(1)),
+          Grade: r.grade,
+          Result: r.pass ? 'PASS' : 'FAIL',
+        };
+      }),
+      'Performance', `student-performance-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    );
+  };
+
   const exportPdfReport = async () => {
     setIsExportingPdf(true);
     setStatusMessage('Generating PDF Report...');
@@ -659,6 +686,14 @@ export function StudentPerformanceAnalytics() {
             >
               <Download className="h-4 w-4" />
               {isExportingPdf ? 'Generating PDF Report…' : 'Download Performance Report (PDF)'}
+            </button>
+            <button
+              onClick={exportExcelReport}
+              disabled={rankedRecords.length === 0}
+              className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-5 py-2.5 text-sm font-semibold text-foreground shadow-sm transition hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Download className="h-4 w-4" />
+              Download Excel (filterable)
             </button>
             {statusMessage && (
               <span className="text-sm font-medium text-primary bg-primary/5 border border-primary/10 rounded-lg px-3 py-1">
