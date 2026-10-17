@@ -5372,13 +5372,17 @@ async function main() {
       s.guardianMobile = s.guardianMobile != null ? String(s.guardianMobile) : s.guardianMobile;
 
       const branchId = resolveBranchId(req, s.branchId) || 'branch_main';
-      // Same child entered twice (e.g. re-import with class "4" vs "4th") showed up
-      // as extra names in the parent's "Select child" dropdown.
-      const dup = await db.get(
-        `SELECT id FROM students WHERE status = 'Active' AND branchId = ? AND primaryParentMobile = ? AND lower(fullName) = lower(?)`,
+      // Same child entered twice into the SAME class/batch (e.g. re-import with "4" vs "4th") showed
+      // up as extra names in the parent's "Select child" dropdown. The same child in a different
+      // course (Phonics, Abacus, ...) is a legitimate separate enrolment and stays allowed.
+      const normClass = (v) => String(v || '').toLowerCase().replace(/(\d+)\s*(st|nd|rd|th)\b/g, '$1').replace(/\s+/g, ' ').trim();
+      const sameName = await db.all(
+        `SELECT className, batch FROM students WHERE status = 'Active' AND branchId = ? AND primaryParentMobile = ? AND lower(fullName) = lower(?)`,
         branchId, s.primaryParentMobile, `${s.firstName} ${s.lastName}`.trim()
       );
-      if (dup) return res.status(409).json({ error: `${s.firstName} ${s.lastName} is already registered under this parent mobile number.` });
+      if (sameName.some((d) => normClass(d.className) === normClass(s.className) && normClass(d.batch) === normClass(s.batch))) {
+        return res.status(409).json({ error: `${s.firstName} ${s.lastName} is already registered in this class under this parent mobile number.` });
+      }
       const saved = await createStudentRecord(db, s, branchId);
       res.json(saved);
     } catch (err) {
