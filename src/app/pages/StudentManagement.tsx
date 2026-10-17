@@ -442,6 +442,7 @@ export function StudentManagement() {
   const handleExportStudents = () => {
     const rows = filterByBranch(students, user, branchFilter)
       .filter((s) => exportScope === 'All' || s.status === exportScope)
+      .filter((s) => !classFilter || s.class === classFilter)
       .map((s) => ({
         'Student ID': s.id, Name: `${s.firstName} ${s.lastName}`.trim(), Class: s.class, Board: s.batch, Gender: s.gender, DOB: s.dob,
         Parent: s.parentName, 'Parent Mobile': s.parentMobile, Address: s.address, 'Admission Date': s.admissionDate, Status: s.status,

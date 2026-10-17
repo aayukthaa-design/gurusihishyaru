@@ -10,6 +10,7 @@ import { formatIndianCurrency, formatIndianCurrencyForPdf } from '../lib/currenc
 import { utils, writeFile } from 'xlsx';
 import { apiFetch, getFileUrl } from '../lib/apiClient';
 import { fetchAttendance } from '../lib/attendanceService';
+import { useHolidays, refreshHolidays, isHoliday } from '../lib/holidayService';
 import { fetchFeeStats, type FeeStats } from '../lib/feeService';
 import { useExams } from '../lib/examService';
 import { refreshMarks, type MarkRecord } from '../lib/examMarksService';
@@ -44,6 +45,8 @@ export function ReportsAnalytics() {
   const [analyticsParents, setAnalyticsParents] = useState<any[]>([]);
   const [accountantsCount, setAccountantsCount] = useState(0);
   const [attendanceRecords, setAttendanceRecords] = useState<any[]>([]);
+  const holidays = useHolidays();
+  useEffect(() => { void refreshHolidays(); }, []);
   const [examMarks, setExamMarks] = useState<MarkRecord[]>([]);
   const [feeStats, setFeeStats] = useState<FeeStats>(EMPTY_FEE_STATS);
   const [feeRecords, setFeeRecords] = useState<any[]>([]);
@@ -309,11 +312,13 @@ export function ReportsAnalytics() {
     }));
   }, [ledger, scopedAnalyticsStudents, trendMonths]);
 
+  const studentBranchById = useMemo(() => new Map<string, string>(scopedAnalyticsStudents.map((s: any) => [s.id, s.branchId])), [scopedAnalyticsStudents]);
   const attendanceData = useMemo(() => {
     const byMonth = new Map<string, { present: number; total: number }>();
     attendanceRecords.forEach((r: any) => {
       if (!r.date) return;
       if (r.status === 'leave') return; // approved leave doesn't count against attendance %
+      if (isHoliday(holidays, r.date.slice(0, 10), studentBranchById.get(r.studentId) ?? (branchFilter || undefined))) return; // holidays are not class days
       const key = r.date.slice(0, 7);
       const bucket = byMonth.get(key) || { present: 0, total: 0 };
       bucket.total += 1;
@@ -324,7 +329,7 @@ export function ReportsAnalytics() {
       const bucket = byMonth.get(key);
       return { month: label, attendance: bucket && bucket.total > 0 ? Math.round((bucket.present / bucket.total) * 100) : 0 };
     });
-  }, [attendanceRecords, trendMonths]);
+  }, [attendanceRecords, trendMonths, holidays, studentBranchById, branchFilter]);
 
   const feeCollectionData = useMemo(() => {
     const byMonth = new Map<string, number>();

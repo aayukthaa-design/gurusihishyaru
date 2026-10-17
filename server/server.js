@@ -5372,6 +5372,13 @@ async function main() {
       s.guardianMobile = s.guardianMobile != null ? String(s.guardianMobile) : s.guardianMobile;
 
       const branchId = resolveBranchId(req, s.branchId) || 'branch_main';
+      // Same child entered twice (e.g. re-import with class "4" vs "4th") showed up
+      // as extra names in the parent's "Select child" dropdown.
+      const dup = await db.get(
+        `SELECT id FROM students WHERE status = 'Active' AND branchId = ? AND primaryParentMobile = ? AND lower(fullName) = lower(?)`,
+        branchId, s.primaryParentMobile, `${s.firstName} ${s.lastName}`.trim()
+      );
+      if (dup) return res.status(409).json({ error: `${s.firstName} ${s.lastName} is already registered under this parent mobile number.` });
       const saved = await createStudentRecord(db, s, branchId);
       res.json(saved);
     } catch (err) {

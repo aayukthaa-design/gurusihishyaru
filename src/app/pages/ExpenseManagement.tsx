@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useBranches } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
+import { exportRowsToExcel } from '../lib/reportExport';
 import { Receipt, TrendingDown, DollarSign, CreditCard, Search, Plus, Loader2, Pencil, Trash2 } from 'lucide-react';
 
 interface LedgerExpense {
@@ -23,7 +24,7 @@ interface LedgerExpense {
 const EXPENSE_CATEGORIES = ['Salaries', 'Utilities', 'Supplies', 'Rent', 'Maintenance', 'Marketing', 'Other'];
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
 
-const EMPTY_FORM = { category: EXPENSE_CATEGORIES[0], description: '', amount: '', date: new Date().toISOString().slice(0, 10), paymentMode: PAYMENT_MODES[0], referenceNumber: '' };
+const EMPTY_FORM = { category: EXPENSE_CATEGORIES[0], description: '', amount: '', date: new Date().toISOString().slice(0, 10), paymentMode: PAYMENT_MODES[0], referenceNumber: '', branchId: '' };
 
 export function ExpenseManagement() {
   const { user } = useAuth();
@@ -54,6 +55,7 @@ export function ExpenseManagement() {
       date: expense.date.slice(0, 10),
       paymentMode: expense.paymentMode,
       referenceNumber: expense.referenceNumber || '',
+      branchId: expense.branchId || '',
     });
     setEditingId(expense.id);
     setShowAddForm(true);
@@ -96,6 +98,14 @@ export function ExpenseManagement() {
     && (!monthFilter || expense.date.startsWith(monthFilter))
   ), [expenses, search, monthFilter]);
 
+  const handleExportExpenses = () => {
+    const rows = filtered.map((e) => ({
+      Date: e.date.slice(0, 10), Branch: branches.find((b) => b.id === e.branchId)?.name ?? e.branchId ?? '', Category: e.category,
+      Description: e.description, Amount: e.amount, 'Payment Mode': e.paymentMode, Reference: e.referenceNumber || '',
+    }));
+    exportRowsToExcel(rows, 'Expenses', `expenses-${monthFilter || 'all'}.xlsx`);
+  };
+
   const totalExpenses = filtered.reduce((sum, expense) => sum + expense.amount, 0);
   const thisMonthTotal = filtered
     .filter((e) => e.date.slice(0, 7) === new Date().toISOString().slice(0, 7))
@@ -119,6 +129,7 @@ export function ExpenseManagement() {
         amount: Number(form.amount),
         paymentMode: form.paymentMode,
         referenceNumber: form.referenceNumber,
+        branchId: form.branchId || branchFilter || undefined,
         enteredBy: user?.name || 'Accountant',
       };
       const res = editingId
@@ -182,6 +193,7 @@ export function ExpenseManagement() {
               {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
             </select>
           )}
+          <button onClick={handleExportExpenses} disabled={filtered.length === 0} className="rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary/80 disabled:opacity-50">Export Excel</button>
           {canManage && (
             <button onClick={() => (showAddForm ? resetForm() : setShowAddForm(true))} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90">
               <Plus className="h-4 w-4" /> {showAddForm ? 'Close' : 'Add Expense'}
@@ -191,6 +203,16 @@ export function ExpenseManagement() {
 
         {showAddForm && canManage && (
           <form onSubmit={handleAddExpense} className="rounded-2xl border border-border bg-card p-6 shadow-sm grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {user?.role === 'super_admin' && (
+              <label className="flex flex-col gap-1.5 text-sm">
+                <span className="font-medium text-foreground">Branch</span>
+                <select value={form.branchId || branchFilter} onChange={(e) => setForm((f) => ({ ...f, branchId: e.target.value }))}
+                  className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:outline-none focus:border-primary">
+                  <option value="">Main Branch (default)</option>
+                  {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+                </select>
+              </label>
+            )}
             <label className="flex flex-col gap-1.5 text-sm">
               <span className="font-medium text-foreground">Category</span>
               <select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}

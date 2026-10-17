@@ -442,11 +442,19 @@ export function Attendance() {
                 >
                   Mark Yesterday
                 </button>
+                <input
+                  type="date"
+                  max={TODAY_ISO}
+                  value={markDate}
+                  onChange={(e) => { if (e.target.value) { setMarkDate(e.target.value); setSaved(false); } }}
+                  className="rounded-lg border border-input bg-input-background px-2 py-1 text-xs focus:border-primary focus:outline-none"
+                  aria-label="Attendance date"
+                />
               </div>
             )}
           </div>
           {isSuperAdmin && markDate !== TODAY_ISO && (
-            <p className="mt-3 text-xs font-semibold text-amber-600 dark:text-amber-400">Marking attendance for {markDate} (yesterday).</p>
+            <p className="mt-3 text-xs font-semibold text-amber-600 dark:text-amber-400">Editing attendance for {markDate}.</p>
           )}
         </div>
 
