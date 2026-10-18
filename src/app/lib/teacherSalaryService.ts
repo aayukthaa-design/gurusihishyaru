@@ -1,6 +1,7 @@
 import { apiFetch } from './apiClient';
+import { countAttendance } from './attendanceMath';
 
-export type TeacherAttendanceStatus = 'present' | 'absent' | 'half_day' | 'leave';
+export type TeacherAttendanceStatus = 'present' | 'absent' | 'holiday';
 export type SalaryStatus = 'Draft' | 'Paid';
 export type AuditAction = 'Created' | 'Updated' | 'Marked_Paid' | 'Unlocked';
 
@@ -34,8 +35,10 @@ export interface AttendanceSummary {
   teacherId: string;
   present: number;
   absent: number;
-  halfDay: number;
-  leave: number;
+  holiday: number;
+  /** present + absent — holidays excluded; the denominator of the attendance %. */
+  totalClasses: number;
+  percent: number | null;
   workingDays: number;
 }
 
@@ -87,10 +90,8 @@ function statusLabel(status: TeacherAttendanceStatus): string {
       return 'Present';
     case 'absent':
       return 'Absent';
-    case 'half_day':
-      return 'Half Day';
-    case 'leave':
-      return 'Leave';
+    case 'holiday':
+      return 'Holiday';
     default:
       return 'Present';
   }
@@ -136,12 +137,14 @@ export function validateAttendanceDuplicate(entries: Array<{ teacherId: string; 
 // than each summary triggering its own request.
 export function summarizeTeacherAttendance(entries: TeacherAttendanceEntry[], teacherId: string, month?: string): AttendanceSummary {
   const filtered = entries.filter((entry) => entry.teacherId === teacherId && (!month || entry.date.startsWith(month)));
+  const counts = countAttendance(filtered);
   return {
     teacherId,
-    present: filtered.filter((entry) => entry.status === 'present').length,
-    absent: filtered.filter((entry) => entry.status === 'absent').length,
-    halfDay: filtered.filter((entry) => entry.status === 'half_day').length,
-    leave: filtered.filter((entry) => entry.status === 'leave').length,
+    present: counts.present,
+    absent: counts.absent,
+    holiday: counts.holiday,
+    totalClasses: counts.total,
+    percent: counts.percent,
     // Holidays count as working days (the teacher is paid for them); only Sundays are off.
     workingDays: month ? nonSundayDaysInMonth(month) : filtered.length,
   };
@@ -156,7 +159,7 @@ function nonSundayDaysInMonth(month: string): number {
 }
 
 export function describeAttendanceSummary(summary: AttendanceSummary): string {
-  return `Present ${summary.present} • Absent ${summary.absent} • Half Day ${summary.halfDay} • Leave ${summary.leave}`;
+  return `Present ${summary.present} • Absent ${summary.absent} • Holiday ${summary.holiday}`;
 }
 
 // ─── Salary / Payroll (backed by the salary_records table) ────────────────────
@@ -214,7 +217,7 @@ export async function saveSalaryRecord(params: {
       classesConducted: params.teacher.salaryType === 'Monthly Fixed' ? params.attendance.workingDays : params.classesConducted,
       salaryPerClass: params.teacher.salaryType === 'Monthly Fixed' ? 0 : params.salaryPerClass,
       presentDays: params.attendance.present,
-      halfDays: params.attendance.halfDay,
+      halfDays: 0,
       absentDays: params.attendance.absent,
       remarks: params.remarks ?? '',
     },

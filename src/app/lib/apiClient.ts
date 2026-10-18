@@ -55,6 +55,14 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}): P
     onUnauthorized?.();
   }
 
+  // The server rejects a parent session once every linked student is Inactive
+  // (see the parent status guard) — end the session instead of leaving the
+  // portal half-working behind 403s.
+  if (response.status === 403 && !skipAuth) {
+    const body = await response.clone().json().catch(() => null);
+    if ((body as { code?: string } | null)?.code === 'STUDENT_INACTIVE') onUnauthorized?.();
+  }
+
   return response;
 }
 

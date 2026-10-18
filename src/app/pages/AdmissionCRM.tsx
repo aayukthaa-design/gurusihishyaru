@@ -17,7 +17,8 @@ import {
   subscribeAdmissions,
   type AdmissionRecord,
 } from '../lib/admissionService';
-import { UserPlus, Clock, ArrowRight, XCircle, FileCheck2, Plus, Edit2 } from 'lucide-react';
+import { UserPlus, Clock, ArrowRight, XCircle, FileCheck2, Plus, Edit2, FileSpreadsheet } from 'lucide-react';
+import { exportRowsToExcel } from '../lib/reportExport';
 import { WhatsAppButton } from '../components/WhatsAppButton';
 import { composeWhatsAppMessage, getWhatsAppBusinessName } from '../lib/whatsapp';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
@@ -30,6 +31,7 @@ export function AdmissionCRM() {
   const branches = useBranches();
   const [admissions, setAdmissions] = useState<AdmissionRecord[]>(getAdmissions());
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
+  const [statusFilter, setStatusFilter] = useState('');
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState(EMPTY_ENQUIRY);
   const [editId, setEditId] = useState<string | null>(null);
@@ -80,8 +82,25 @@ export function AdmissionCRM() {
     setAddOpen(true);
   }
 
-  const filteredAdmissions = useMemo(() => getFilteredAdmissions(admissions, user, branchFilter), [admissions, branchFilter, user]);
+  // Branch + status filters feed the table, the stat cards and the Excel export alike.
+  const filteredAdmissions = useMemo(() => {
+    const scoped = getFilteredAdmissions(admissions, user, branchFilter);
+    if (!statusFilter) return scoped;
+    // Legacy in-progress statuses (see admissionService) read as "Updated".
+    return scoped.filter((a) => (['Enquiry', 'Admitted', 'Rejected'].includes(a.status) ? a.status : 'Updated') === statusFilter);
+  }, [admissions, branchFilter, statusFilter, user]);
   const stats = useMemo(() => getAdmissionStats(filteredAdmissions), [filteredAdmissions]);
+
+  const handleExportAdmissions = () => {
+    exportRowsToExcel(
+      filteredAdmissions.map((a) => ({
+        'Applicant Name': a.applicantName, Grade: a.grade, 'Applied Date': a.appliedDate, Contact: a.contactNumber, Email: a.email,
+        Branch: getBranchName(a.branchId), Status: a.status,
+      })),
+      'Admissions',
+      `admissions-${(statusFilter || 'all').toLowerCase()}-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    );
+  };
 
   const columns = [
     { header: 'Applicant Name', accessor: 'applicantName' as const },
@@ -186,6 +205,18 @@ export function AdmissionCRM() {
                 ))}
               </select>
             )}
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="rounded-lg border border-input bg-card px-3 py-2 text-sm"
+            >
+              <option value="">All Statuses</option>
+              <option value="Enquiry">Enquiry</option>
+              <option value="Updated">Updated</option>
+              <option value="Admitted">Admitted</option>
+              <option value="Rejected">Rejected</option>
+            </select>
+            <Button variant="outline" onClick={handleExportAdmissions}><FileSpreadsheet className="mr-2 h-4 w-4" />Export Excel</Button>
             <Button onClick={() => { setEditId(null); setAddForm(EMPTY_ENQUIRY); setAddOpen(true); }}><Plus className="mr-2 h-4 w-4" />New Enquiry</Button>
           </div>
         </div>

@@ -103,7 +103,10 @@ export async function deleteSchoolExamSchedule(id: string): Promise<boolean> {
     const res = await apiFetch(`${API_BASE}/api/school-exam-schedules/${id}`, {
       method: 'DELETE',
     });
-    if (!res.ok) throw new Error('failed');
+    // 404 = already gone server-side, which is the outcome we wanted.
+    if (!res.ok && res.status !== 404) throw new Error('failed');
+    // Drop it locally first so a failed/slow refetch can never resurrect it.
+    schoolExamStore.setState((prev) => prev.filter((entry) => entry.id !== String(id)));
     await refreshSchoolExamSchedules();
     return true;
   } catch (error) {

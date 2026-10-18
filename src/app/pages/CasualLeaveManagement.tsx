@@ -86,7 +86,7 @@ export function CasualLeaveManagement() {
               <option value="">All Statuses</option>
               <option value="Pending">Pending</option>
               <option value="Approved">Approved</option>
-              <option value="Rejected">Rejected</option>
+              <option value="Rejected">Absent</option>
             </select>
           </div>
 
@@ -102,14 +102,14 @@ export function CasualLeaveManagement() {
                     {r.reason && <p className="text-xs text-muted-foreground">{r.reason}</p>}
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${STATUS_STYLES[r.status]}`}>{r.status}</span>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${STATUS_STYLES[r.status]}`}>{r.status === 'Rejected' ? 'Absent' : r.status}</span>
                     {r.status === 'Pending' && canReview && (
                       <>
                         <button type="button" onClick={() => handleReview(r.id, 'Approved')} disabled={busyId === r.id} title="Approve" className="rounded-lg bg-emerald-100 p-1.5 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-400">
                           <Check className="h-4 w-4" />
                         </button>
-                        <button type="button" onClick={() => handleReview(r.id, 'Rejected')} disabled={busyId === r.id} title="Reject" className="rounded-lg bg-red-100 p-1.5 text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-400">
-                          <X className="h-4 w-4" />
+                        <button type="button" onClick={() => handleReview(r.id, 'Rejected')} disabled={busyId === r.id} title="Mark Absent" className="rounded-lg bg-red-100 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-400">
+                          Absent
                         </button>
                       </>
                     )}

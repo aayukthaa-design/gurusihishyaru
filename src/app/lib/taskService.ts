@@ -17,7 +17,7 @@ export interface TaskRecord {
   relatedClass?: string;
   relatedSubject?: string;
   attachmentUrl?: string;
-  status: 'pending' | 'in-progress' | 'awaiting_admin_review' | 'awaiting_super_admin_review' | 'completed';
+  status: 'pending' | 'in-progress' | 'awaiting_admin_review' | 'awaiting_super_admin_review' | 'completed' | 'not_done';
   progress?: number; // 0-100
   completionRemarks?: string;
   createdAt: string;
@@ -120,6 +120,7 @@ export function getTaskStats(tasks?: TaskRecord[]) {
     inProgress: list.filter((t) => t.status === 'in-progress').length,
     awaitingReview: list.filter((t) => t.status === 'awaiting_admin_review' || t.status === 'awaiting_super_admin_review').length,
     completed: list.filter((t) => t.status === 'completed').length,
+    notDone: list.filter((t) => t.status === 'not_done').length,
   };
 }
 
@@ -174,6 +175,25 @@ export function approveTaskAsAdmin(taskId: string) {
   });
 }
 
+// Admin / super_admin flags a task as not done (e.g. the deadline passed, or
+// the submitted work was rejected). The assigned teacher sees the same status
+// and can pick the task up again by moving its progress.
+export function markTaskNotDone(taskId: string) {
+  void updateTask(taskId, { status: 'not_done' }).then(() => {
+    const task = taskState.find((t) => t.id === taskId);
+    if (task && task.teacherId) {
+      addNotification({
+        title: 'Task Not Done',
+        message: `${task.title} was marked as not done`,
+        type: 'warning',
+        teacherIds: [task.teacherId],
+        roles: ['teacher'],
+        branchId: task.branchId ?? null,
+      });
+    }
+  });
+}
+
 export function exportTasksCSV(tasks?: TaskRecord[]) {
   const list = tasks ?? taskState;
   const header = ['ID','Title','Teacher','Branch','Priority','Due Date','Due Time','Class','Subject','Status','Progress','Created At'];
@@ -201,5 +221,6 @@ export default {
   assignTask,
   setTaskProgress,
   approveTaskAsAdmin,
+  markTaskNotDone,
   exportTasksCSV,
 };

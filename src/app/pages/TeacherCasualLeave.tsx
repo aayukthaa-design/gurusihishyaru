@@ -107,7 +107,7 @@ export function TeacherCasualLeave() {
                     )}
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${STATUS_STYLES[r.status]}`}>{r.status}</span>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${STATUS_STYLES[r.status]}`}>{r.status === 'Rejected' ? 'Absent' : r.status}</span>
                     {r.status === 'Pending' && (
                       <button type="button" onClick={() => handleCancel(r.id)} title="Withdraw request" className="text-muted-foreground hover:text-red-500">
                         <X className="h-4 w-4" />

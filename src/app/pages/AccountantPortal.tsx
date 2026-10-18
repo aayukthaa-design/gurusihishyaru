@@ -19,7 +19,10 @@ import {
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { apiFetch, getFileUrl } from '../lib/apiClient';
-import { computeIncomeExpenseSummary } from '../lib/ledgerService';
+import { computeIncomeExpenseSummary, filterLedgerByDateRange } from '../lib/ledgerService';
+import { DateRangeFilter } from '../components/DateRangeFilter';
+import { exportRowsToExcel } from '../lib/reportExport';
+import { PDFTemplateService } from '../lib/pdfTemplateService';
 
 interface LedgerEntry {
   id: number;
@@ -262,6 +265,9 @@ export function AccountantPortal() {
 
   // Ledger Filter states
   const [ledgerSearch, setLedgerSearch] = useState('');
+  // One date range drives the ledger table, the income/expense summaries and both exports.
+  const [rangeStart, setRangeStart] = useState('');
+  const [rangeEnd, setRangeEnd] = useState('');
   const [ledgerTypeFilter, setLedgerTypeFilter] = useState('');
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState('');
 
@@ -545,7 +551,8 @@ export function AccountantPortal() {
     return list.sort((a, b) => b.timestamp - a.timestamp).slice(0, 10);
   }, [ledger, allocations, students, reports, todayStr]);
 
-  const incomeVsExpenseSummary = useMemo(() => computeIncomeExpenseSummary(ledger), [ledger]);
+  const rangeLedger = useMemo(() => filterLedgerByDateRange(ledger, rangeStart, rangeEnd), [ledger, rangeStart, rangeEnd]);
+  const incomeVsExpenseSummary = useMemo(() => computeIncomeExpenseSummary(rangeLedger), [rangeLedger]);
 
   const lowStockItemsList = useMemo(() => {
     return inventory.filter(item => item.status === 'Active' && item.availableQuantity <= item.minStock);
@@ -553,7 +560,7 @@ export function AccountantPortal() {
 
   // Filtered Ledger list
   const filteredLedger = useMemo(() => {
-    return ledger.filter(t => {
+    return rangeLedger.filter(t => {
       const matchesSearch = t.voucherNumber.toLowerCase().includes(ledgerSearch.toLowerCase()) || 
                             t.description.toLowerCase().includes(ledgerSearch.toLowerCase()) ||
                             t.category.toLowerCase().includes(ledgerSearch.toLowerCase());
@@ -561,7 +568,23 @@ export function AccountantPortal() {
       const matchesCategory = !ledgerCategoryFilter || t.category === ledgerCategoryFilter;
       return matchesSearch && matchesType && matchesCategory;
     }).sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
-  }, [ledger, ledgerSearch, ledgerTypeFilter, ledgerCategoryFilter]);
+  }, [rangeLedger, ledgerSearch, ledgerTypeFilter, ledgerCategoryFilter]);
+
+  const rangeLabel = `${rangeStart || 'start'}_to_${rangeEnd || 'today'}`;
+  const handleExportLedgerExcel = () => {
+    exportRowsToExcel(
+      filteredLedger.map((t) => ({ Voucher: t.voucherNumber, Date: t.date, Type: t.type, Category: t.category, Description: t.description, Amount: t.amount, 'Payment Mode': t.paymentMode })),
+      'Ledger',
+      `ledger-${rangeLabel}.xlsx`,
+    );
+  };
+  const handleExportLedgerPdf = async () => {
+    const pdf = new PDFTemplateService('l');
+    pdf.addTitle('Income & Expense Ledger');
+    pdf.addParagraph(`Period: ${rangeStart || 'beginning'} to ${rangeEnd || 'latest'}   |   Income: Rs. ${incomeVsExpenseSummary.totalInc}   |   Expense: Rs. ${incomeVsExpenseSummary.totalExp}   |   Net: Rs. ${incomeVsExpenseSummary.net}`);
+    pdf.addTable(['Voucher', 'Date', 'Type', 'Category', 'Description', 'Amount (Rs.)', 'Mode'], filteredLedger.map((t) => [t.voucherNumber, t.date, t.type, t.category, t.description, String(t.amount), t.paymentMode]));
+    await pdf.exportWithLetterhead(`ledger-${rangeLabel}.pdf`);
+  };
 
   // Filtered Inventory list
   const filteredInventory = useMemo(() => {
@@ -1232,6 +1255,10 @@ export function AccountantPortal() {
                 </div>
 
                 {/* 4. Income vs Expense Summary */}
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-card p-4 shadow-sm">
+                  <p className="text-sm font-semibold text-foreground">Income &amp; Expense period</p>
+                  <DateRangeFilter start={rangeStart} end={rangeEnd} onChange={({ start, end }) => { setRangeStart(start); setRangeEnd(end); }} />
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {/* Income Breakdown */}
                   <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
@@ -1372,6 +1399,9 @@ export function AccountantPortal() {
                     </select>
                   </div>
 
+                  <DateRangeFilter start={rangeStart} end={rangeEnd} onChange={({ start, end }) => { setRangeStart(start); setRangeEnd(end); }} />
+                  <button onClick={handleExportLedgerExcel} disabled={filteredLedger.length === 0} className="rounded-xl border border-border bg-secondary px-3 py-2 text-sm font-semibold text-foreground hover:bg-secondary/80 disabled:opacity-50">Export Excel</button>
+                  <button onClick={() => void handleExportLedgerPdf()} disabled={filteredLedger.length === 0} className="rounded-xl border border-border bg-secondary px-3 py-2 text-sm font-semibold text-foreground hover:bg-secondary/80 disabled:opacity-50">Export PDF</button>
                   <button
                     onClick={() => { setEditingLedgerId(null); setLedgerForm(defaultLedgerForm()); setShowAddLedgerModal(true); }}
                     className="flex items-center justify-center gap-2 px-4 py-2 bg-primary text-primary-foreground font-semibold rounded-xl text-sm transition-all hover:opacity-90 active:scale-95 shadow-sm"

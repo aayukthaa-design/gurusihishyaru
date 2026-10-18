@@ -4,6 +4,7 @@ import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
 import { useBranches } from '../lib/branchService';
 import { useStudents } from '../lib/studentService';
+import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
 import {
   createSchoolExamSchedule,
   deleteSchoolExamSchedule,
@@ -95,7 +96,25 @@ export function SchoolExamSchedulesPage() {
     return base;
   }, [branchFilter, classFilter, dateFrom, dateTo, examFilter, schedules, schoolFilter, search, statusFilter, studentFilter, user]);
 
-  const classOptions = useMemo(() => Array.from(new Set(students.map((student) => student.className).filter(Boolean))), [students]);
+  // Class options follow the same role/branch/batch restrictions as the rest of
+  // the app: a teacher sees only their assigned batches, an admin only their
+  // branch's, a super admin whichever branch is filtered. Parents fall back to
+  // their own children's classes.
+  const classes = useClasses();
+  const classOptions = useMemo(() => {
+    let names: string[];
+    if (user?.role === 'teacher') names = getClassesForTeacher(user.id, user.branchId).map((c) => c.className);
+    else if (user?.role === 'admin') names = getClassesForBranch(user.branchId).map((c) => c.className);
+    else if (user?.role === 'super_admin') names = getClassesForBranch(branchFilter || undefined).map((c) => c.className);
+    else names = students.map((student) => student.className);
+    return Array.from(new Set(names.filter(Boolean)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [classes, students, user, branchFilter]);
+
+  // No "All classes" choice: keep the filter pinned to a valid class.
+  useEffect(() => {
+    if (classOptions.length && !classOptions.includes(classFilter)) setClassFilter(classOptions[0]);
+  }, [classOptions, classFilter]);
   const studentOptions = useMemo(() => {
     const scoped = branchFilter ? students.filter((student) => student.branchId === branchFilter) : students;
     return scoped.filter((student) => !classFilter || student.className === classFilter);
@@ -339,7 +358,6 @@ export function SchoolExamSchedulesPage() {
               {branches.filter((branch) => branch.status === 'Active').map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
             </select>
             <select value={classFilter} onChange={(event) => setClassFilter(event.target.value)} className="field">
-              <option value="">All classes</option>
               {classOptions.map((className) => <option key={className} value={className}>{className}</option>)}
             </select>
             <select value={studentFilter} onChange={(event) => setStudentFilter(event.target.value)} className="field">

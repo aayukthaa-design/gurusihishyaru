@@ -9,7 +9,7 @@ import { Textarea } from '../components/ui/textarea';
 import { useBranches } from '../lib/branchService';
 import { useAuth } from '../auth/AuthContext';
 import { getTeachersForBranch } from '../lib/teacherService';
-import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, approveTaskAsAdmin, refreshTasks, TaskRecord } from '../lib/taskService';
+import taskService, { getTaskStats, subscribeTasks, createTask, setTaskProgress, approveTaskAsAdmin, markTaskNotDone, refreshTasks, TaskRecord } from '../lib/taskService';
 
 const STATUS_LABELS: Record<TaskRecord['status'], string> = {
   pending: 'Pending',
@@ -17,6 +17,7 @@ const STATUS_LABELS: Record<TaskRecord['status'], string> = {
   awaiting_admin_review: 'Awaiting Admin Review',
   awaiting_super_admin_review: 'Awaiting Super Admin Review',
   completed: 'Completed',
+  not_done: 'Not Done',
 };
 
 export function TeacherTasks() {
@@ -90,11 +91,12 @@ export function TeacherTasks() {
       
       <div className="p-6 space-y-6">
         <div className="flex items-center justify-between">
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-5 w-full">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-6 w-full">
             <StatsCard title="Total Tasks" value={String(visibleStats.total)} icon={ListTodo} iconColor="bg-primary" />
             <StatsCard title="Completed" value={String(visibleStats.completed)} change="Live" changeType="positive" icon={CheckCircle2} iconColor="bg-chart-3" />
             <StatsCard title="Awaiting Review" value={String(visibleStats.awaitingReview)} icon={AlertCircle} iconColor="bg-amber-500" />
             <StatsCard title="In Progress" value={String(visibleStats.inProgress)} icon={Clock} iconColor="bg-chart-4" />
+            <StatsCard title="Not Done" value={String(visibleStats.notDone)} icon={AlertCircle} iconColor="bg-red-500" />
             <StatsCard title="Pending" value={String(visibleStats.pending)} change="Live" changeType="negative" icon={AlertCircle} iconColor="bg-destructive" />
           </div>
           {canManageTasks && (
@@ -126,6 +128,7 @@ export function TeacherTasks() {
                 <span className={`rounded-full px-3 py-1 text-xs font-medium ${
                   task.status === 'completed' ? 'bg-chart-3/10 text-chart-3' :
                   task.status === 'in-progress' ? 'bg-primary/10 text-primary' :
+                  task.status === 'not_done' ? 'bg-destructive/10 text-destructive' :
                   task.status === 'awaiting_admin_review' || task.status === 'awaiting_super_admin_review' ? 'bg-amber-500/10 text-amber-600' :
                   'bg-muted text-muted-foreground'
                 }`}>
@@ -133,7 +136,7 @@ export function TeacherTasks() {
                 </span>
               </div>
               <div className="mt-3 flex items-center gap-3">
-                {user?.role === 'teacher' && task.teacherId === user.id && (task.status === 'pending' || task.status === 'in-progress') ? (
+                {user?.role === 'teacher' && task.teacherId === user.id && (task.status === 'pending' || task.status === 'in-progress' || task.status === 'not_done') ? (
                   <>
                     <input type="range" min={0} max={100} value={task.progress ?? 0} onChange={(e) => updateProgress(task.id, Number(e.target.value))} />
                     <span className="text-xs text-muted-foreground">{task.progress ?? 0}%</span>
@@ -145,6 +148,9 @@ export function TeacherTasks() {
                 {(user?.role === 'admin' || user?.role === 'super_admin') &&
                   (task.status === 'awaiting_admin_review' || task.status === 'awaiting_super_admin_review') && (
                   <Button size="sm" onClick={() => approveTaskAsAdmin(task.id)}>Approve &amp; Complete</Button>
+                )}
+                {(user?.role === 'admin' || user?.role === 'super_admin') && task.status !== 'completed' && task.status !== 'not_done' && (
+                  <Button size="sm" variant="outline" onClick={() => markTaskNotDone(task.id)}>Mark Not Done</Button>
                 )}
                 {task.attachmentUrl && <a href={task.attachmentUrl} className="ml-auto inline-flex items-center text-sm text-primary"><Paperclip className="mr-2 h-4 w-4"/>Attachment</a>}
               </div>

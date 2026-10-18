@@ -33,8 +33,9 @@ import { useFeeRecords, refreshFeeRecords, fetchFeePayments, type FeePayment } f
 import { PDFTemplateService } from '../lib/pdfTemplateService';
 import { exportRowsToExcel } from '../lib/reportExport';
 import { useHolidays, refreshHolidays, isHoliday } from '../lib/holidayService';
+import { buildMonthlyAttendanceMatrix, countAttendance, formatAttendancePercent } from '../lib/attendanceMath';
 import { fetchAttendance, type AttendanceRecord } from '../lib/attendanceService';
-import { exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
+import { exportMonthlyAttendanceToExcel, exportMonthlyAttendanceToPdf } from '../lib/reportExport';
 
 const CURRENT_MONTH = new Date().toISOString().slice(0, 7);
 
@@ -98,36 +99,47 @@ export function ParentPortal() {
     () => attendanceRecords.filter((r) => r.studentId === selectedStudent?.id),
     [attendanceRecords, selectedStudent?.id]
   );
-  // Month-scoped; holidays never count as working days (an absent mark on a holiday is ignored).
-  const monthAttendance = useMemo(
-    () => studentAttendance.filter((r) => r.date.startsWith(attendanceMonth) && !isHoliday(holidays, r.date, selectedStudent?.branchId)),
-    [studentAttendance, attendanceMonth, holidays, selectedStudent?.branchId]
+  const branchHolidays = useMemo(
+    () => holidays.filter((h) => !h.branchId || h.branchId === selectedStudent?.branchId),
+    [holidays, selectedStudent?.branchId]
   );
-  const attendanceTotal = monthAttendance.filter((r) => r.status !== 'leave').length;
-  const attendancePresent = monthAttendance.filter((r) => r.status === 'present').length;
-  const attendanceAbsent = attendanceTotal - attendancePresent;
-  const attendancePercentage = attendanceTotal ? Math.round((attendancePresent / attendanceTotal) * 100) : null;
+  const isHolidayDate = (date: string) => !!isHoliday(branchHolidays, date, selectedStudent?.branchId);
+  // Month-scoped. Same formula as every other portal (see attendanceMath):
+  // holidays are excluded from total classes and never count as absences.
+  const monthAttendance = useMemo(
+    () => studentAttendance.filter((r) => r.date.startsWith(attendanceMonth)),
+    [studentAttendance, attendanceMonth]
+  );
+  const monthCounts = useMemo(() => countAttendance(monthAttendance, isHolidayDate), [monthAttendance, branchHolidays]); // eslint-disable-line react-hooks/exhaustive-deps
+  const overallCounts = useMemo(() => countAttendance(studentAttendance, isHolidayDate), [studentAttendance, branchHolidays]); // eslint-disable-line react-hooks/exhaustive-deps
+  const attendanceTotal = monthCounts.total;
+  const attendancePresent = monthCounts.present;
+  const attendanceAbsent = monthCounts.absent;
+  const attendancePercentage = monthCounts.percent;
   const recentAttendance = useMemo(
     () => [...monthAttendance].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5),
     [monthAttendance]
   );
 
+  // Same monthly grid as the Teacher portal's report (dates + weekdays, ✓/✗, holidays marked).
   const handleExportAttendance = async (format: 'pdf' | 'excel') => {
     if (!selectedStudent) return;
     setExportingAttendance(true);
     try {
-      const monthRecords = studentAttendance.filter((r) => r.date.startsWith(attendanceMonth));
-      const row: AttendanceExportRow = {
-        name: selectedStudent.fullName,
-        id: selectedStudent.id,
-        present: monthRecords.filter((r) => r.status === 'present').length,
-        absent: monthRecords.filter((r) => r.status === 'absent').length,
-        leave: monthRecords.filter((r) => r.status === 'leave').length,
-        total: monthRecords.length,
-      };
+      const matrix = buildMonthlyAttendanceMatrix({
+        month: attendanceMonth,
+        students: [{ id: selectedStudent.id, name: selectedStudent.fullName }],
+        records: studentAttendance,
+        holidays: branchHolidays,
+      });
+      const meta: Array<[string, string]> = [
+        ['Class', selectedStudent.className || '—'],
+        ['Batch', selectedStudent.batch || '—'],
+        ['Branch', selectedStudent.branchName || '—'],
+      ];
       const title = `Attendance — ${selectedStudent.fullName}`;
-      if (format === 'excel') exportAttendanceToExcel([row], title, attendanceMonth);
-      else await exportAttendanceToPdf([row], title, attendanceMonth, user?.name || 'Parent');
+      if (format === 'excel') exportMonthlyAttendanceToExcel(matrix, meta, title);
+      else await exportMonthlyAttendanceToPdf(matrix, meta, title, user?.name || 'Parent');
     } finally {
       setExportingAttendance(false);
     }
@@ -274,7 +286,7 @@ export function ParentPortal() {
     const paid = studentFeeRecords.reduce((sum, r) => sum + r.paidAmount, 0);
     const hasOverdue = studentFeeRecords.some((r) => r.status === 'Overdue');
     const hasOutstanding = studentFeeRecords.some((r) => r.status !== 'Paid');
-    const status = hasOverdue ? 'Overdue' : hasOutstanding ? 'Pending' : 'Paid';
+    const status = hasOverdue ? 'Overdue' : hasOutstanding ? 'Due' : 'Paid';
     const upcoming = studentFeeRecords
       .filter((r) => r.status !== 'Paid' && r.dueDate)
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate))[0];
@@ -307,7 +319,8 @@ export function ParentPortal() {
   };
 
   const feeDueAmount = selectedStudentFee ? selectedStudentFee.total - selectedStudentFee.paid : 0;
-  const feeStatusLabel = selectedStudentFee?.status ?? 'Not available';
+  // 'Due' is an internal state only — the portal shows the outstanding amount instead of a status word.
+  const feeStatusLabel = selectedStudentFee ? (selectedStudentFee.status === 'Due' ? `${formatIndianCurrency(selectedStudentFee.total - selectedStudentFee.paid)} due` : selectedStudentFee.status) : 'Not available';
   const feeSummaryText = selectedStudentFee
     ? selectedStudentFee.status === 'Paid'
       ? 'All fees paid in full'
@@ -526,8 +539,8 @@ export function ParentPortal() {
               <div className="mt-5 grid gap-4 sm:grid-cols-2">
                 <div className="rounded-3xl border border-border bg-background p-5">
                   <p className="text-sm font-semibold text-muted-foreground">Attendance for {attendanceMonth}</p>
-                  <p className="mt-2 text-3xl font-semibold text-foreground">{attendancePercentage === null ? '—' : `${attendancePercentage}%`}</p>
-                  <p className="mt-2 text-sm text-muted-foreground">{attendanceTotal ? `${attendancePresent} present, ${attendanceAbsent} absent out of ${attendanceTotal} class days (holidays excluded)` : 'No attendance records for this month.'}</p>
+                  <p className="mt-2 text-3xl font-semibold text-foreground">{formatAttendancePercent(attendancePercentage)}</p>
+                  <p className="mt-2 text-sm text-muted-foreground">{attendanceTotal ? `${attendancePresent} present, ${attendanceAbsent} absent out of ${attendanceTotal} classes (holidays excluded)` : 'No attendance records for this month.'}</p>
                 </div>
                 <div className="rounded-3xl border border-border bg-background p-5">
                   <p className="text-sm font-semibold text-muted-foreground">Recent days</p>
@@ -545,7 +558,7 @@ export function ParentPortal() {
                               ? 'bg-red-100 text-red-700 dark:bg-red-950/20 dark:text-red-400'
                               : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400'
                           }`}>
-                            <CheckCircle2 className="h-3 w-3" /> {r.status}
+                            <CheckCircle2 className="h-3 w-3" /> {r.status === 'present' ? '✓ Present' : r.status === 'absent' ? '✗ Absent' : 'Holiday'}
                           </span>
                         </div>
                       ))}
@@ -564,12 +577,18 @@ export function ParentPortal() {
                 </div>
                 {studentResults.length > 0 && (
                   <button type="button" onClick={() => exportRowsToExcel(
-                    studentResults.map((r) => ({ Exam: r.examName, 'Max Marks': r.maxMarks, 'Passing Marks': r.passingMarks, 'Marks Obtained': r.marksObtained, Result: r.result })),
+                    studentResults.map((r) => ({ Exam: r.examName, 'Max Marks': r.maxMarks, 'Passing Marks': r.passingMarks, 'Marks Obtained': r.marksObtained, Result: r.result, 'Attendance %': formatAttendancePercent(overallCounts.percent) })),
                     'Exam Results', `exam-results-${selectedStudent?.fullName ?? 'student'}.xlsx`)}
                     className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary">
                     <FileSpreadsheet className="h-4 w-4" /> Excel
                   </button>
                 )}
+              </div>
+
+              <div className="mt-5 rounded-3xl border border-border bg-background p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">Attendance Percentage</p>
+                <p className="mt-2 text-2xl font-semibold text-foreground">{formatAttendancePercent(overallCounts.percent)}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{overallCounts.total ? `${overallCounts.total - overallCounts.absent} of ${overallCounts.total} classes attended (holidays excluded)` : 'No attendance recorded yet.'}</p>
               </div>
 
               <div className="mt-5">

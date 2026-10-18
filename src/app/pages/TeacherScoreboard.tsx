@@ -122,11 +122,11 @@ export function TeacherScoreboard() {
         ['Class', `${selectedExam.className}`],
         ['Subject', `${selectedExam.subject}`],
         [],
-        ['Rank', 'Student', 'Roll', 'Marks', 'Passing Marks', 'Percentage', 'Grade', 'Result'],
+        ['Rank', 'Student', 'Maximum Marks', 'Marks', 'Passing Marks', 'Percentage', 'Grade', 'Result'],
         ...rankedMarks.map((record) => [
           record.rank,
           record.studentName,
-          record.rollNumber,
+          selectedExam.maxMarks,
           record.marksObtained,
           selectedExam.passingMarks ?? 35,
           record.percentage.toFixed(1),
@@ -185,9 +185,10 @@ export function TeacherScoreboard() {
       pdfService.addTable([['Metric', 'Value']], summaryDetails);
 
       pdfService.addSectionHeading('Student Results Table');
-      const headers = ['Student Name', 'Marks Obtained', 'Passing Marks', 'Percentage', 'Grade', 'Result'];
+      const headers = ['Student Name', 'Maximum Marks', 'Marks Obtained', 'Passing Marks', 'Percentage', 'Grade', 'Result'];
       const body = rankedMarks.map((record) => [
         record.studentName,
+        String(selectedExam.maxMarks),
         String(record.marksObtained),
         String(selectedExam.passingMarks ?? 35),
         `${record.percentage.toFixed(1)}%`,
@@ -298,7 +299,7 @@ export function TeacherScoreboard() {
                   columns={[
                     { header: 'Rank', accessor: 'rank' },
                     { header: 'Student', accessor: 'studentName' },
-                    { header: 'Roll', accessor: 'rollNumber' },
+                    { header: 'Maximum Marks', accessor: () => selectedExam?.maxMarks ?? '' },
                     { header: 'Marks', accessor: 'marksObtained' },
                     { header: 'Passing Marks', accessor: () => selectedExam?.passingMarks ?? 35 },
                     { header: '%', accessor: 'percentage' },

@@ -16,6 +16,7 @@ import {
   calculateSalaryFromClasses,
 } from '../lib/teacherSalaryService';
 import { CalendarDays, Save, ClipboardCheck, AlertCircle, FileDown, FileSpreadsheet } from 'lucide-react';
+import { formatAttendancePercent } from '../lib/attendanceMath';
 import { exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
 
 const TODAY = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -25,8 +26,7 @@ const statusOptions: Array<{ value: TeacherAttendanceStatus | 'all'; label: stri
   { value: 'all', label: 'All Status' },
   { value: 'present', label: 'Present' },
   { value: 'absent', label: 'Absent' },
-  { value: 'half_day', label: 'Half Day' },
-  { value: 'leave', label: 'Leave' },
+  { value: 'holiday', label: 'Holiday' },
 ];
 
 export function TeacherAttendance() {
@@ -153,9 +153,8 @@ export function TeacherAttendance() {
     const total = filteredTeachers.length;
     const present = filteredTeachers.filter((teacher) => attendance[teacher.id] === 'present').length;
     const absent = filteredTeachers.filter((teacher) => attendance[teacher.id] === 'absent').length;
-    const halfDay = filteredTeachers.filter((teacher) => attendance[teacher.id] === 'half_day').length;
-    const leave = filteredTeachers.filter((teacher) => attendance[teacher.id] === 'leave').length;
-    return { total, present, absent, halfDay, leave };
+    const holiday = filteredTeachers.filter((teacher) => attendance[teacher.id] === 'holiday').length;
+    return { total, present, absent, holiday };
   }, [attendance, filteredTeachers]);
 
   const history = useMemo(() => {
@@ -182,14 +181,18 @@ export function TeacherAttendance() {
   const [exportMonth, setExportMonth] = useState(attendanceMonth);
   const handleExportMonth = async (format: 'pdf' | 'excel') => {
     const monthEntries = exportMonth === attendanceMonth ? monthAttendance : await fetchTeacherAttendance({ month: exportMonth, branchId: branchIdForQuery });
-    const rows: AttendanceExportRow[] = allowedTeachers.map((teacher) => ({ teacher, history: summarizeTeacherAttendance(monthEntries, teacher.id, exportMonth) })).map(({ teacher, history: summary }) => ({
+    // Same teacher/department filters as the on-screen list (status filter is a
+    // per-day view, so it doesn't apply to a monthly report).
+    const exportTeachers = allowedTeachers.filter((teacher) =>
+      (!teacherFilter || teacher.id === teacherFilter)
+      && (!departmentFilter || (teacher.department || '').toLowerCase().includes(departmentFilter.toLowerCase())));
+    const rows: AttendanceExportRow[] = exportTeachers.map((teacher) => ({ teacher, history: summarizeTeacherAttendance(monthEntries, teacher.id, exportMonth) })).map(({ teacher, history: summary }) => ({
       name: `${teacher.firstName} ${teacher.lastName}`,
       id: teacher.id,
       present: summary.present,
       absent: summary.absent,
-      halfDay: summary.halfDay,
-      leave: summary.leave,
-      total: summary.workingDays,
+      holiday: summary.holiday,
+      total: summary.totalClasses,
     }));
     const title = 'Teacher Attendance';
     if (format === 'excel') exportAttendanceToExcel(rows, title, exportMonth);
@@ -259,7 +262,7 @@ export function TeacherAttendance() {
         month: salaryMonth,
         classesConducted,
         salaryPerClass,
-        attendance: salaryAttendance ?? { teacherId: selectedSalaryTeacher.id, present: 0, absent: 0, halfDay: 0, leave: 0, workingDays: 0 },
+        attendance: salaryAttendance ?? { teacherId: selectedSalaryTeacher.id, present: 0, absent: 0, holiday: 0, totalClasses: 0, percent: null, workingDays: 0 },
       });
       setSalaryRecord(saved);
       setSalarySaved(true);
@@ -327,12 +330,12 @@ export function TeacherAttendance() {
             <div className="flex flex-wrap gap-2">
               <button type="button" onClick={() => markAll('present')} className="rounded-xl bg-green-100 px-3 py-2 text-sm font-semibold text-green-700 hover:bg-green-200 dark:bg-green-900/40 dark:text-green-400">Mark All Present</button>
               <button type="button" onClick={() => markAll('absent')} className="rounded-xl bg-red-100 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-400">Mark All Absent</button>
-              <button type="button" onClick={() => markAll('leave')} className="rounded-xl bg-amber-100 px-3 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-400">Mark All Leave</button>
+              <button type="button" onClick={() => markAll('holiday')} className="rounded-xl bg-amber-100 px-3 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-400">Mark All Holiday</button>
             </div>
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-5">
+        <div className="grid gap-4 md:grid-cols-4">
           <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
             <p className="text-sm text-muted-foreground">Total Teachers</p>
             <p className="mt-2 text-2xl font-bold text-foreground">{summary.total}</p>
@@ -346,12 +349,8 @@ export function TeacherAttendance() {
             <p className="mt-2 text-2xl font-bold text-red-500">{summary.absent}</p>
           </div>
           <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
-            <p className="text-sm text-muted-foreground">Half Day</p>
-            <p className="mt-2 text-2xl font-bold text-amber-600">{summary.halfDay}</p>
-          </div>
-          <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
-            <p className="text-sm text-muted-foreground">Leave</p>
-            <p className="mt-2 text-2xl font-bold text-sky-600">{summary.leave}</p>
+            <p className="text-sm text-muted-foreground">Holiday</p>
+            <p className="mt-2 text-2xl font-bold text-sky-600">{summary.holiday}</p>
           </div>
         </div>
 
@@ -377,8 +376,7 @@ export function TeacherAttendance() {
                   <th className="py-3 pr-3 font-semibold">Branch</th>
                   <th className="py-3 pr-3 font-semibold">Present</th>
                   <th className="py-3 pr-3 font-semibold">Absent</th>
-                  <th className="py-3 pr-3 font-semibold">Half Day</th>
-                  <th className="py-3 pr-3 font-semibold">Leave</th>
+                  <th className="py-3 pr-3 font-semibold">Holiday</th>
                 </tr>
               </thead>
               <tbody>
@@ -401,13 +399,8 @@ export function TeacherAttendance() {
                         </button>
                       </td>
                       <td className="py-3 pr-3">
-                        <button type="button" onClick={() => toggleStatus(teacher.id, 'half_day')} disabled={isReadOnly} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${status === 'half_day' ? 'bg-amber-500 text-white' : 'border border-border bg-secondary text-muted-foreground hover:bg-secondary/80'}`}>
-                          Half Day
-                        </button>
-                      </td>
-                      <td className="py-3 pr-3">
-                        <button type="button" onClick={() => toggleStatus(teacher.id, 'leave')} disabled={isReadOnly} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${status === 'leave' ? 'bg-sky-600 text-white' : 'border border-border bg-secondary text-muted-foreground hover:bg-secondary/80'}`}>
-                          Leave
+                        <button type="button" onClick={() => toggleStatus(teacher.id, 'holiday')} disabled={isReadOnly} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${status === 'holiday' ? 'bg-sky-600 text-white' : 'border border-border bg-secondary text-muted-foreground hover:bg-secondary/80'}`}>
+                          Holiday
                         </button>
                       </td>
                     </tr>
@@ -471,8 +464,8 @@ export function TeacherAttendance() {
               <p className="mt-2 text-lg font-semibold text-foreground">{salaryAttendance?.absent ?? 0}</p>
             </div>
             <div className="rounded-xl border border-border bg-secondary/25 p-4">
-              <p className="text-xs text-muted-foreground">Half Day</p>
-              <p className="mt-2 text-lg font-semibold text-foreground">{salaryAttendance?.halfDay ?? 0}</p>
+              <p className="text-xs text-muted-foreground">Attendance %</p>
+              <p className="mt-2 text-lg font-semibold text-foreground">{formatAttendancePercent(salaryAttendance?.percent ?? null)}</p>
             </div>
             <div className="rounded-xl border border-border bg-secondary/25 p-4">
               <p className="text-xs text-muted-foreground">Working Days</p>
@@ -566,8 +559,8 @@ export function TeacherAttendance() {
                 <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
                   <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Present</span><span className="font-semibold text-foreground">{summary.present}</span></div>
                   <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Absent</span><span className="font-semibold text-foreground">{summary.absent}</span></div>
-                  <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Half Day</span><span className="font-semibold text-foreground">{summary.halfDay}</span></div>
-                  <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Leave</span><span className="font-semibold text-foreground">{summary.leave}</span></div>
+                  <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Holiday</span><span className="font-semibold text-foreground">{summary.holiday}</span></div>
+                  <div className="rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Attendance %</span><span className="font-semibold text-foreground">{formatAttendancePercent(summary.percent)}</span></div>
                   <div className="col-span-2 rounded-lg bg-background/70 p-2"><span className="block text-muted-foreground">Working Days</span><span className="font-semibold text-foreground">{summary.workingDays}</span></div>
                 </div>
               </div>

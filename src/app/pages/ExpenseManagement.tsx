@@ -7,6 +7,7 @@ import { useBranches } from '../lib/branchService';
 import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { exportRowsToExcel } from '../lib/reportExport';
+import { DateRangeFilter } from '../components/DateRangeFilter';
 import { Receipt, TrendingDown, DollarSign, CreditCard, Search, Plus, Loader2, Pencil, Trash2 } from 'lucide-react';
 
 interface LedgerExpense {
@@ -35,6 +36,8 @@ export function ExpenseManagement() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [branchFilter, setBranchFilter] = useState(user?.role === 'super_admin' ? '' : user?.branchId ?? '');
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -80,6 +83,8 @@ export function ExpenseManagement() {
     setError(null);
     const params = new URLSearchParams({ type: 'Expense' });
     if (branchFilter) params.set('branchId', branchFilter);
+    if (startDate) params.set('startDate', startDate);
+    if (endDate) params.set('endDate', endDate);
     apiFetch(`/api/ledger?${params.toString()}`)
       .then((res) => res.json())
       .then((data) => setExpenses(Array.isArray(data) ? data : []))
@@ -88,28 +93,30 @@ export function ExpenseManagement() {
   }
 
   useEffect(() => {
+    if (startDate && endDate && startDate > endDate) return; // wait for a valid range
     loadExpenses();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [branchFilter]);
+  }, [branchFilter, startDate, endDate]);
 
-  const [monthFilter, setMonthFilter] = useState('');
-  const filtered = useMemo(() => expenses.filter((expense) =>
-    `${expense.category} ${expense.description}`.toLowerCase().includes(search.toLowerCase())
-    && (!monthFilter || expense.date.startsWith(monthFilter))
-  ), [expenses, search, monthFilter]);
+  // The date range is applied server-side (loadExpenses) and re-checked here so
+  // the table, summary cards and exports can never disagree on what's in range.
+  const filtered = useMemo(() => expenses.filter((expense) => {
+    const day = expense.date.slice(0, 10);
+    return `${expense.category} ${expense.description}`.toLowerCase().includes(search.toLowerCase())
+      && (!startDate || day >= startDate)
+      && (!endDate || day <= endDate);
+  }), [expenses, search, startDate, endDate]);
 
   const handleExportExpenses = () => {
     const rows = filtered.map((e) => ({
       Date: e.date.slice(0, 10), Branch: branches.find((b) => b.id === e.branchId)?.name ?? e.branchId ?? '', Category: e.category,
       Description: e.description, Amount: e.amount, 'Payment Mode': e.paymentMode, Reference: e.referenceNumber || '',
     }));
-    exportRowsToExcel(rows, 'Expenses', `expenses-${monthFilter || 'all'}.xlsx`);
+    exportRowsToExcel(rows, 'Expenses', `expenses-${startDate || 'start'}_to_${endDate || 'today'}.xlsx`);
   };
 
   const totalExpenses = filtered.reduce((sum, expense) => sum + expense.amount, 0);
-  const thisMonthTotal = filtered
-    .filter((e) => e.date.slice(0, 7) === new Date().toISOString().slice(0, 7))
-    .reduce((sum, e) => sum + e.amount, 0);
+  const highestEntry = filtered.reduce((max, e) => Math.max(max, e.amount), 0);
   const avgMonthly = filtered.length > 0 ? Math.round(totalExpenses / filtered.length) : 0;
 
   async function handleAddExpense(e: React.FormEvent) {
@@ -186,7 +193,7 @@ export function ExpenseManagement() {
             <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input type="search" placeholder="Search expenses" value={search} onChange={(event) => setSearch(event.target.value)} className="w-full rounded-xl border border-input bg-input-background py-2.5 pl-10 pr-4 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" />
           </div>
-          <input type="month" value={monthFilter} onChange={(event) => setMonthFilter(event.target.value)} title="Filter by month" className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none" />
+          <DateRangeFilter start={startDate} end={endDate} onChange={({ start, end }) => { setStartDate(start); setEndDate(end); }} />
           {user?.role === 'super_admin' && (
             <select value={branchFilter} onChange={(event) => setBranchFilter(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2.5 text-sm focus:border-primary focus:outline-none">
               <option value="">All Branches</option>
@@ -261,7 +268,7 @@ export function ExpenseManagement() {
 
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
           <StatsCard title="Total Expenses" value={formatIndianCurrency(totalExpenses)} icon={Receipt} iconColor="bg-destructive" />
-          <StatsCard title="This Month" value={formatIndianCurrency(thisMonthTotal)} icon={DollarSign} iconColor="bg-chart-4" />
+          <StatsCard title="Highest Entry" value={formatIndianCurrency(highestEntry)} icon={DollarSign} iconColor="bg-chart-4" />
           <StatsCard title="Transactions" value={filtered.length.toString()} icon={CreditCard} iconColor="bg-primary" />
           <StatsCard title="Avg per Entry" value={formatIndianCurrency(avgMonthly)} icon={TrendingDown} iconColor="bg-accent" />
         </div>

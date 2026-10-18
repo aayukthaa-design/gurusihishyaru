@@ -35,8 +35,10 @@ import { formatIndianCurrency } from '../lib/currency';
 import { apiFetch } from '../lib/apiClient';
 import { useStudents, refreshStudents } from '../lib/studentService';
 import { fetchAttendance } from '../lib/attendanceService';
+import { attendancePercent } from '../lib/attendanceMath';
 import { useTimetable, refreshTimetable, sortByTime, displayTimeRange } from '../lib/timetableService';
-import { computeIncomeExpenseSummary } from '../lib/ledgerService';
+import { computeIncomeExpenseSummary, filterLedgerByDateRange } from '../lib/ledgerService';
+import { DateRangeFilter } from '../components/DateRangeFilter';
 
 // ─── Per-role configuration ───────────────────────────────────────────────────
 
@@ -160,22 +162,22 @@ export function Dashboard() {
     // ISO week, % present across all classes in scope.
     const loadAttendanceTrend = async () => {
       const records = await fetchAttendance();
-      const byWeek = new Map<string, { present: number; total: number }>();
+      const byWeek = new Map<string, { absent: number; total: number }>();
       for (const r of records) {
-        if (!r.date) continue;
+        if (!r.date || r.status === 'holiday') continue; // holidays aren't classes
         const d = new Date(r.date);
         const weekStart = new Date(d);
         weekStart.setDate(d.getDate() - d.getDay());
         const key = weekStart.toISOString().slice(0, 10);
-        const bucket = byWeek.get(key) || { present: 0, total: 0 };
+        const bucket = byWeek.get(key) || { absent: 0, total: 0 };
         bucket.total += 1;
-        if (r.status === 'present') bucket.present += 1;
+        if (r.status === 'absent') bucket.absent += 1;
         byWeek.set(key, bucket);
       }
       const sortedWeeks = Array.from(byWeek.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-6);
       setWeeklyAttendanceTrend(sortedWeeks.map(([key, v], i) => ({
         week: `Wk ${i + 1}`,
-        value: v.total > 0 ? Math.round((v.present / v.total) * 100) : 0,
+        value: attendancePercent(v.total, v.absent) ?? 0,
       })));
     };
     void loadAttendanceTrend();
@@ -397,7 +399,11 @@ export function Dashboard() {
       .catch((err) => console.error('Failed to load ledger for dashboard summary', err));
   }, [isAdmin, isSuperAdmin, branchFilter]);
 
-  const incomeExpenseSummary = React.useMemo(() => computeIncomeExpenseSummary(ledger), [ledger]);
+  const [summaryRange, setSummaryRange] = React.useState({ start: '', end: '' });
+  const incomeExpenseSummary = React.useMemo(
+    () => computeIncomeExpenseSummary(filterLedgerByDateRange(ledger, summaryRange.start, summaryRange.end)),
+    [ledger, summaryRange],
+  );
 
   // Dynamic calculations for Accountant KPI dashboard cards
   const todayIncome = React.useMemo(() => {
@@ -662,7 +668,7 @@ export function Dashboard() {
     // (teacherSchoolExams below) but this effect used to fetch that data
     // for super_admin only, so the store stayed empty and the card always
     // read "No upcoming school exams" for teachers.
-    if (isSuperAdmin || isTeacher) void refreshSchoolExamSchedules();
+    if (isSuperAdmin || isTeacher || user.role === 'admin') void refreshSchoolExamSchedules();
     if (isSuperAdmin) void refreshLessonPlans(user);
   }, [isSuperAdmin, isTeacher, user]);
 
@@ -1479,6 +1485,10 @@ export function Dashboard() {
                 just branch-scoped to this page's own branch selector (all
                 branches for Super Admin, their own branch for Admin) instead
                 of duplicating the calculation. */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-foreground">Income &amp; Expense period</p>
+              <DateRangeFilter start={summaryRange.start} end={summaryRange.end} onChange={setSummaryRange} />
+            </div>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
                 <div className="flex items-center justify-between border-b border-border pb-3 mb-3">

@@ -213,14 +213,25 @@ export function FeeManagement() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
+  // One search box drives both the fee records and the admitted-students table
+  // below; it matches the student's name, ID, class and parent mobile against
+  // the existing student/fee records (nothing is duplicated).
+  const searchQuery = search.trim().toLowerCase();
+  const studentMatchesSearch = (s: { fullName?: string; id: string; className?: string; primaryParentMobile?: string }) =>
+    !searchQuery || [s.fullName, s.id, s.className, s.primaryParentMobile].some((v) => (v || '').toLowerCase().includes(searchQuery));
+
   const filtered = useMemo(() => records.filter((record) => {
-    const matchSearch = record.studentName.toLowerCase().includes(search.toLowerCase()) || record.studentId.toLowerCase().includes(search.toLowerCase());
+    const linkedStudent = students.find((s) => s.id === record.studentId);
+    const matchSearch = !searchQuery
+      || record.studentName.toLowerCase().includes(searchQuery)
+      || record.studentId.toLowerCase().includes(searchQuery)
+      || (!!linkedStudent && studentMatchesSearch(linkedStudent));
     const matchFilter = filter === 'All' || record.status === filter || (filter === 'Partial' && record.status === 'Partially Paid');
     const matchesBranch = user?.role === 'super_admin' ? (!branchFilter || record.branchId === branchFilter) : true;
     return matchSearch && matchFilter && matchesBranch;
-  }), [records, search, filter, branchFilter, user?.role]);
+  }), [records, students, searchQuery, filter, branchFilter, user?.role]);
 
-  const visible = filtered.slice(0, showAll ? filtered.length : 5);
+  const visible = filtered.slice(0, showAll || searchQuery ? filtered.length : 5);
 
   // Admitted students who don't have a single fee record yet — either no fee
   // structure exists for their class, or one was added after they were
@@ -266,8 +277,9 @@ export function FeeManagement() {
 
   const [studentFeeStatusFilter, setStudentFeeStatusFilter] = useState<'All' | 'Fee Not Assigned' | 'Fee Assigned' | 'Partially Paid' | 'Fully Paid'>('All');
   const visibleAdmittedStudents = useMemo(
-    () => admittedStudentsWithFeeStatus.filter((row) => studentFeeStatusFilter === 'All' || row.feeStatus === studentFeeStatusFilter),
-    [admittedStudentsWithFeeStatus, studentFeeStatusFilter]
+    () => admittedStudentsWithFeeStatus.filter((row) => (studentFeeStatusFilter === 'All' || row.feeStatus === studentFeeStatusFilter) && studentMatchesSearch(row.student)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [admittedStudentsWithFeeStatus, studentFeeStatusFilter, searchQuery]
   );
 
   function openAssignFeeFor(studentId: string) {
@@ -974,7 +986,7 @@ export function FeeManagement() {
             <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input
               type="search"
-              placeholder="Search student name or ID…"
+              placeholder="Search student by name, ID, class or mobile…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full rounded-xl border border-input bg-input-background py-3 pl-10 pr-4 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"

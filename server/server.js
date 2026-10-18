@@ -110,6 +110,18 @@ function sortRoles(roles) {
   return [...roles].sort((a, b) => ROLE_PRIORITY.indexOf(a) - ROLE_PRIORITY.indexOf(b));
 }
 
+// Attendance statuses are present | absent | holiday. Rows written before the
+// Leave→Holiday rename ('leave') and before half-day was removed ('half_day')
+// are read as holiday / present rather than rewritten, so history is untouched.
+function normalizeAttendanceStatus(status) {
+  if (status === 'absent') return 'absent';
+  if (status === 'holiday' || status === 'leave') return 'holiday';
+  return 'present';
+}
+function normalizeAttendanceRow(row) {
+  return { ...row, status: normalizeAttendanceStatus(row.status) };
+}
+
 function computeSchoolExamStatus(startDate, endDate, referenceDate = new Date()) {
   if (!startDate || !endDate) return 'Upcoming';
   const today = referenceDate.toISOString().slice(0, 10);
@@ -2557,6 +2569,71 @@ async function main() {
   // names — reused everywhere a caller supplies className/batch strings and
   // needs the actual classId for a student_batches join (multi-batch-aware
   // attendance/exam/fee/homework rosters below).
+  // The children a parent may see: linked, Active, and de-duplicated. The same
+  // child entered twice (a re-import with "4th" vs "4", a one-day-off DOB…)
+  // used to show up as extra names in the parent portal; rows that share a
+  // normalised name + class collapse to the one with the most history
+  // (attendance + fee rows), oldest first on a tie. `aliases` maps every
+  // collapsed duplicate id to the id that represents it.
+  async function getParentVisibleStudents(parentId) {
+    const rows = await db.all(
+      `SELECT s.*, s.rowid AS _rowid FROM students s JOIN parent_student ps ON ps.studentId = s.id
+       WHERE ps.parentId = ? AND COALESCE(s.status, 'Active') != 'Inactive' ORDER BY s.rowid ASC`,
+      parentId
+    );
+    const normClass = (v) => String(v || '').toLowerCase().replace(/(\d+)\s*(st|nd|rd|th)\b/g, '$1').replace(/\s+/g, ' ').trim();
+    const groups = new Map();
+    for (const row of rows) {
+      const name = String(row.fullName || `${row.firstName || ''} ${row.lastName || ''}`).toLowerCase().replace(/\s+/g, ' ').trim();
+      const key = `${name}|${normClass(row.className)}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    const students = [];
+    const aliases = new Map();
+    for (const group of groups.values()) {
+      let best = group[0];
+      if (group.length > 1) {
+        let bestScore = -1;
+        for (const row of group) {
+          const a = await db.get('SELECT COUNT(*) AS n FROM attendance WHERE studentId = ?', row.id);
+          const f = await db.get('SELECT COUNT(*) AS n FROM fee_records WHERE studentId = ?', row.id);
+          const score = (a?.n || 0) + (f?.n || 0);
+          if (score > bestScore) { best = row; bestScore = score; }
+        }
+      }
+      students.push(best);
+      for (const row of group) aliases.set(row.id, best.id);
+    }
+    students.sort((a, b) => a._rowid - b._rowid);
+    for (const st of students) delete st._rowid;
+    return { students, aliases };
+  }
+
+  // A parent whose every linked child is Inactive has no portal access at all,
+  // enforced on every API request (not just at login) so an already-issued
+  // session token stops working the moment the student is deactivated.
+  app.use(async (req, res, next) => {
+    if (req.path.startsWith('/api/auth/') || req.path === '/api/client-errors') return next();
+    const roles = req.user?.roles || [];
+    if (!roles.includes('parent') || roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) return next();
+    try {
+      const linked = await db.get('SELECT COUNT(*) AS n FROM parent_student WHERE parentId = ?', req.user.sub);
+      if (linked?.n > 0) {
+        const active = await db.get(
+          `SELECT COUNT(*) AS n FROM parent_student ps JOIN students s ON s.id = ps.studentId
+           WHERE ps.parentId = ? AND COALESCE(s.status, 'Active') != 'Inactive'`,
+          req.user.sub
+        );
+        if (!active?.n) return res.status(403).json({ error: 'This student account is inactive. Please contact Guru Shishyaru Tutorials.', code: 'STUDENT_INACTIVE' });
+      }
+      next();
+    } catch (err) {
+      console.error('Parent status guard error:', err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
   async function resolveClassId(className, board, branchId) {
     if (!className) return null;
     branchId = branchId ?? null; // the sqlite driver rejects `undefined` binds
@@ -3127,7 +3204,7 @@ async function main() {
       const isParentOnly = roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r));
 
       if (isParentOnly) {
-        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const linkedRows = await db.all('SELECT ps.studentId FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ?', req.user.sub);
         const linkedIds = linkedRows.map((r) => r.studentId);
         if (!linkedIds.length) return res.json([]);
         const placeholders = linkedIds.map(() => '?').join(',');
@@ -3274,7 +3351,7 @@ async function main() {
         // actually carry one.
         if (req.user.branchId) { conditions.push('e.branchId = ?'); params.push(req.user.branchId); }
       } else if (isParentOnly) {
-        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const linkedRows = await db.all('SELECT ps.studentId FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ?', req.user.sub);
         const linkedIds = linkedRows.map((r) => r.studentId);
         if (!linkedIds.length) return res.json([]);
         conditions.push(`em.studentId IN (${linkedIds.map(() => '?').join(',')})`);
@@ -3780,6 +3857,9 @@ async function main() {
         // Regular admin/super_admin edit of task details (not a sign-off action).
         const progress = body.progress !== undefined ? Number(body.progress) : existing.progress;
         const status = body.status ?? existing.status;
+        if (!['pending', 'in-progress', 'awaiting_admin_review', 'awaiting_super_admin_review', 'completed', 'not_done'].includes(status)) {
+          return res.status(400).json({ error: 'Invalid task status' });
+        }
         await db.run(
           `UPDATE teacher_tasks SET title=?, description=?, teacherId=?, teacherName=?, priority=?, dueDate=?, dueTime=?, relatedClass=?, relatedSubject=?, attachmentUrl=?, status=?, progress=?, completionRemarks=?, updatedAt=? WHERE id=?`,
           body.title ?? existing.title, body.description ?? existing.description, body.teacherId ?? existing.teacherId, body.teacherName ?? existing.teacherName,
@@ -3857,7 +3937,7 @@ async function main() {
         if (roles.includes('teacher')) {
           mapped = mapped.filter((s) => !s.teacherId || s.teacherId === req.user.sub);
         } else if (roles.includes('parent')) {
-          const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+          const linkedRows = await db.all('SELECT ps.studentId FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ?', req.user.sub);
           const linkedIds = new Set(linkedRows.map((r) => r.studentId));
           mapped = mapped.filter((s) => s.studentId && linkedIds.has(s.studentId));
         }
@@ -3891,7 +3971,7 @@ async function main() {
         // resolve every one of them server-side from the verified parent-
         // child link and the student's own record, the same trust boundary
         // used throughout this file for branch-scoped writes.
-        const link = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, studentId);
+        const link = await db.get('SELECT 1 FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ? AND ps.studentId = ?', req.user.sub, studentId);
         if (!link) return res.status(403).json({ error: 'You can only upload a schedule for your own child.' });
         const student = await db.get('SELECT * FROM students WHERE id = ?', studentId);
         if (!student) return res.status(404).json({ error: 'Student not found.' });
@@ -3930,7 +4010,7 @@ async function main() {
       // Parents may only touch their own child's schedule — verified via
       // parent_student, never trusted from the client.
       if (req.user.roles.includes('parent') && !req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) {
-        const link = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, existing.studentId);
+        const link = await db.get('SELECT 1 FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ? AND ps.studentId = ?', req.user.sub, existing.studentId);
         if (!link) return res.status(403).json({ error: 'Forbidden' });
       }
 
@@ -4873,7 +4953,7 @@ async function main() {
       // A parent only ever gets their own linked children's submissions —
       // same pattern as GET /api/students — never the whole class's.
       if (roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) {
-        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const linkedRows = await db.all('SELECT ps.studentId FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ?', req.user.sub);
         const linkedIds = linkedRows.map((r) => r.studentId);
         if (linkedIds.length === 0) return res.json([]);
         const placeholders = linkedIds.map(() => '?').join(',');
@@ -4914,7 +4994,7 @@ async function main() {
       // A parent can only submit on behalf of a student actually linked to them —
       // otherwise one parent could mark homework "submitted" for someone else's child.
       if (req.user.roles.includes('parent')) {
-        const linked = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, body.studentId);
+        const linked = await db.get('SELECT 1 FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ? AND ps.studentId = ?', req.user.sub, body.studentId);
         if (!linked) return res.status(403).json({ error: 'Forbidden' });
       }
 
@@ -5061,8 +5141,17 @@ async function main() {
         return res.status(400).json({ error: 'This mobile number is not registered with Guru Shishyaru Tutorials.' });
       }
 
-      const studentRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', parent.id);
-      const linkedStudentIds = studentRows.map(r => r.studentId);
+      if (parent.status === 'Inactive') {
+        return res.status(403).json({ error: 'This account is inactive. Please contact Guru Shishyaru Tutorials.', code: 'STUDENT_INACTIVE' });
+      }
+      const linkedCount = await db.get('SELECT COUNT(*) AS n FROM parent_student WHERE parentId = ?', parent.id);
+      const { students: visibleStudents } = await getParentVisibleStudents(parent.id);
+      // Every linked child is Inactive → no portal access. A parent with at
+      // least one Active child still logs in and only ever sees that child.
+      if (linkedCount.n > 0 && visibleStudents.length === 0) {
+        return res.status(403).json({ error: 'This student account is inactive. Please contact Guru Shishyaru Tutorials.', code: 'STUDENT_INACTIVE' });
+      }
+      const linkedStudentIds = visibleStudents.map((s) => s.id);
 
       const token = await signToken({ id: parent.id, name: `${parent.firstName} ${parent.lastName}`, email: parent.email, mobile: parent.mobile, roles: JSON.stringify(['parent']), branchId: parent.branchId }, false);
 
@@ -5098,12 +5187,8 @@ async function main() {
       // list was previously returned to ANY authenticated user (including parents)
       // with zero scoping, leaking every family's contact info/address branch-wide.
       if (roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) {
-        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
-        const studentIds = linkedRows.map((r) => r.studentId);
-        if (studentIds.length === 0) return res.json([]);
-        const placeholders = studentIds.map(() => '?').join(',');
-        const rows = await db.all(`SELECT * FROM students WHERE id IN (${placeholders})`, ...studentIds);
-        return res.json(await attachStudentBatches(rows));
+        const { students: visibleStudents } = await getParentVisibleStudents(req.user.sub);
+        return res.json(await attachStudentBatches(visibleStudents));
       }
 
       if (!roles.some((r) => ['teacher', 'admin', 'super_admin', 'accountant'].includes(r))) {
@@ -5581,12 +5666,22 @@ async function main() {
     // Parents only ever see attendance for their own linked children — resolved
     // server-side via parent_student, same isolation as GET /api/students.
     if (roles.includes('parent') && !roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) {
-      const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
-      const studentIds = linkedRows.map((r) => r.studentId);
-      if (studentIds.length === 0) return res.json([]);
-      const placeholders = studentIds.map(() => '?').join(',');
-      const rows = await db.all(`SELECT * FROM attendance WHERE studentId IN (${placeholders}) ORDER BY date DESC`, ...studentIds);
-      return res.json(rows);
+      const { aliases } = await getParentVisibleStudents(req.user.sub);
+      if (aliases.size === 0) return res.json([]);
+      const placeholders = [...aliases.keys()].map(() => '?').join(',');
+      const rows = await db.all(`SELECT * FROM attendance WHERE studentId IN (${placeholders}) ORDER BY date DESC`, ...aliases.keys());
+      // Re-key a collapsed duplicate's rows onto the child shown to the parent;
+      // if both ids were marked on the same date, one entry per date wins.
+      const seen = new Set();
+      const merged = [];
+      for (const r of rows.map(normalizeAttendanceRow)) {
+        const studentId = aliases.get(r.studentId);
+        const key = `${studentId}|${r.date}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push({ ...r, studentId });
+      }
+      return res.json(merged);
     }
     if (!roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -5639,7 +5734,7 @@ async function main() {
       }
 
       const rows = await db.all(query, ...params);
-      res.json(rows);
+      res.json(rows.map(normalizeAttendanceRow));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -5685,9 +5780,9 @@ async function main() {
             status = excluded.status,
             markedBy = excluded.markedBy,
             createdAt = excluded.createdAt
-        `, className, date, studentId, status, markedBy || 'Teacher', now);
+        `, className, date, studentId, normalizeAttendanceStatus(status), markedBy || 'Teacher', now);
 
-        results.push({ studentId, status });
+        results.push({ studentId, status: normalizeAttendanceStatus(status) });
       }
 
       // Detailed attendance notification to the batch's branch Admin + Super
@@ -5746,10 +5841,13 @@ async function main() {
   });
 
   app.post('/api/holidays', async (req, res) => {
-    if (!req.user.roles.some((r) => ['admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { date, title } = req.body || {};
       if (!date || !title) return res.status(400).json({ error: 'date and title are required' });
+      const dupBranch = req.user.roles.includes('super_admin') ? (req.body.branchId || null) : (req.user.branchId || null);
+      const dup = await db.get('SELECT id FROM holidays WHERE date = ? AND COALESCE(branchId, \'\') = COALESCE(?, \'\')', date, dupBranch);
+      if (dup) return res.status(409).json({ error: 'That date is already marked as a holiday.' });
       // Only super_admin may declare an institute-wide (branchId NULL) holiday;
       // an admin's holiday is always pinned to their own branch.
       const branchId = req.user.roles.includes('super_admin')
@@ -5851,7 +5949,7 @@ async function main() {
       // className and download materials outside their own children's classes.
       const row = await db.get(
         `SELECT 1 FROM parent_student ps JOIN students s ON s.id = ps.studentId
-         WHERE ps.parentId = ? AND s.className = ? LIMIT 1`,
+         WHERE ps.parentId = ? AND s.className = ? AND COALESCE(s.status, 'Active') != 'Inactive' LIMIT 1`,
         req.user.sub, material.className
       );
       if (row) return true;
@@ -6846,6 +6944,16 @@ async function main() {
         query += ' AND date = ?';
         params.push(date);
       }
+      // Inclusive date range (YYYY-MM-DD) shared by Expenses, the Accountant
+      // portal and the PDF/Excel exports built from this same endpoint.
+      if (req.query.startDate) {
+        query += ' AND date >= ?';
+        params.push(String(req.query.startDate));
+      }
+      if (req.query.endDate) {
+        query += ' AND date <= ?';
+        params.push(String(req.query.endDate));
+      }
       query += ' ORDER BY date ASC, id ASC';
       const rows = await db.all(query, ...params);
       
@@ -7570,7 +7678,7 @@ async function main() {
       if (branchId && !isParent) { clauses.push("(branchId = ? OR branchId = '' OR branchId IS NULL)"); params.push(branchId); }
       if (isParent) {
         // Live parent_student links, not the JWT snapshot — a child linked after login would otherwise never show their kit.
-        const linkedStudentIds = (await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub)).map((r) => r.studentId);
+        const linkedStudentIds = (await db.all('SELECT ps.studentId FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ?', req.user.sub)).map((r) => r.studentId);
         if (!linkedStudentIds.length) return res.json([]);
         clauses.push(`studentId IN (${linkedStudentIds.map(() => '?').join(',')})`);
         params.push(...linkedStudentIds);
@@ -7777,7 +7885,7 @@ async function main() {
       if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
       query += ' ORDER BY date DESC';
       const rows = await db.all(query, ...params);
-      res.json(rows);
+      res.json(rows.map(normalizeAttendanceRow));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -7800,7 +7908,7 @@ async function main() {
       `);
       for (const entry of entries) {
         const branchId = resolveBranchId(req, entry.branchId);
-        await stmt.run(entry.teacherId, entry.date, entry.status, branchId, entry.department || null, req.user.name || 'Admin', now, now);
+        await stmt.run(entry.teacherId, entry.date, normalizeAttendanceStatus(entry.status), branchId, entry.department || null, req.user.name || 'Admin', now, now);
       }
       await stmt.finalize();
 
@@ -7810,7 +7918,7 @@ async function main() {
       const params = [date];
       if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
       const rows = await db.all(query, ...params);
-      res.json(rows);
+      res.json(rows.map(normalizeAttendanceRow));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -8226,7 +8334,7 @@ async function main() {
       const conditions = [];
 
       if (roles.includes('parent')) {
-        const linkedRows = await db.all('SELECT studentId FROM parent_student WHERE parentId = ?', req.user.sub);
+        const linkedRows = await db.all('SELECT ps.studentId FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ?', req.user.sub);
         const studentIds = linkedRows.map((r) => r.studentId);
         if (studentIds.length === 0) return res.json([]);
         conditions.push(`studentId IN (${studentIds.map(() => '?').join(',')})`);
@@ -8771,7 +8879,7 @@ async function main() {
       if (!record) return res.status(404).json({ error: 'Fee record not found' });
       const roles = req.user.roles || [];
       if (roles.includes('parent')) {
-        const linked = await db.get('SELECT 1 FROM parent_student WHERE parentId = ? AND studentId = ?', req.user.sub, record.studentId);
+        const linked = await db.get('SELECT 1 FROM parent_student ps JOIN students st ON st.id = ps.studentId AND COALESCE(st.status, \'Active\') != \'Inactive\' WHERE ps.parentId = ? AND ps.studentId = ?', req.user.sub, record.studentId);
         if (!linked) return res.status(403).json({ error: 'Forbidden' });
       } else if (!roles.some((r) => ['accountant', 'admin', 'super_admin'].includes(r))) {
         return res.status(403).json({ error: 'Forbidden' });

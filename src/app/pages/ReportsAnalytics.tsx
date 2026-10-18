@@ -10,6 +10,7 @@ import { formatIndianCurrency, formatIndianCurrencyForPdf } from '../lib/currenc
 import { utils, writeFile } from 'xlsx';
 import { apiFetch, getFileUrl } from '../lib/apiClient';
 import { fetchAttendance } from '../lib/attendanceService';
+import { attendancePercent } from '../lib/attendanceMath';
 import { useHolidays, refreshHolidays, isHoliday } from '../lib/holidayService';
 import { fetchFeeStats, type FeeStats } from '../lib/feeService';
 import { useExams } from '../lib/examService';
@@ -314,20 +315,20 @@ export function ReportsAnalytics() {
 
   const studentBranchById = useMemo(() => new Map<string, string>(scopedAnalyticsStudents.map((s: any) => [s.id, s.branchId])), [scopedAnalyticsStudents]);
   const attendanceData = useMemo(() => {
-    const byMonth = new Map<string, { present: number; total: number }>();
+    const byMonth = new Map<string, { absent: number; total: number }>();
     attendanceRecords.forEach((r: any) => {
       if (!r.date) return;
-      if (r.status === 'leave') return; // approved leave doesn't count against attendance %
+      if (r.status === 'holiday' || r.status === 'leave') return; // holidays aren't classes
       if (isHoliday(holidays, r.date.slice(0, 10), studentBranchById.get(r.studentId) ?? (branchFilter || undefined))) return; // holidays are not class days
       const key = r.date.slice(0, 7);
-      const bucket = byMonth.get(key) || { present: 0, total: 0 };
+      const bucket = byMonth.get(key) || { absent: 0, total: 0 };
       bucket.total += 1;
-      if (r.status === 'present') bucket.present += 1;
+      if (r.status === 'absent') bucket.absent += 1;
       byMonth.set(key, bucket);
     });
     return trendMonths.map(({ key, label }) => {
       const bucket = byMonth.get(key);
-      return { month: label, attendance: bucket && bucket.total > 0 ? Math.round((bucket.present / bucket.total) * 100) : 0 };
+      return { month: label, attendance: bucket ? (attendancePercent(bucket.total, bucket.absent) ?? 0) : 0 };
     });
   }, [attendanceRecords, trendMonths, holidays, studentBranchById, branchFilter]);
 

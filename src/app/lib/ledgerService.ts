@@ -33,3 +33,12 @@ export function computeIncomeExpenseSummary(ledger: LedgerSummaryEntry[]): Incom
 
   return { incomeCategories, expenseCategories, totalInc, totalExp, net: totalInc - totalExp };
 }
+
+/** Inclusive YYYY-MM-DD range filter; an empty bound is open-ended. Shared by every income/expense view and export. */
+export function filterLedgerByDateRange<T extends { date: string }>(ledger: T[], start?: string, end?: string): T[] {
+  if (!start && !end) return ledger;
+  return ledger.filter((t) => {
+    const day = t.date.slice(0, 10);
+    return (!start || day >= start) && (!end || day <= end);
+  });
+}

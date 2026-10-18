@@ -426,6 +426,8 @@ export function StudentManagement() {
   const classFilterOptions = getClassesForBranch(branchFilter || user?.branchId || undefined);
   const [panel, setPanel] = useState<'none' | 'add' | { type: 'edit' | 'view'; id: string }>('none');
 
+  // One status filter drives the list, the stat cards' view and the Excel export.
+  const [exportScope, setExportScope] = useState<'Active' | 'Inactive' | 'All'>('Active');
   const filtered = useMemo(() => {
     const scopedStudents = filterByBranch(students, user, branchFilter);
     return scopedStudents.filter((student) => {
@@ -434,15 +436,12 @@ export function StudentManagement() {
         .toLowerCase()
         .includes(search.toLowerCase());
       const matchesClass = !classFilter || student.class === classFilter;
-      return matchesSearch && matchesClass && student.status !== 'Inactive';
+      return matchesSearch && matchesClass && (exportScope === 'All' || student.status === exportScope);
     });
-  }, [branchFilter, classFilter, search, students, user]);
+  }, [branchFilter, classFilter, search, students, user, exportScope]);
 
-  const [exportScope, setExportScope] = useState<'Active' | 'Inactive' | 'All'>('Active');
   const handleExportStudents = () => {
-    const rows = filterByBranch(students, user, branchFilter)
-      .filter((s) => exportScope === 'All' || s.status === exportScope)
-      .filter((s) => !classFilter || s.class === classFilter)
+    const rows = filtered
       .map((s) => ({
         'Student ID': s.id, Name: `${s.firstName} ${s.lastName}`.trim(), Class: s.class, Board: s.batch, Gender: s.gender, DOB: s.dob,
         Parent: s.parentName, 'Parent Mobile': s.parentMobile, Address: s.address, 'Admission Date': s.admissionDate, Status: s.status,
@@ -450,7 +449,7 @@ export function StudentManagement() {
     exportRowsToExcel(rows, 'Students', `students-${exportScope.toLowerCase()}.xlsx`);
   };
 
-  const visible = filtered.slice(0, 10); // Show more students in page
+  const visible = exportScope === 'Active' ? filtered.slice(0, 10) : filtered; // inactive/all lists show every row
 
   const handleAdd = async (data: Omit<Student, 'id'>) => {
     const resolvedBranchId = data.branchId || user?.branchId || branchFilter || undefined;

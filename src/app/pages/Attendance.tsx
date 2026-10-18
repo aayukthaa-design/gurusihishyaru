@@ -5,11 +5,12 @@ import { useBranches, getBranchName } from '../lib/branchService';
 import { getStudentsForClass } from '../lib/studentService';
 import { fetchAttendance as fetchAttendanceRecords } from '../lib/attendanceService';
 import { saveAttendanceAPI } from '../lib/attendanceService';
-import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, CalendarOff, PlaneTakeoff, Trash2, FileDown, FileSpreadsheet } from 'lucide-react';
+import { CheckCircle2, XCircle, ChevronRight, Save, Mail, AlertCircle, MessageSquare, CalendarOff, Trash2, FileDown, FileSpreadsheet } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
-import { useHolidays, refreshHolidays, isHoliday, useStudentLeaves, refreshStudentLeaves, createStudentLeave, deleteStudentLeave, isOnLeave } from '../lib/holidayService';
+import { useHolidays, refreshHolidays, isHoliday, createHoliday, deleteHoliday } from '../lib/holidayService';
 import { useClasses, getClassesForBranch, getClassesForTeacher } from '../lib/classService';
-import { exportDailyAttendanceToExcel, exportAttendanceToExcel, exportAttendanceToPdf, type AttendanceExportRow } from '../lib/reportExport';
+import { exportDailyAttendanceToExcel, exportMonthlyAttendanceToExcel, exportMonthlyAttendanceToPdf } from '../lib/reportExport';
+import { attendancePercent, buildMonthlyAttendanceMatrix, countAttendance, type AttendanceMark } from '../lib/attendanceMath';
 
 const TODAY = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 const TODAY_ISO = new Date().toISOString().split('T')[0];
@@ -30,7 +31,7 @@ export function Attendance() {
   const batchOptions = isTeacherOnly
     ? getClassesForTeacher(user?.id, user?.branchId)
     : getClassesForBranch(branchFilter || user?.branchId);
-  const [attendance, setAttendance] = useState<Record<string, 'present' | 'absent' | 'leave'>>({});
+  const [attendance, setAttendance] = useState<Record<string, AttendanceMark>>({});
   const [saved, setSaved] = useState(false);
   const [students, setStudents] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -43,29 +44,23 @@ export function Attendance() {
   const isSuperAdmin = user?.role === 'super_admin' || user?.role === 'admin'; // admins may also correct yesterday's attendance
 
   // Monthly export for the selected batch
-  const [exportMonth, setExportMonth] = useState(TODAY_ISO.slice(0, 7));
+  const [exportYear, setExportYear] = useState(Number(TODAY_ISO.slice(0, 4)));
+  const [exportMonthNum, setExportMonthNum] = useState(Number(TODAY_ISO.slice(5, 7)));
+  const exportMonth = `${exportYear}-${String(exportMonthNum).padStart(2, '0')}`;
   const [exporting, setExporting] = useState(false);
 
-  // Holidays + per-student leave
+  // Holidays (the calendar is the single source of truth for non-class days)
   const holidays = useHolidays();
-  const leaves = useStudentLeaves();
-  const [showLeaveForm, setShowLeaveForm] = useState(false);
-  const [leaveStudentId, setLeaveStudentId] = useState('');
-  const [leaveStart, setLeaveStart] = useState(TODAY_ISO);
-  const [leaveEnd, setLeaveEnd] = useState(TODAY_ISO);
-  const [leaveReason, setLeaveReason] = useState('');
-  const [isSavingLeave, setIsSavingLeave] = useState(false);
+  const [showHolidayForm, setShowHolidayForm] = useState(false);
+  const [holidayTitle, setHolidayTitle] = useState('');
+  const [isSavingHoliday, setIsSavingHoliday] = useState(false);
+  const [holidayError, setHolidayError] = useState<string | null>(null);
 
   useEffect(() => {
     void refreshHolidays({ branchId: branchFilter || undefined });
   }, [branchFilter]);
 
-  useEffect(() => {
-    if (selectedClass) void refreshStudentLeaves({ branchId: branchFilter || undefined, date: markDate });
-  }, [selectedClass, branchFilter, markDate]);
-
   const todaysHoliday = useMemo(() => isHoliday(holidays, markDate, branchFilter || user?.branchId), [holidays, branchFilter, user?.branchId, markDate]);
-  const activeLeaves = useMemo(() => leaves.filter((l) => isOnLeave([l], l.studentId, markDate)), [leaves, markDate]);
 
   // WhatsApp Specific States
   const [whatsappStatus, setWhatsappStatus] = useState<Record<string, 'idle' | 'sending' | 'success' | 'failed'>>({});
@@ -95,18 +90,19 @@ export function Attendance() {
     // attendance) replaces the old client-side "is this a known standard"
     // filter, which didn't actually scope by branch at all.
     const records = await fetchAttendanceRecords(undefined, undefined, isAdminOrSuper ? (branchFilter || undefined) : user?.branchId);
-    const groups = new Map<string, { class: string; date: string; present: number; total: number; sortKey: string }>();
+    const groups = new Map<string, { class: string; date: string; present: number; absent: number; total: number; sortKey: string }>();
     for (const r of records) {
-      if (r.status === 'leave') continue; // approved leave doesn't count against attendance %
       const key = `${r.className}__${r.date}`;
-      const g = groups.get(key) || { class: r.className, date: r.date, present: 0, total: 0, sortKey: r.date };
-      g.total += 1;
-      if (r.status === 'present') g.present += 1;
+      const g = groups.get(key) || { class: r.className, date: r.date, present: 0, absent: 0, total: 0, sortKey: r.date };
+      // Holidays are never classes, so they stay out of the total.
+      if (r.status === 'present') { g.present += 1; g.total += 1; }
+      else if (r.status === 'absent') { g.absent += 1; g.total += 1; }
       groups.set(key, g);
     }
     const sorted = Array.from(groups.values()).sort((a, b) => b.sortKey.localeCompare(a.sortKey));
-    setRecentRecords(sorted.map((g) => ({
+    setRecentRecords(sorted.filter((g) => g.total > 0).map((g) => ({
       class: g.class,
+      percent: attendancePercent(g.total, g.absent),
       date: g.date === TODAY_ISO ? 'Today' : new Date(g.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
       present: g.present,
       total: g.total,
@@ -149,11 +145,11 @@ export function Attendance() {
 
           // Try to load existing attendance records (falls back to seeded attendance)
           void fetchAttendanceRecords(selectedClass, markDate).then((records) => {
-            const map: Record<string, 'present' | 'absent' | 'leave'> = {};
+            const map: Record<string, AttendanceMark> = {};
             mapped.forEach((s: any) => {
               const r = Array.isArray(records) ? records.find((rec) => rec.studentId === s.id) : undefined;
               if (r) { map[s.id] = r.status; return; }
-              map[s.id] = isOnLeave(leaves, s.id, markDate) ? 'leave' : 'present';
+              map[s.id] = isHoliday(holidays, markDate, branchFilter || s.branchId) ? 'holiday' : 'present';
             });
             setAttendance(map);
           });
@@ -209,41 +205,38 @@ export function Attendance() {
         setSaved(false);
       })
       .finally(() => setLoading(false));
-  }, [selectedClass, selectedBoard, branchFilter, markDate]);
+  }, [selectedClass, selectedBoard, branchFilter, markDate, holidays]);
 
 
-  const markAll = (status: 'present' | 'absent' | 'leave') => {
-    const all: Record<string, 'present' | 'absent' | 'leave'> = {};
+  const markAll = (status: AttendanceMark) => {
+    const all: Record<string, AttendanceMark> = {};
     students.forEach((s) => { all[s.id] = status; });
     setAttendance(all);
     setSaved(false);
   };
 
-  const handleMarkLeave = async () => {
-    if (!leaveStudentId || !leaveStart || !leaveEnd) return;
-    setIsSavingLeave(true);
-    const student = students.find((s) => s.id === leaveStudentId);
-    const created = await createStudentLeave({
-      studentId: leaveStudentId,
-      studentName: student?.name,
-      startDate: leaveStart,
-      endDate: leaveEnd,
-      reason: leaveReason,
-      branchId: branchFilter || user?.branchId,
-    });
-    setIsSavingLeave(false);
+  // Marks the selected date as a holiday on the shared holiday calendar — it
+  // then shows up in every portal, report and attendance percentage (holidays
+  // are excluded from total classes, never counted as absences).
+  const handleMarkHoliday = async () => {
+    if (!holidayTitle.trim()) { setHolidayError('Enter a title for the holiday.'); return; }
+    setIsSavingHoliday(true);
+    setHolidayError(null);
+    const created = await createHoliday({ date: markDate, title: holidayTitle.trim(), branchId: branchFilter || user?.branchId || undefined });
+    setIsSavingHoliday(false);
     if (created) {
-      if (leaveStart <= markDate && leaveEnd >= markDate) {
-        setAttendance((prev) => ({ ...prev, [leaveStudentId]: 'leave' }));
-      }
-      setShowLeaveForm(false);
-      setLeaveStudentId('');
-      setLeaveReason('');
+      setShowHolidayForm(false);
+      setHolidayTitle('');
+      await refreshHolidays({ branchId: branchFilter || undefined });
+    } else {
+      setHolidayError('Could not mark this date as a holiday (it may already be one).');
     }
   };
 
-  const handleCancelLeave = async (id: number) => {
-    await deleteStudentLeave(id);
+  const handleRemoveHoliday = async () => {
+    if (!todaysHoliday) return;
+    await deleteHoliday(todaysHoliday.id);
+    await refreshHolidays({ branchId: branchFilter || undefined });
   };
 
   const handleSave = async () => {
@@ -258,20 +251,24 @@ export function Attendance() {
     }
   };
 
-  const buildMonthlyExportRows = async (): Promise<AttendanceExportRow[]> => {
+  // Same matrix feeds the Excel and the PDF (and the Parent portal's reports).
+  const selectedBatch = batchOptions.find((b) => b.className === selectedClass);
+  const reportBranchId = branchFilter || user?.branchId || selectedBatch?.branchId || '';
+  const buildMonthlyMatrix = async () => {
     const records = await fetchAttendanceRecords(selectedClass, undefined, branchFilter || undefined, undefined, exportMonth);
-    const rows = new Map<string, AttendanceExportRow>();
-    students.forEach((s) => rows.set(s.id, { name: s.name, id: s.id, present: 0, absent: 0, leave: 0, total: 0 }));
-    records.forEach((r) => {
-      if (isHoliday(holidays, r.date, branchFilter || user?.branchId)) return; // holidays are not class days
-      if (!rows.has(r.studentId)) rows.set(r.studentId, { name: r.studentId, id: r.studentId, present: 0, absent: 0, leave: 0, total: 0 });
-      const row = rows.get(r.studentId)!;
-      if (r.status === 'present') row.present += 1;
-      else if (r.status === 'absent') row.absent += 1;
-      else if (r.status === 'leave') row.leave += 1;
-      row.total += 1;
+    const branchHolidays = holidays.filter((h) => !h.branchId || h.branchId === reportBranchId);
+    const matrix = buildMonthlyAttendanceMatrix({
+      month: exportMonth,
+      students: students.map((s) => ({ id: s.id, name: s.name })),
+      records,
+      holidays: branchHolidays,
     });
-    return Array.from(rows.values());
+    const meta: Array<[string, string]> = [
+      ['Class', selectedClass],
+      ['Batch', selectedBoard || '—'],
+      ['Branch', getBranchName(reportBranchId) || '—'],
+    ];
+    return { matrix, meta };
   };
 
   const handleExportDay = async () => {
@@ -289,10 +286,10 @@ export function Attendance() {
     if (!selectedClass) return;
     setExporting(true);
     try {
-      const rows = await buildMonthlyExportRows();
+      const { matrix, meta } = await buildMonthlyMatrix();
       const title = `Attendance — ${selectedClass}`;
-      if (format === 'excel') exportAttendanceToExcel(rows, title, exportMonth);
-      else await exportAttendanceToPdf(rows, title, exportMonth, user?.name || 'Admin');
+      if (format === 'excel') exportMonthlyAttendanceToExcel(matrix, meta, title);
+      else await exportMonthlyAttendanceToPdf(matrix, meta, title, user?.name || 'Admin');
     } finally {
       setExporting(false);
     }
@@ -405,7 +402,7 @@ export function Attendance() {
 
   const presentCount = Object.values(attendance).filter((v) => v === 'present').length;
   const absentCount  = Object.values(attendance).filter((v) => v === 'absent').length;
-  const leaveCount   = Object.values(attendance).filter((v) => v === 'leave').length;
+  const holidayCount = Object.values(attendance).filter((v) => v === 'holiday').length;
   const unmarked     = students.filter((s) => !attendance[s.id]).length;
 
   // Count absent students that have not successfully sent WhatsApp yet
@@ -464,6 +461,9 @@ export function Attendance() {
             <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
               {markDate === TODAY_ISO ? 'Today' : markDate} is a holiday — <span className="font-semibold">{todaysHoliday.title}</span>. Attendance isn't required, but you can still mark it below if this is a makeup class.
             </p>
+            {isAdminOrSuper && (
+              <button type="button" onClick={handleRemoveHoliday} className="ml-auto shrink-0 rounded-lg border border-amber-300 px-3 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-100 dark:text-amber-300">Remove holiday</button>
+            )}
           </div>
         )}
 
@@ -528,49 +528,25 @@ export function Attendance() {
                   All Absent
                 </button>
                 <button
-                  onClick={() => setShowLeaveForm((v) => !v)}
+                  onClick={() => { setShowHolidayForm((v) => !v); setHolidayError(null); }}
                   className="flex items-center gap-1 rounded-lg bg-amber-100 dark:bg-amber-900/40 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-400 transition-colors hover:bg-amber-200"
                 >
-                  <PlaneTakeoff className="h-3.5 w-3.5" /> Mark Leave
+                  <CalendarOff className="h-3.5 w-3.5" /> Mark Holiday
                 </button>
               </div>
             </div>
 
-            {showLeaveForm && (
+            {showHolidayForm && (
               <div className="mb-4 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50/60 dark:bg-amber-950/20 p-4 space-y-3">
-                <p className="text-sm font-semibold text-foreground">Mark a student on leave</p>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-                  <select value={leaveStudentId} onChange={(e) => setLeaveStudentId(e.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none sm:col-span-1">
-                    <option value="">Select student</option>
-                    {students.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
-                  <input type="date" value={leaveStart} onChange={(e) => setLeaveStart(e.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
-                  <input type="date" value={leaveEnd} onChange={(e) => setLeaveEnd(e.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
-                  <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="Reason (optional)" className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
-                </div>
+                <p className="text-sm font-semibold text-foreground">Mark {markDate === TODAY_ISO ? 'today' : markDate} as a holiday</p>
+                <input type="text" value={holidayTitle} onChange={(e) => setHolidayTitle(e.target.value)} placeholder="Holiday title (e.g. Diwali)" className="w-full rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+                {holidayError && <p className="text-xs text-destructive">{holidayError}</p>}
                 <div className="flex gap-2">
-                  <button
-                    onClick={handleMarkLeave}
-                    disabled={!leaveStudentId || isSavingLeave}
-                    className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
-                  >
-                    {isSavingLeave ? 'Saving...' : 'Save Leave'}
+                  <button onClick={handleMarkHoliday} disabled={isSavingHoliday} className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-50">
+                    {isSavingHoliday ? 'Saving...' : 'Save Holiday'}
                   </button>
-                  <button onClick={() => setShowLeaveForm(false)} className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-foreground hover:bg-secondary">Cancel</button>
+                  <button onClick={() => setShowHolidayForm(false)} className="rounded-lg border border-border px-4 py-2 text-xs font-medium text-foreground hover:bg-secondary">Cancel</button>
                 </div>
-                {activeLeaves.length > 0 && (
-                  <div className="pt-2 border-t border-amber-200 dark:border-amber-900 space-y-1.5">
-                    <p className="text-xs font-semibold text-muted-foreground uppercase">On leave today</p>
-                    {activeLeaves.map((l) => (
-                      <div key={l.id} className="flex items-center justify-between text-xs text-foreground">
-                        <span>{l.studentName || l.studentId} — {l.startDate} to {l.endDate}{l.reason ? ` (${l.reason})` : ''}</span>
-                        <button onClick={() => handleCancelLeave(l.id)} className="text-muted-foreground hover:text-red-500" title="Cancel leave">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
             )}
 
@@ -590,7 +566,7 @@ export function Attendance() {
                           ? 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/30'
                           : status === 'absent'
                           ? 'border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30'
-                          : status === 'leave'
+                          : status === 'holiday'
                           ? 'border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30'
                           : 'border-border bg-secondary/40'
                       }`}
@@ -639,15 +615,15 @@ export function Attendance() {
                             Absent
                           </button>
                           <button
-                            onClick={() => setAttendance((p) => ({ ...p, [s.id]: 'leave' }))}
+                            onClick={() => setAttendance((p) => ({ ...p, [s.id]: 'holiday' }))}
                             className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
-                              status === 'leave'
+                              status === 'holiday'
                                 ? 'bg-amber-500 text-white'
                                 : 'border border-border bg-card text-muted-foreground hover:bg-secondary'
                             }`}
                           >
-                            <PlaneTakeoff className="h-3.5 w-3.5" />
-                            Leave
+                            <CalendarOff className="h-3.5 w-3.5" />
+                            Holiday
                           </button>
                         </div>
 
@@ -699,7 +675,7 @@ export function Attendance() {
                 <div className="flex gap-4 text-sm">
                   <span className="font-semibold text-green-600 dark:text-green-400">✓ Present: {presentCount}</span>
                   <span className="font-semibold text-red-500">✗ Absent: {absentCount}</span>
-                  {leaveCount > 0 && <span className="font-semibold text-amber-600 dark:text-amber-400">✈ Leave: {leaveCount}</span>}
+                  {holidayCount > 0 && <span className="font-semibold text-amber-600 dark:text-amber-400">🏖 Holiday: {holidayCount}</span>}
                   {unmarked > 0 && <span className="text-muted-foreground">○ Unmarked: {unmarked}</span>}
                 </div>
                 
@@ -738,7 +714,12 @@ export function Attendance() {
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <h2 className="mb-4 text-base font-semibold text-foreground">Monthly Attendance Report — {selectedClass}</h2>
             <div className="flex flex-wrap items-center gap-3">
-              <input type="month" value={exportMonth} onChange={(event) => setExportMonth(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none" />
+              <select value={exportMonthNum} onChange={(event) => setExportMonthNum(Number(event.target.value))} aria-label="Month" className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none">
+                {['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map((name, i) => <option key={name} value={i + 1}>{name}</option>)}
+              </select>
+              <select value={exportYear} onChange={(event) => setExportYear(Number(event.target.value))} aria-label="Year" className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm focus:border-primary focus:outline-none">
+                {Array.from({ length: 6 }, (_, i) => Number(TODAY_ISO.slice(0, 4)) - 4 + i).map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
               <button
                 type="button"
                 disabled={exporting}
@@ -753,7 +734,7 @@ export function Attendance() {
                 onClick={() => handleExportMonth('excel')}
                 className="flex items-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
               >
-                <FileSpreadsheet className="h-4 w-4" /> Export Excel
+                <FileSpreadsheet className="h-4 w-4" /> Monthly Excel
               </button>
               <button
                 type="button"
@@ -784,7 +765,7 @@ export function Attendance() {
           )}
           <div className="space-y-2">
             {recentRecords.slice(0, showAllRecent ? recentRecords.length : 5).map((r, i) => {
-              const pct = Math.round((r.present / r.total) * 100);
+              const pct = r.percent;
               return (
                 <div key={i} className="flex items-center gap-4 rounded-xl border border-border bg-secondary/40 px-4 py-3">
                   <div className="flex-1 min-w-0">
@@ -793,8 +774,8 @@ export function Attendance() {
                   </div>
                   <div className="text-right">
                     <p className="text-sm font-bold text-foreground">{r.present}/{r.total}</p>
-                    <p className={`text-xs font-medium ${pct >= 90 ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}>
-                      {pct}%
+                    <p className={`text-xs font-medium ${(pct ?? 0) >= 90 ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                      {pct === null ? '—' : `${pct}%`}
                     </p>
                   </div>
                 </div>

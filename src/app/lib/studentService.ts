@@ -45,7 +45,7 @@ export async function refreshStudents(): Promise<StudentRecord[]> {
     const res = await apiFetch(`${API_BASE}/api/students`);
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
+      if (Array.isArray(data)) {
         const mapped: StudentRecord[] = data.map((student: any) => ({
           ...student,
           branchName: student.branchId === 'branch_rajajinagar' ? 'Rajajinagar Branch' :
