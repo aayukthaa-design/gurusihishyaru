@@ -693,7 +693,7 @@ export function Dashboard() {
     .filter((n) => isUnreadForMe(n)).length;
 
   const scopedStudentCount = React.useMemo(
-    () => allStudents.filter((s) => !branchFilter || s.branchId === branchFilter).length,
+    () => allStudents.filter((s) => s.status !== 'Inactive' && (!branchFilter || s.branchId === branchFilter)).length,
     [allStudents, branchFilter]
   );
   const scopedTeacherCount = React.useMemo(
@@ -721,7 +721,7 @@ export function Dashboard() {
       return branches
         .filter((b) => b.status === 'Active')
         .filter((b) => !branchFilter || b.id === branchFilter)
-        .map((b) => ({ branch: b.name, students: allStudents.filter((s) => s.branchId === b.id).length }));
+        .map((b) => ({ branch: b.name, students: allStudents.filter((s) => s.status !== 'Inactive' && s.branchId === b.id).length }));
     }
 
     return weeklyAttendanceTrend;

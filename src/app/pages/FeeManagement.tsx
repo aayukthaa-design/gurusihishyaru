@@ -1,3 +1,4 @@
+import { DateRangeFilter } from '../components/DateRangeFilter';
 import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
@@ -132,6 +133,7 @@ export function FeeManagement() {
   const records = useFeeRecords();
   const structures = useFeeStructures();
   const students = useStudents();
+  const [feeRange, setFeeRange] = useState({ start: '', end: '' });
   const [stats, setStats] = useState<FeeStats>({ totalCollected: 0, totalPending: 0, overdueCount: 0, paidCount: 0, totalRecords: 0 });
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -201,7 +203,7 @@ export function FeeManagement() {
     Promise.all([
       refreshFeeRecords(user),
       isAccountantOrAdmin ? refreshFeeStructures(user) : Promise.resolve([]),
-      isAccountantOrAdmin ? fetchFeeStats(user) : Promise.resolve(null),
+      isAccountantOrAdmin ? fetchFeeStats(user, feeRange) : Promise.resolve(null),
       isAccountantOrAdmin ? refreshStudents() : Promise.resolve([]),
     ]).then(([, , statsResult]) => {
       if (statsResult) setStats(statsResult);
@@ -213,12 +215,17 @@ export function FeeManagement() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
+  useEffect(() => {
+    if (user && isAccountantOrAdmin) fetchFeeStats(user, feeRange).then(setStats);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feeRange]);
+
   // One search box drives both the fee records and the admitted-students table
   // below; it matches the student's name, ID, class and parent mobile against
   // the existing student/fee records (nothing is duplicated).
   const searchQuery = search.trim().toLowerCase();
-  const studentMatchesSearch = (s: { fullName?: string; id: string; className?: string; primaryParentMobile?: string }) =>
-    !searchQuery || [s.fullName, s.id, s.className, s.primaryParentMobile].some((v) => (v || '').toLowerCase().includes(searchQuery));
+  const studentMatchesSearch = (s: { fullName?: string; id: string; className?: string; primaryParentMobile?: string; primaryParentName?: string; admissionNumber?: string }) =>
+    !searchQuery || [s.fullName, s.id, s.className, s.primaryParentMobile, s.primaryParentName, s.admissionNumber].some((v) => (v || '').toLowerCase().includes(searchQuery));
 
   const filtered = useMemo(() => records.filter((record) => {
     const linkedStudent = students.find((s) => s.id === record.studentId);
@@ -322,7 +329,7 @@ export function FeeManagement() {
     try {
       const result = await generateFeeRecordsAPI(structureId, user);
       setSuccess(`Created ${result.createdCount} fee record(s)${result.skippedCount ? `, skipped ${result.skippedCount} already existing` : ''}.`);
-      const statsResult = await fetchFeeStats(user);
+      const statsResult = await fetchFeeStats(user, feeRange);
       setStats(statsResult);
     } catch (err: any) {
       setError(err.message || 'Failed to generate fee records.');
@@ -365,7 +372,7 @@ export function FeeManagement() {
       setSuccess(`Created ${result.createdCount} monthly fee record(s) for ${result.studentCount} student(s)${result.skippedCount ? `, skipped ${result.skippedCount} already existing` : ''}.`);
       setMonthlyForm((f) => ({ ...f, studentId: '' }));
       setMonthlyStudentSearch('');
-      const statsResult = await fetchFeeStats(user);
+      const statsResult = await fetchFeeStats(user, feeRange);
       setStats(statsResult);
     } catch (err: any) {
       setError(err.message || 'Failed to generate monthly fee records.');
@@ -409,7 +416,7 @@ export function FeeManagement() {
       setSuccess(result.pendingApproval ? 'Fee request sent for Super Admin approval.' : 'Individual fee record created.');
       setIndividualForm({ studentId: '', feeType: FEE_TYPES[0], originalAmount: '', discountPercent: '', category: '', startDate: '', endDate: '', dueDate: '', month: '' });
       setIndividualSearch('');
-      const statsResult = await fetchFeeStats(user);
+      const statsResult = await fetchFeeStats(user, feeRange);
       setStats(statsResult);
     } catch (err: any) {
       setError(err.message || 'Failed to create fee record.');
@@ -460,7 +467,7 @@ export function FeeManagement() {
       setSuccess(result.pendingApproval
         ? `Fee change for ${editingRecord.studentName} sent for Super Admin approval — the current amount stays active until then.`
         : `Fee updated for ${editingRecord.studentName}.`);
-      const statsResult = await fetchFeeStats(user);
+      const statsResult = await fetchFeeStats(user, feeRange);
       setStats(statsResult);
       setEditingRecord(null);
     } catch (err: any) {
@@ -486,7 +493,7 @@ export function FeeManagement() {
     setError(null);
     try {
       await deleteFeeRecordAPI(record.id, user);
-      const statsResult = await fetchFeeStats(user);
+      const statsResult = await fetchFeeStats(user, feeRange);
       setStats(statsResult);
       setSuccess('Fee entry deleted.');
     } catch (err: any) {
@@ -506,7 +513,7 @@ export function FeeManagement() {
     try {
       const result = await recordFeePaymentAPI(collecting.id, amount, paymentMode, referenceNumber, user);
       setSuccess(`Payment recorded. Receipt: ${result.receiptNumber}`);
-      const statsResult = await fetchFeeStats(user);
+      const statsResult = await fetchFeeStats(user, feeRange);
       setStats(statsResult);
       setCollecting(null);
       setPaymentAmount('');
@@ -538,10 +545,14 @@ export function FeeManagement() {
         )}
 
         {isAccountantOrAdmin && (
+          <DateRangeFilter start={feeRange.start} end={feeRange.end} onChange={setFeeRange} />
+        )}
+
+        {isAccountantOrAdmin && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="rounded-2xl border border-green-100 dark:border-green-900 bg-green-50 dark:bg-green-950/40 p-5">
               <p className="text-2xl font-bold text-green-700 dark:text-green-400">{formatIndianCurrency(stats.totalCollected)}</p>
-              <p className="mt-0.5 text-sm text-muted-foreground">Total Collected</p>
+              <p className="mt-0.5 text-sm text-muted-foreground">{feeRange.start || feeRange.end ? 'Collected in period' : 'Total Collected'}</p>
             </div>
             <div className="rounded-2xl border border-amber-100 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 p-5">
               <p className="text-2xl font-bold text-amber-700 dark:text-amber-400">{formatIndianCurrency(stats.totalPending)}</p>
@@ -986,7 +997,7 @@ export function FeeManagement() {
             <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input
               type="search"
-              placeholder="Search student by name, ID, class or mobile…"
+              placeholder="Search student by name, ID, class, parent or mobile…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full rounded-xl border border-input bg-input-background py-3 pl-10 pr-4 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"

@@ -13,6 +13,8 @@ import { fetchAttendance } from '../lib/attendanceService';
 import { attendancePercent } from '../lib/attendanceMath';
 import { useHolidays, refreshHolidays, isHoliday } from '../lib/holidayService';
 import { fetchFeeStats, type FeeStats } from '../lib/feeService';
+import { DateRangeFilter } from '../components/DateRangeFilter';
+import { filterLedgerByDateRange } from '../lib/ledgerService';
 import { useExams } from '../lib/examService';
 import { refreshMarks, type MarkRecord } from '../lib/examMarksService';
 
@@ -436,10 +438,16 @@ export function ReportsAnalytics() {
   };
 
   // Simplified Reports Data Calculations
+  // A Start/End date range (same control as Expenses) overrides the Month/Year picker for the Income report.
+  const [incomeRange, setIncomeRange] = useState({ start: '', end: '' });
+  const hasIncomeRange = Boolean(incomeRange.start || incomeRange.end);
+  const incomePeriodLabel = hasIncomeRange ? `${incomeRange.start || 'start'} to ${incomeRange.end || 'today'}` : `${filterMonth}/${filterYear}`;
   const filteredIncome = useMemo(() => {
+    const income = ledger.filter(t => t.type === 'Income');
+    if (hasIncomeRange) return filterLedgerByDateRange(income, incomeRange.start, incomeRange.end);
     const prefix = `${filterYear}-${filterMonth}`;
-    return ledger.filter(t => t.type === 'Income' && t.date.startsWith(prefix));
-  }, [ledger, filterYear, filterMonth]);
+    return income.filter(t => t.date.startsWith(prefix));
+  }, [ledger, filterYear, filterMonth, incomeRange, hasIncomeRange]);
 
   const filteredExpense = useMemo(() => {
     const prefix = `${filterYear}-${filterMonth}`;
@@ -468,7 +476,7 @@ export function ReportsAnalytics() {
       const branchName = getBranchName(branchFilter || myBranchId) || 'All Branches';
 
       if (reportCategory === 'income') {
-        pdfService.addTitle(`Income Report - ${filterMonth}/${filterYear} (${branchName})`);
+        pdfService.addTitle(`Income Report - ${incomePeriodLabel} (${branchName})`);
         const headers = ['Date', 'Voucher', 'Category', 'Amount', 'Description'];
         const body = filteredIncome.map(t => [t.date, t.voucherNumber, t.category, formatIndianCurrencyForPdf(t.amount), t.description]);
         pdfService.addTable([headers], body);
@@ -590,7 +598,7 @@ export function ReportsAnalytics() {
         }))), 'Allocations');
       }
       const fileBranch = branchFilter || myBranchId || 'all';
-      writeFile(wb, `${reportCategory}_report_${fileBranch}_${filterYear}_${filterMonth}.xlsx`);
+      writeFile(wb, `${reportCategory}_report_${fileBranch}_${reportCategory === 'income' && hasIncomeRange ? incomePeriodLabel.replace(/ /g, '') : `${filterYear}_${filterMonth}`}.xlsx`);
     } catch (e) {
       console.error(e);
       alert('Error exporting Excel');
@@ -667,6 +675,10 @@ export function ReportsAnalytics() {
               </div>
             </div>
           </div>
+
+          {reportCategory === 'income' && (
+            <DateRangeFilter start={incomeRange.start} end={incomeRange.end} onChange={setIncomeRange} />
+          )}
 
           {/* Report Category Select */}
           <div className="flex gap-1 border-b border-border pb-1 shrink-0 overflow-x-auto">

@@ -22,6 +22,10 @@ export interface TeacherRecord {
   salaryAmount: number;
   monthlySalary: number | null;
   salaryPerClass: number | null;
+  /** Payslip earnings split; Basic = salary − these. */
+  allowance: number;
+  specialCourse: number;
+  referralBonus: number;
   branchId: string;
   dateOfJoining: string;
   username: string;
@@ -75,6 +79,9 @@ function mapApiTeacher(row: any): TeacherRecord {
     salaryAmount: Number(row.salaryAmount || 0),
     monthlySalary: row.monthlySalary ?? null,
     salaryPerClass: row.salaryPerClass ?? null,
+    allowance: Number(row.allowance || 0),
+    specialCourse: Number(row.specialCourse || 0),
+    referralBonus: Number(row.referralBonus || 0),
     branchId: row.branchId || '',
     dateOfJoining: row.dateOfJoining || '',
     username: row.email || row.mobile || '',

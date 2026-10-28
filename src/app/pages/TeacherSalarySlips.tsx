@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { Header } from '../components/Header';
 import { useAuth } from '../auth/AuthContext';
 import { useTeachers } from '../lib/teacherService';
-import { describeSalaryBreakdown, fetchSalaryRecords, type SalaryRecord } from '../lib/teacherSalaryService';
+import { fetchSalaryRecords, type SalaryRecord } from '../lib/teacherSalaryService';
 import { fetchCasualLeaveBalances } from '../lib/casualLeaveService';
 import { generateSalarySlipData } from '../lib/reportExport';
 import { formatIndianCurrency } from '../lib/currency';
-import { getBranchName } from '../lib/branchService';
+import { getBranchById, getBranchName } from '../lib/branchService';
 import { Download, FileText } from 'lucide-react';
 
 export function TeacherSalarySlips() {
@@ -30,19 +30,12 @@ export function TeacherSalarySlips() {
     try {
       const teacherName = record.teacherName || `${selectedTeacher?.firstName ?? ''} ${selectedTeacher?.lastName ?? ''}`.trim();
       const clRow = (await fetchCasualLeaveBalances())[0];
-      const attendanceStr = describeSalaryBreakdown(record, clRow ? Math.max(0, clRow.annualAllotment - clRow.leavesTaken) : undefined);
-      const base64 = await generateSalarySlipData(
-        teacherName,
-        record.teacherId,
-        getBranchName(record.branchId),
-        record.month,
-        record.salaryType || 'Per Class',
-        record.salaryType === 'Monthly Fixed' ? formatIndianCurrency(record.salaryAmount ?? 0) : `₹${record.salaryPerClass}`,
-        attendanceStr,
-        formatIndianCurrency(record.salaryType === 'Monthly Fixed' ? (record.salaryAmount ?? record.calculatedSalary) : record.calculatedSalary),
-        formatIndianCurrency(record.calculatedSalary),
-        record.paidBy || 'Accountant'
-      );
+      const base64 = await generateSalarySlipData({
+        record,
+        teacher: selectedTeacher,
+        branch: getBranchById(record.branchId),
+        casualLeave: clRow ? { total: clRow.annualAllotment, used: clRow.leavesTaken } : undefined,
+      });
       if (!base64) {
         alert('Unable to generate salary slip.');
         return;

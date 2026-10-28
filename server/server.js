@@ -2970,7 +2970,7 @@ async function main() {
 
   // ─── Teachers CRUD (users with role=teacher + HR profile extension) ───────
 
-  const TEACHER_PROFILE_COLUMNS = ['qualification', 'experience', 'subjects', 'department', 'salaryType', 'salaryAmount', 'monthlySalary', 'salaryPerClass', 'gender', 'dob', 'address', 'employmentType', 'profilePhoto', 'dateOfJoining'];
+  const TEACHER_PROFILE_COLUMNS = ['qualification', 'experience', 'subjects', 'department', 'salaryType', 'salaryAmount', 'monthlySalary', 'salaryPerClass', 'gender', 'dob', 'address', 'employmentType', 'profilePhoto', 'dateOfJoining', 'allowance', 'specialCourse', 'referralBonus'];
   const TEACHER_JOIN_SELECT = `SELECT u.*, ${TEACHER_PROFILE_COLUMNS.map((c) => `tp.${c}`).join(', ')} FROM users u LEFT JOIN teacher_profiles tp ON tp.id = u.id`;
 
   function mapTeacherRow(row) {
@@ -2995,6 +2995,9 @@ async function main() {
       salaryAmount: row.salaryAmount || 0,
       monthlySalary: row.monthlySalary ?? null,
       salaryPerClass: row.salaryPerClass ?? null,
+      allowance: row.allowance ?? 0,
+      specialCourse: row.specialCourse ?? 0,
+      referralBonus: row.referralBonus ?? 0,
       gender: row.gender || '',
       dob: row.dob || '',
       address: row.address || '',
@@ -3024,7 +3027,7 @@ async function main() {
       // stripped here so it never reaches the client, not just hidden in the admin UI.
       const canSeeSalary = req.user.roles.some((r) => ['super_admin', 'accountant'].includes(r));
       const mapped = rows.map(mapTeacherRow);
-      res.json(canSeeSalary ? mapped : mapped.map(({ salaryType, salaryAmount, monthlySalary, salaryPerClass, ...rest }) => rest));
+      res.json(canSeeSalary ? mapped : mapped.map(({ salaryType, salaryAmount, monthlySalary, salaryPerClass, allowance, specialCourse, referralBonus, ...rest }) => rest));
     } catch (err) {
       console.error('List teachers error:', err);
       res.status(500).json({ error: 'Failed to load teachers' });
@@ -3082,6 +3085,7 @@ async function main() {
           now
         );
       }
+      await saveEarningsSplit(req, id, body);
       const row = await db.get(`${TEACHER_JOIN_SELECT} WHERE u.id = ?`, id);
       res.status(201).json(mapTeacherRow(row));
     } catch (err) {
@@ -3092,6 +3096,14 @@ async function main() {
       res.status(500).json({ error: 'Failed to create teacher' });
     }
   });
+
+  // Payslip earnings split — super_admin only, like the rest of the salary fields.
+  async function saveEarningsSplit(req, teacherId, body) {
+    if (!req.user.roles.includes('super_admin')) return;
+    const n = (v) => Math.max(0, Number(v) || 0);
+    if (body.allowance === undefined && body.specialCourse === undefined && body.referralBonus === undefined) return;
+    await db.run('UPDATE teacher_profiles SET allowance=?, specialCourse=?, referralBonus=? WHERE id=?', n(body.allowance), n(body.specialCourse), n(body.referralBonus), teacherId);
+  }
 
   app.put('/api/teachers/:id', async (req, res) => {
     if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
@@ -3139,6 +3151,7 @@ async function main() {
           merged.gender, merged.dob, merged.address, merged.employmentType, merged.profilePhoto, merged.dateOfJoining, now, now
         );
       }
+      await saveEarningsSplit(req, req.params.id, body);
       if (body.password) {
         const policyError = await validatePasswordPolicy(body.password);
         if (policyError) return res.status(400).json({ error: policyError });
@@ -5430,6 +5443,17 @@ async function main() {
     return saved;
   }
 
+  // Rows for the same child in the same class/batch under the same parent mobile (Active or
+  // Inactive), with class spellings normalised ("4" == "4th"). `excludeId` skips the row being edited.
+  async function findSameEnrolments(branchId, s, excludeId = null) {
+    const normClass = (v) => String(v || '').toLowerCase().replace(/(\d+)\s*(st|nd|rd|th)\b/g, '$1').replace(/\s+/g, ' ').trim();
+    const rows = await db.all(
+      `SELECT * FROM students WHERE branchId = ? AND primaryParentMobile = ? AND lower(fullName) = lower(?) AND id != ? ORDER BY (status = 'Inactive') ASC`,
+      branchId, String(s.primaryParentMobile), `${s.firstName} ${s.lastName}`.trim(), excludeId || ''
+    );
+    return rows.filter((d) => normClass(d.className) === normClass(s.className) && normClass(d.batch) === normClass(s.batch));
+  }
+
   app.post('/api/students', async (req, res) => {
     if (!req.user.roles.some((r) => ['teacher', 'admin', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -5460,13 +5484,21 @@ async function main() {
       // Same child entered twice into the SAME class/batch (e.g. re-import with "4" vs "4th") showed
       // up as extra names in the parent's "Select child" dropdown. The same child in a different
       // course (Phonics, Abacus, ...) is a legitimate separate enrolment and stays allowed.
-      const normClass = (v) => String(v || '').toLowerCase().replace(/(\d+)\s*(st|nd|rd|th)\b/g, '$1').replace(/\s+/g, ' ').trim();
-      const sameName = await db.all(
-        `SELECT className, batch FROM students WHERE status = 'Active' AND branchId = ? AND primaryParentMobile = ? AND lower(fullName) = lower(?)`,
-        branchId, s.primaryParentMobile, `${s.firstName} ${s.lastName}`.trim()
-      );
-      if (sameName.some((d) => normClass(d.className) === normClass(s.className) && normClass(d.batch) === normClass(s.batch))) {
+      const matches = await findSameEnrolments(branchId, s);
+      if (matches.some((d) => d.status !== 'Inactive')) {
         return res.status(409).json({ error: `${s.firstName} ${s.lastName} is already registered in this class under this parent mobile number.` });
+      }
+      // A discontinued student being re-admitted keeps their original Student ID and history —
+      // reactivate that record instead of inserting a second row (which showed up as a duplicate ID).
+      if (matches.length) {
+        const old = matches[0];
+        await db.run(
+          `UPDATE students SET status='Active', className=?, batch=?, admissionDate=?, gender=?, dob=?, address=?, parentEmail=?, primaryParentName=? WHERE id=?`,
+          s.className || old.className, s.batch ?? old.batch, s.admissionDate || new Date().toISOString().split('T')[0],
+          s.gender || old.gender, s.dob || old.dob, s.address || old.address, s.parentEmail || old.parentEmail,
+          s.primaryParentName || old.primaryParentName, old.id
+        );
+        return res.json(await db.get('SELECT * FROM students WHERE id = ?', old.id));
       }
       const saved = await createStudentRecord(db, s, branchId);
       res.json(saved);
@@ -5499,6 +5531,12 @@ async function main() {
         if (s.className && !teacherClassNames.includes(s.className)) {
           return res.status(403).json({ error: 'You can only move a student into a batch assigned to you.' });
         }
+      }
+
+      // Editing must not turn two rows into the same enrolment (class typo fixes, re-activation).
+      if ((s.status || 'Active') !== 'Inactive' && s.primaryParentMobile) {
+        const clash = (await findSameEnrolments(branchId, s, studentId)).find((d) => d.status !== 'Inactive');
+        if (clash) return res.status(409).json({ error: `${s.firstName} ${s.lastName} is already registered in this class under this parent mobile number (${clash.id}).` });
       }
 
       const stmt = await db.prepare(`
@@ -7951,7 +7989,7 @@ async function main() {
       const rows = await db.all(query, ...params);
       const mapped = rows.map((r) => ({ ...r, isLocked: !!r.isLocked }));
       const result = isAdmin && !isPayroll
-        ? mapped.map(({ salaryAmount, salaryPerClass, calculatedSalary, remarks, ...rest }) => rest)
+        ? mapped.map(({ salaryAmount, salaryPerClass, calculatedSalary, remarks, allowance, specialCourse, referralBonus, ...rest }) => rest)
         : mapped;
       res.json(result);
     } catch (err) {
@@ -7986,6 +8024,12 @@ async function main() {
   }
 
   try { await db.exec("ALTER TABLE salary_records ADD COLUMN absentDays INTEGER DEFAULT 0;"); } catch (e) {}
+  // Payslip earnings split: the teacher profile holds the current figures, each salary record snapshots them.
+  for (const table of ['teacher_profiles', 'salary_records']) {
+    for (const col of ['allowance', 'specialCourse', 'referralBonus']) {
+      try { await db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} REAL DEFAULT 0;`); } catch (e) {}
+    }
+  }
 
   // Creates or updates a Draft salary record — used by both the Teacher Attendance
   // page (saving classes/salary-per-class) and the Accountant Portal (Create Draft).
@@ -8021,6 +8065,8 @@ async function main() {
         Number(b.presentDays || 0), Number(b.halfDays || 0), calculatedSalary, absentDays, b.remarks || '', now, now
       );
 
+      const n = (v) => Math.max(0, Number(v) || 0);
+      await db.run('UPDATE salary_records SET allowance=?, specialCourse=?, referralBonus=? WHERE teacherId = ? AND month = ?', n(b.allowance), n(b.specialCourse), n(b.referralBonus), b.teacherId, b.month);
       const saved = await db.get('SELECT * FROM salary_records WHERE teacherId = ? AND month = ?', b.teacherId, b.month);
 
       await writeSalaryAuditLog({
@@ -8821,7 +8867,16 @@ async function main() {
       if (branchId) { query += ' WHERE branchId = ?'; params.push(branchId); }
       const rows = await db.all(query, ...params);
       const statuses = rows.map((r) => feeRecordStatus(r.totalAmount, r.paidAmount, r.dueDate));
-      const totalCollected = rows.reduce((sum, r) => sum + (r.paidAmount || 0), 0);
+      let totalCollected = rows.reduce((sum, r) => sum + (r.paidAmount || 0), 0);
+      // With a Start/End date, "collected" is what was actually received in that window (payment dates), not lifetime paid.
+      const { startDate, endDate } = req.query;
+      if (startDate || endDate) {
+        const conds = ['1=1']; const pp = [];
+        if (branchId) { conds.push('branchId = ?'); pp.push(branchId); }
+        if (startDate) { conds.push('paymentDate >= ?'); pp.push(String(startDate)); }
+        if (endDate) { conds.push('paymentDate <= ?'); pp.push(String(endDate)); }
+        totalCollected = (await db.get(`SELECT COALESCE(SUM(amount),0) AS t FROM fee_payments WHERE ${conds.join(' AND ')}`, ...pp)).t;
+      }
       const totalPending = rows.reduce((sum, r) => sum + Math.max(0, (r.totalAmount || 0) - (r.paidAmount || 0)), 0);
       res.json({
         totalCollected,

@@ -343,6 +343,13 @@ export function ParentPortal() {
       });
   }, [selectedStudent, allMarks, exams]);
 
+  // Exam marks % = total obtained / total maximum × 100 (same rounding as the attendance %).
+  const marksPercent = (obtained: number, max: number) => (max > 0 ? Math.round((obtained / max) * 100) : null);
+  const overallMarksPercent = useMemo(
+    () => marksPercent(studentResults.reduce((s, r) => s + Number(r.marksObtained || 0), 0), studentResults.reduce((s, r) => s + Number(r.maxMarks || 0), 0)),
+    [studentResults]
+  );
+
   if (!selectedStudent) {
     return (
       <div className="flex-1 bg-background">
@@ -577,7 +584,7 @@ export function ParentPortal() {
                 </div>
                 {studentResults.length > 0 && (
                   <button type="button" onClick={() => exportRowsToExcel(
-                    studentResults.map((r) => ({ Exam: r.examName, 'Max Marks': r.maxMarks, 'Passing Marks': r.passingMarks, 'Marks Obtained': r.marksObtained, Result: r.result, 'Attendance %': formatAttendancePercent(overallCounts.percent) })),
+                    studentResults.map((r) => ({ Exam: r.examName, 'Max Marks': r.maxMarks, 'Passing Marks': r.passingMarks, 'Marks Obtained': r.marksObtained, Percentage: formatAttendancePercent(marksPercent(Number(r.marksObtained || 0), r.maxMarks)), Result: r.result, 'Attendance %': formatAttendancePercent(overallCounts.percent) })),
                     'Exam Results', `exam-results-${selectedStudent?.fullName ?? 'student'}.xlsx`)}
                     className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary">
                     <FileSpreadsheet className="h-4 w-4" /> Excel
@@ -586,6 +593,12 @@ export function ParentPortal() {
               </div>
 
               <div className="mt-5 rounded-3xl border border-border bg-background p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">Exam Marks Percentage</p>
+                <p className="mt-2 text-2xl font-semibold text-foreground">{formatAttendancePercent(overallMarksPercent)}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{studentResults.length ? `Across ${studentResults.length} published exam${studentResults.length === 1 ? '' : 's'}` : 'No exam results published yet.'}</p>
+              </div>
+
+              <div className="mt-3 rounded-3xl border border-border bg-background p-4">
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">Attendance Percentage</p>
                 <p className="mt-2 text-2xl font-semibold text-foreground">{formatAttendancePercent(overallCounts.percent)}</p>
                 <p className="mt-1 text-xs text-muted-foreground">{overallCounts.total ? `${overallCounts.total - overallCounts.absent} of ${overallCounts.total} classes attended (holidays excluded)` : 'No attendance recorded yet.'}</p>
@@ -603,6 +616,7 @@ export function ParentPortal() {
                           <th className="pb-3 px-4 text-right">Max Marks</th>
                           <th className="pb-3 px-4 text-right">Passing Marks</th>
                           <th className="pb-3 px-4 text-right">Marks Obtained</th>
+                          <th className="pb-3 px-4 text-right">%</th>
                           <th className="pb-3 pl-4 text-right">Result</th>
                         </tr>
                       </thead>
@@ -613,6 +627,7 @@ export function ParentPortal() {
                             <td className="py-3 px-4 text-right text-muted-foreground">{res.maxMarks}</td>
                             <td className="py-3 px-4 text-right text-muted-foreground">{res.passingMarks}</td>
                             <td className="py-3 px-4 text-right font-semibold text-foreground">{res.marksObtained}</td>
+                            <td className="py-3 px-4 text-right text-foreground">{formatAttendancePercent(marksPercent(Number(res.marksObtained || 0), res.maxMarks))}</td>
                             <td className="py-3 pl-4 text-right font-medium">{res.result}</td>
                           </tr>
                         ))}

@@ -94,7 +94,8 @@ export function Attendance() {
     for (const r of records) {
       const key = `${r.className}__${r.date}`;
       const g = groups.get(key) || { class: r.className, date: r.date, present: 0, absent: 0, total: 0, sortKey: r.date };
-      // Holidays are never classes, so they stay out of the total.
+      // Holidays (marked or on the calendar) are never classes, so they stay out of the total.
+      if (isHoliday(holidays, r.date.slice(0, 10), (r as any).branchId || branchFilter || user?.branchId)) continue;
       if (r.status === 'present') { g.present += 1; g.total += 1; }
       else if (r.status === 'absent') { g.absent += 1; g.total += 1; }
       groups.set(key, g);

@@ -28,6 +28,7 @@ export function findTodaysBirthdays(students: StudentRecord[], teachers: Teacher
   const todayKey = monthDayOf(new Date().toISOString().slice(0, 10));
   const studentsToday = (students || []).filter((s) => {
     if (!s || !((s as any).dob)) return false;
+    if (s.status === 'Inactive') return false;
     if (branchId && s.branchId !== branchId) return false;
     return monthDayOf((s as any).dob) === todayKey;
   }).map((s) => ({ id: s.id, name: s.fullName || s.firstName || '', role: 'student' as const, branchId: s.branchId, className: s.className, dob: (s as any).dob }));
@@ -51,7 +52,7 @@ export function findUpcomingBirthdays(students: StudentRecord[], teachers: Teach
 
     (students || []).forEach((s) => {
       const sd = (s as any).dob;
-      if (!sd) return;
+      if (!sd || s.status === 'Inactive') return;
       if (branchId && s.branchId !== branchId) return;
       const sk = monthDayOf(sd);
       if (sk === key) res.push({ id: s.id, name: s.fullName || s.firstName || '', role: 'student', branchId: s.branchId, className: s.className, dob: sd });

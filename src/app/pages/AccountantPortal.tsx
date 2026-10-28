@@ -3,11 +3,11 @@ import { useLocation } from 'react-router';
 import { useTeachers } from '../lib/teacherService';
 import { generateSalarySlipData } from '../lib/reportExport';
 import { fetchCasualLeaveBalances } from '../lib/casualLeaveService';
-import { describeSalaryBreakdown, fetchSalaryRecords, fetchTeacherAttendance, markSalaryRecordPaid, summarizeTeacherAttendance, unlockSalaryRecord, type SalaryRecord, type TeacherAttendanceEntry } from '../lib/teacherSalaryService';
+import { fetchSalaryRecords, fetchTeacherAttendance, markSalaryRecordPaid, summarizeTeacherAttendance, unlockSalaryRecord, type SalaryRecord, type TeacherAttendanceEntry } from '../lib/teacherSalaryService';
 import { Header } from '../components/Header';
 import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
-import { useBranches, getBranchName } from '../lib/branchService';
+import { useBranches, getBranchById, getBranchName } from '../lib/branchService';
 import { useStudents, refreshStudents } from '../lib/studentService';
 import { fetchFeeStats } from '../lib/feeService';
 import { addNotification } from '../lib/notificationService';
@@ -374,21 +374,13 @@ export function AccountantPortal() {
   }, [teacherProfiles, salaryRecords, salaryMonthAttendance, salaryMonth, salaryBranchFilter, salaryTeacherFilter, isSuperAdmin, myBranchId]);
 
   const buildSalarySlipPdf = async (record: SalaryRecord) => {
-    const teacherName = record.teacherName;
     const clRow = isSuperAdmin ? (await fetchCasualLeaveBalances()).find((r) => r.userId === record.teacherId) : undefined;
-    const attendanceStr = describeSalaryBreakdown(record, clRow ? Math.max(0, clRow.annualAllotment - clRow.leavesTaken) : undefined);
-    return generateSalarySlipData(
-      teacherName,
-      record.teacherId,
-      getBranchName(record.branchId),
-      record.month,
-      record.salaryType || 'Per Class',
-      record.salaryType === 'Monthly Fixed' ? formatIndianCurrency(record.salaryAmount ?? 0) : `₹${record.salaryPerClass}`,
-      attendanceStr,
-      formatIndianCurrency(record.salaryType === 'Monthly Fixed' ? (record.salaryAmount ?? record.calculatedSalary) : record.calculatedSalary),
-      formatIndianCurrency(record.calculatedSalary),
-      user?.name || 'Accountant'
-    );
+    return generateSalarySlipData({
+      record,
+      teacher: teacherProfiles.find((t) => t.id === record.teacherId),
+      branch: getBranchById(record.branchId),
+      casualLeave: clRow ? { total: clRow.annualAllotment, used: clRow.leavesTaken } : undefined,
+    });
   };
 
   const handlePreviewSalarySlip = async (record: SalaryRecord) => {
@@ -561,9 +553,11 @@ export function AccountantPortal() {
   // Filtered Ledger list
   const filteredLedger = useMemo(() => {
     return rangeLedger.filter(t => {
-      const matchesSearch = t.voucherNumber.toLowerCase().includes(ledgerSearch.toLowerCase()) || 
-                            t.description.toLowerCase().includes(ledgerSearch.toLowerCase()) ||
-                            t.category.toLowerCase().includes(ledgerSearch.toLowerCase());
+      // Every typed word must match somewhere in the entry (voucher, student/description, category,
+      // amount, date, payment mode or reference); null fields no longer break the search.
+      const haystack = [t.voucherNumber, t.description, t.category, t.amount, t.date, t.paymentMode, t.referenceNumber, t.type]
+        .map((v) => String(v ?? '').toLowerCase()).join(' ');
+      const matchesSearch = ledgerSearch.toLowerCase().split(/\s+/).filter(Boolean).every((word) => haystack.includes(word));
       const matchesType = !ledgerTypeFilter || t.type === ledgerTypeFilter;
       const matchesCategory = !ledgerCategoryFilter || t.category === ledgerCategoryFilter;
       return matchesSearch && matchesType && matchesCategory;
@@ -2595,7 +2589,7 @@ export function AccountantPortal() {
                   required
                 >
                   <option value="">Choose Student...</option>
-                  {students.filter(s => !branchFilter || s.branchId === branchFilter).map(s => (
+                  {students.filter(s => s.status !== 'Inactive' && (!branchFilter || s.branchId === branchFilter)).map(s => (
                     <option key={s.id} value={s.id}>{s.fullName} ({s.id} - {s.className})</option>
                   ))}
                 </select>

@@ -428,8 +428,9 @@ export function StudentManagement() {
 
   // One status filter drives the list, the stat cards' view and the Excel export.
   const [exportScope, setExportScope] = useState<'Active' | 'Inactive' | 'All'>('Active');
+  // Stat cards and the list share one branch-scoped set so their numbers always agree.
+  const scopedStudents = useMemo(() => filterByBranch(students, user, branchFilter), [students, user, branchFilter]);
   const filtered = useMemo(() => {
-    const scopedStudents = filterByBranch(students, user, branchFilter);
     return scopedStudents.filter((student) => {
       const matchesSearch = [student.firstName, student.lastName, student.id, student.parentName, student.parentMobile]
         .join(' ')
@@ -438,7 +439,7 @@ export function StudentManagement() {
       const matchesClass = !classFilter || student.class === classFilter;
       return matchesSearch && matchesClass && (exportScope === 'All' || student.status === exportScope);
     });
-  }, [branchFilter, classFilter, search, students, user, exportScope]);
+  }, [classFilter, search, scopedStudents, exportScope]);
 
   const handleExportStudents = () => {
     const rows = filtered
@@ -449,7 +450,7 @@ export function StudentManagement() {
     exportRowsToExcel(rows, 'Students', `students-${exportScope.toLowerCase()}.xlsx`);
   };
 
-  const visible = exportScope === 'Active' ? filtered.slice(0, 10) : filtered; // inactive/all lists show every row
+  const thisMonth = new Date().toISOString().slice(0, 7);
 
   const handleAdd = async (data: Omit<Student, 'id'>) => {
     const resolvedBranchId = data.branchId || user?.branchId || branchFilter || undefined;
@@ -503,10 +504,10 @@ export function StudentManagement() {
       <div className="mx-auto max-w-6xl space-y-6 p-6">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           {[
-            { label: 'Total', value: students.length, color: 'text-foreground' },
-            { label: 'Active', value: students.filter((student) => student.status === 'Active').length, color: 'text-green-600 dark:text-green-400' },
-            { label: 'Inactive', value: students.filter((student) => student.status === 'Inactive').length, color: 'text-muted-foreground' },
-            { label: 'New (Jun)', value: 4, color: 'text-sky-600 dark:text-sky-400' },
+            { label: 'Total', value: scopedStudents.length, color: 'text-foreground' },
+            { label: 'Active', value: scopedStudents.filter((student) => student.status === 'Active').length, color: 'text-green-600 dark:text-green-400' },
+            { label: 'Inactive', value: scopedStudents.filter((student) => student.status === 'Inactive').length, color: 'text-muted-foreground' },
+            { label: 'New (This Month)', value: scopedStudents.filter((student) => student.admissionDate.startsWith(thisMonth)).length, color: 'text-sky-600 dark:text-sky-400' },
           ].map((stat) => (
             <div key={stat.label} className="rounded-2xl border border-border bg-card px-5 py-4">
               <p className={`text-2xl font-bold ${stat.color}`}>{stat.value}</p>
@@ -596,7 +597,7 @@ export function StudentManagement() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {visible.map((student) => (
+                {filtered.map((student) => (
                   <tr key={student.id} className="transition-colors hover:bg-secondary/30">
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-3">
@@ -639,11 +640,6 @@ export function StudentManagement() {
             </table>
           </div>
 
-          {filtered.length > visible.length && (
-            <div className="border-t border-border px-6 py-4">
-              <span className="text-xs text-muted-foreground">Showing top {visible.length} of {filtered.length} students</span>
-            </div>
-          )}
           {filtered.length === 0 && (
             <div className="flex flex-col items-center gap-2 py-12 text-center">
               <Users className="h-10 w-10 text-muted-foreground/30" />

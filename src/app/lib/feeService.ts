@@ -120,12 +120,14 @@ export async function refreshFeeStructures(user?: any): Promise<FeeStructure[]> 
   }
 }
 
-export async function fetchFeeStats(user?: any): Promise<FeeStats> {
+export async function fetchFeeStats(user?: any, range?: { start?: string; end?: string }): Promise<FeeStats> {
   const empty: FeeStats = { totalCollected: 0, totalPending: 0, overdueCount: 0, paidCount: 0, totalRecords: 0 };
   if (!user) return empty;
   try {
     const params = new URLSearchParams();
     if (user.branchId) params.set('branchId', user.branchId);
+    if (range?.start) params.set('startDate', range.start);
+    if (range?.end) params.set('endDate', range.end);
     const res = await apiFetch(`/api/fees/stats?${params.toString()}`);
     if (!res.ok) return empty;
     return await res.json();

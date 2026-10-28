@@ -35,6 +35,9 @@ export interface Teacher {
   salaryAmount: number;
   monthlySalary?: number | null;
   salaryPerClass?: number | null;
+  allowance?: number;
+  specialCourse?: number;
+  referralBonus?: number;
   status: 'Active' | 'Inactive' | 'Pending Approval';
 }
 
@@ -45,7 +48,7 @@ const SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'English', '
 const EMPTY: Omit<Teacher, 'id'> = {
   branchId: '',
   firstName: '', lastName: '', mobile: '', email: '', dob: '',
-  qualification: '', experience: '', subjects: '', department: '', salaryType: 'Monthly Fixed', salaryAmount: 0, monthlySalary: 0, salaryPerClass: 0, status: 'Active',
+  qualification: '', experience: '', subjects: '', department: '', salaryType: 'Monthly Fixed', salaryAmount: 0, monthlySalary: 0, salaryPerClass: 0, allowance: 0, specialCourse: 0, referralBonus: 0, status: 'Active',
 };
 
 // ─── Form ─────────────────────────────────────────────────────────────────────
@@ -166,6 +169,13 @@ function TeacherForm({
                 className="field"
               />
             </div>
+            {([['allowance', 'Allowance (₹)'], ['specialCourse', 'Special Course (₹)'], ['referralBonus', 'Referral Bonus (₹)']] as const).map(([key, label]) => (
+              <div key={key}>
+                <label className="field-label">{label}</label>
+                <input type="number" min={0} value={form[key] ?? 0} onChange={(e) => set(key, Number(e.target.value))} className="field" />
+              </div>
+            ))}
+            <p className="col-span-full -mt-2 text-xs text-muted-foreground">Payslip shows Basic = salary − allowance − special course − referral bonus.</p>
           </>
         )}
         <div>

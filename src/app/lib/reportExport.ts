@@ -1,5 +1,9 @@
 
 import { utils, writeFile, type WorkBook, type WorkSheet } from 'xlsx';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import type { SalaryRecord } from './teacherSalaryService';
+import type { Branch } from './branchService';
 import { attendancePercent, formatAttendancePercent, TICK, CROSS, HOLIDAY_MARK, type MonthlyAttendanceMatrix } from './attendanceMath';
 
 export interface ChartPoint {
@@ -746,216 +750,156 @@ function arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
   return window.btoa(binary);
 }
 
-function renderSalarySlip(
-  pdfService: PDFTemplateService,
-  teacherName: string,
-  teacherId: string,
-  branch: string,
-  month: string,
-  config: string,
-  baseAmount: string,
-  attendanceStr: string,
-  grossSalary: string,
-  netSalary: string,
-  generatedBy: string
-) {
-  // Callers format these with formatIndianCurrency() (₹), which jsPDF's core fonts can't
-  // render — swap to the PDF-safe "Rs." form here rather than requiring every caller to
-  // remember it.
-  baseAmount = pdfSafe(baseAmount);
-  attendanceStr = pdfSafe(attendanceStr);
-  grossSalary = pdfSafe(grossSalary);
-  netSalary = pdfSafe(netSalary);
-
-  const doc = pdfService.getDoc();
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const marginLeft = 25.4;
-  const marginRight = 25.4;
-  const contentWidth = pageWidth - marginLeft - marginRight;
-
-  pdfService.addMainHeading('TEACHER SALARY SLIP');
-  pdfService.addParagraph('Professional payroll statement for salary processing and employee records.');
-
-  pdfService.addSectionHeading('Teacher Information');
-  pdfService.addTable([
-    ['Field', 'Detail'],
-  ], [
-    ['Teacher Name', teacherName],
-    ['Employee ID', teacherId],
-    ['Branch', branch],
-    ['Payroll Month', month],
-    ['Salary Configuration', config],
-    ['Attendance / Classes Taken', attendanceStr],
-  ], {
-    styles: {
-      font: 'times',
-      fontSize: 12,
-      cellPadding: 4,
-    },
-    headStyles: {
-      fillColor: [235, 235, 235],
-      textColor: [0, 0, 0],
-      fontStyle: 'bold',
-    },
-    columnStyles: {
-      0: { cellWidth: contentWidth * 0.38 },
-      1: { cellWidth: contentWidth * 0.56 },
-    },
-    theme: 'grid',
-  });
-
-  pdfService.addSectionHeading('Salary Breakdown');
-  pdfService.addTable([
-    ['Component', 'Amount'],
-  ], [
-    ['Salary Per Class', baseAmount],
-    ['Gross Salary', grossSalary],
-    ['Net Salary Payable', netSalary],
-  ], {
-    styles: {
-      font: 'times',
-      fontSize: 12,
-      cellPadding: 4,
-    },
-    headStyles: {
-      fillColor: [245, 245, 245],
-      textColor: [0, 0, 0],
-      fontStyle: 'bold',
-    },
-    bodyStyles: {
-      textColor: [30, 30, 30],
-    },
-    columnStyles: {
-      0: { cellWidth: contentWidth * 0.6 },
-      1: { cellWidth: contentWidth * 0.32, halign: 'right' },
-    },
-    theme: 'grid',
-  });
-
-  pdfService.addSectionHeading('Salary Calculation');
-  pdfService.addTable([
-    ['Description', 'Value'],
-  ], [
-    ['Calculated Salary', grossSalary],
-    ['Net Salary Payable', netSalary],
-    ['Classes Conducted', attendanceStr],
-  ], {
-    styles: {
-      font: 'times',
-      fontSize: 12,
-      cellPadding: 4,
-    },
-    headStyles: {
-      fillColor: [245, 245, 245],
-      textColor: [0, 0, 0],
-      fontStyle: 'bold',
-    },
-    bodyStyles: {
-      textColor: [40, 40, 40],
-    },
-    columnStyles: {
-      0: { cellWidth: contentWidth * 0.64 },
-      1: { cellWidth: contentWidth * 0.28, halign: 'right' },
-    },
-    theme: 'grid',
-  });
-
-  const boxHeight = 28;
-  const boxSpacing = 10;
-  // checkPageBreak() may call doc.addPage() and reset currentY to bodyTop, so the box's
-  // Y position must be read AFTER the page-break check, not before — otherwise a stale
-  // pre-break Y (near the bottom of the old page) gets used to draw the box on the new page.
-  pdfService.checkPageBreak(boxHeight + boxSpacing);
-  const highlightY = pdfService.getCurrentY();
-  doc.setDrawColor(0, 76, 153);
-  doc.setFillColor(230, 240, 255);
-  doc.roundedRect(marginLeft, highlightY, contentWidth, boxHeight, 2, 2, 'FD');
-
-  doc.setFont('times', 'bold');
-  doc.setFontSize(14);
-  doc.setTextColor(10, 35, 80);
-  doc.text('Total Payable Amount', marginLeft + 4, highlightY + 8, { baseline: 'top' });
-
-  doc.setFontSize(18);
-  doc.text(netSalary, marginLeft + contentWidth - 4, highlightY + 11, {
-    align: 'right',
-    baseline: 'top',
-  });
-
-  pdfService.setCurrentY(highlightY + boxHeight + boxSpacing);
-
-  pdfService.addSectionHeading('Administrative Details');
-  pdfService.addTable([
-    ['Prepared By', 'Date'],
-  ], [
-    [generatedBy, new Date().toLocaleDateString()],
-  ], {
-    styles: {
-      font: 'times',
-      fontSize: 12,
-      cellPadding: 4,
-    },
-    headStyles: {
-      fillColor: [245, 245, 245],
-      textColor: [0, 0, 0],
-      fontStyle: 'bold',
-    },
-    bodyStyles: {
-      textColor: [40, 40, 40],
-    },
-    columnStyles: {
-      0: { cellWidth: contentWidth * 0.5 },
-      1: { cellWidth: contentWidth * 0.4 },
-    },
-    theme: 'grid',
-  });
-
-  pdfService.addParagraph('Salary slip generated by the accounting system. Retain this document for payroll verification and audit purposes.');
+export interface SalarySlipInput {
+  record: SalaryRecord;
+  teacher?: { dob?: string; dateOfJoining?: string; designation?: string; department?: string };
+  branch?: Branch;
+  /** Casual-leave balance of the employee; the CL block is left blank when unknown. */
+  casualLeave?: { total: number; used: number };
 }
 
-export async function generateSalarySlipData(
-  teacherName: string,
-  teacherId: string,
-  branch: string,
-  month: string,
-  config: string,
-  baseAmount: string,
-  attendanceStr: string,
-  grossSalary: string,
-  netSalary: string,
-  generatedBy: string
-): Promise<string | null> {
+function ordinalDate(iso?: string): string {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return '';
+  const n = d.getDate();
+  const suffix = n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th';
+  return `${n}${suffix} ${d.toLocaleString('en-GB', { month: 'long' })} ${d.getFullYear()}`;
+}
+
+function slashDate(iso?: string): string {
+  const d = iso ? new Date(iso) : null;
+  return d && !Number.isNaN(d.getTime()) ? d.toLocaleDateString('en-GB') : '';
+}
+
+async function loadLogoDataUrl(): Promise<string | null> {
   try {
-    const pdfService = new PDFTemplateService();
-    renderSalarySlip(pdfService, teacherName, teacherId, branch, month, config, baseAmount, attendanceStr, grossSalary, netSalary, generatedBy);
-    const title = `Salary_Slip_${teacherName.replace(/\s+/g, '_')}_${month}.pdf`;
-    const pdfBytes = await pdfService.exportWithLetterhead(title);
-    return arrayBufferToBase64(pdfBytes);
-  } catch (err) {
-    console.error('Error generating salary slip data:', err);
+    const res = await fetch('/logo.jpeg');
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
     return null;
   }
 }
 
-export async function generateSalarySlip(
-  teacherName: string,
-  teacherId: string,
-  branch: string,
-  month: string,
-  config: string,
-  baseAmount: string,
-  attendanceStr: string,
-  grossSalary: string,
-  netSalary: string,
-  generatedBy: string
-) {
+// Payslip layout follows the institute's existing salary-slip template (boxed header with
+// branch address + logo, month banner, employee grid, earnings/deductions, casual-leave block).
+// It is a standalone page — the template carries its own header, so no letterhead is merged.
+// Earnings breakdown: Allowance / Special course / Referral bonus are snapshotted on the salary record
+// from the teacher profile; Basic is the remainder of the gross.
+export async function generateSalarySlipData(input: SalarySlipInput): Promise<string | null> {
   try {
-    const pdfService = new PDFTemplateService();
-    renderSalarySlip(pdfService, teacherName, teacherId, branch, month, config, baseAmount, attendanceStr, grossSalary, netSalary, generatedBy);
-    const title = `Salary_Slip_${teacherName.replace(/\s+/g, '_')}_${month}.pdf`;
-    await pdfService.exportWithLetterhead(title);
+    const { record, teacher, branch, casualLeave } = input;
+    const monthly = record.salaryType === 'Monthly Fixed';
+    const gross = monthly ? (record.salaryAmount ?? record.calculatedSalary) : record.calculatedSalary;
+    const net = record.calculatedSalary;
+    const lopDays = monthly ? (record.absentDays ?? 0) : 0;
+    const workingDays = record.classesConducted;
+    const paidDays = Math.max(0, workingDays - lopDays);
+    const lopAmount = Math.max(0, gross - net);
+    const allowance = record.allowance ?? 0;
+    const specialCourse = record.specialCourse ?? 0;
+    const referralBonus = record.referralBonus ?? 0;
+    const basic = Math.max(0, gross - allowance - specialCourse - referralBonus);
+    const money = (v: number) => `Rs${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    const [y, m] = record.month.split('-').map(Number);
+    const monthName = new Date(y, m - 1, 1).toLocaleString('en-US', { month: 'long' }).toUpperCase();
+
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const left = 15;
+    const width = 180;
+    const top = 20;
+
+    const branchLines = [
+      `${branch?.name ?? record.branchId ?? ''} Branch:`,
+      [branch?.address, branch?.city && branch.city.toUpperCase(), [branch?.state, branch?.pincode].filter(Boolean).join(' - ')].filter(Boolean).join(', ').toUpperCase(),
+      branch?.contactNumber ? `Phone: ${branch.contactNumber}` : '',
+      branch?.email ? `Email: ${branch.email}` : '',
+    ];
+    doc.setFont('helvetica', 'bolditalic');
+    doc.setFontSize(10);
+    doc.setTextColor(0, 0, 0);
+    doc.text(branchLines[0], left + 2, top + 6);
+    const addr = doc.splitTextToSize(branchLines[1], 112);
+    doc.text(addr, left + 2, top + 12);
+    let ly = top + 12 + addr.length * 4.6;
+    for (const line of branchLines.slice(2)) if (line) { doc.text(line, left + 2, ly); ly += 4.6; }
+
+    const logo = await loadLogoDataUrl();
+    if (logo) doc.addImage(logo, 'JPEG', left + width - 52, top + 1, 50, 30.5);
+
+    const bannerY = Math.max(ly, top + 32) + 1;
+    doc.setFillColor(217, 217, 217);
+    doc.rect(left, bannerY, width, 7, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.text(`${monthName} MONTHLY SALARY SLIP`, left + width / 2, bannerY + 5, { align: 'center' });
+
+    const bold = { fontStyle: 'bold' as const };
+    const grid = { theme: 'grid' as const, styles: { font: 'helvetica', fontSize: 9.5, textColor: 0, lineColor: 0, lineWidth: 0.2, cellPadding: 1.6 }, margin: { left, right: left } };
+    const w4 = [width * 0.25, width * 0.25, width * 0.25, width * 0.25];
+
+    autoTable(doc, {
+      ...grid,
+      startY: bannerY + 12,
+      body: [
+        [{ content: 'Employee ID', styles: { ...bold, halign: 'center' } }, { content: record.employeeId, styles: { halign: 'center' } }, { content: 'Name of Employee', styles: bold }, { content: record.teacherName.toUpperCase(), styles: { ...bold, halign: 'right' } }],
+        [{ content: 'Date of Joining', styles: { ...bold, halign: 'center' } }, { content: ordinalDate(teacher?.dateOfJoining), styles: { halign: 'center' } }, { content: 'Date of Birth', styles: bold }, { content: slashDate(teacher?.dob), styles: { halign: 'right' } }],
+        [{ content: 'Branch Name', styles: { ...bold, halign: 'center' } }, { content: branch?.name ?? '', styles: { halign: 'center' } }, { content: 'Total Working Days', styles: bold }, { content: String(workingDays), styles: { halign: 'right' } }],
+        [{ content: 'Designation', styles: { ...bold, halign: 'center' } }, { content: record.designation || teacher?.designation || 'Teacher', styles: { halign: 'center' } }, { content: 'LOP Days', styles: bold }, { content: String(lopDays), styles: { halign: 'right' } }],
+        [{ content: 'Department', styles: { ...bold, halign: 'center' } }, { content: record.department || teacher?.department || '', styles: { halign: 'center' } }, { content: 'Paid Days', styles: bold }, { content: String(paidDays), styles: { halign: 'right' } }],
+      ],
+      columnStyles: { 0: { cellWidth: w4[0] }, 1: { cellWidth: w4[1] }, 2: { cellWidth: w4[2] }, 3: { cellWidth: w4[3] } },
+    });
+
+    const earnY = (doc as any).lastAutoTable.finalY + 6;
+    const half = width / 2;
+    autoTable(doc, {
+      ...grid,
+      startY: earnY,
+      head: [[{ content: 'Earnings', colSpan: 2, styles: { halign: 'center' } }, { content: 'Deductions', colSpan: 2, styles: { halign: 'center' } }]],
+      headStyles: { fillColor: 255, textColor: 0, fontStyle: 'bold' },
+      body: [
+        ['Basic', { content: money(basic), styles: { halign: 'right' } }, '', ''],
+        ['Allowance', { content: money(allowance), styles: { halign: 'right' } }, '', ''],
+        ['Special course', { content: money(specialCourse), styles: { halign: 'right' } }, '', ''],
+        ['Referal Bonus', { content: String(referralBonus), styles: { halign: 'right' } }, { content: 'LOP', styles: { halign: 'center' } }, { content: lopAmount ? money(lopAmount) : '-', styles: { halign: 'right' } }],
+        [{ content: 'Gross Salary', styles: { ...bold, halign: 'center' } }, { content: gross.toLocaleString('en-IN'), styles: { ...bold, halign: 'right' } }, { content: 'Net Salary', styles: { ...bold, halign: 'center' } }, { content: money(net), styles: { ...bold, halign: 'right' } }],
+      ],
+      columnStyles: { 0: { cellWidth: half * 0.5, halign: 'center' }, 1: { cellWidth: half * 0.5 }, 2: { cellWidth: half * 0.5 }, 3: { cellWidth: half * 0.5 } },
+    });
+
+    const clY = (doc as any).lastAutoTable.finalY + 6;
+    const used = casualLeave?.used;
+    const total = casualLeave?.total;
+    autoTable(doc, {
+      ...grid,
+      startY: clY,
+      body: [
+        ['', '', { content: "Total CL's utilized", styles: { ...bold, halign: 'center' } }, { content: used === undefined ? '' : String(used), styles: { halign: 'right' } }],
+        [{ content: "Total CL's", styles: { ...bold, halign: 'center' } }, { content: total === undefined ? '' : String(total), styles: { ...bold, halign: 'center' } }, { content: "Remaining CL's", styles: { ...bold, halign: 'center' } }, { content: used === undefined || total === undefined ? '' : String(Math.max(0, total - used)), styles: { ...bold, halign: 'right' } }],
+      ],
+      columnStyles: { 0: { cellWidth: w4[0] }, 1: { cellWidth: w4[1] }, 2: { cellWidth: w4[2] }, 3: { cellWidth: w4[3] } },
+    });
+
+    const noteY = (doc as any).lastAutoTable.finalY + 8;
+    doc.setFont('helvetica', 'normal');
+    doc.text('Note: This is a computer generated payslip and does not require signature.', left + 2, noteY);
+    doc.setFont('helvetica', 'bold');
+    doc.text('# Highly Confidential', left + 2, noteY + 5);
+
+    // Outer frame around the whole slip
+    doc.setLineWidth(0.8);
+    doc.rect(left, top, width, noteY + 30 - top);
+
+    return arrayBufferToBase64(new Uint8Array(doc.output('arraybuffer')));
   } catch (err) {
-    console.error('Error generating salary slip:', err);
-    alert('Failed to generate salary slip. Please try again.');
+    console.error('Error generating salary slip data:', err);
+    return null;
   }
 }

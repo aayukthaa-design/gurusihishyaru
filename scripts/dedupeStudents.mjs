@@ -1,14 +1,24 @@
-// Removes duplicate active students (same name + parent mobile + branch), e.g. the
-// second import that stored class "4" next to "4th". Dry run unless --apply is passed.
-// Keeps the copy with an admission number (else the oldest id). A duplicate that has
-// ANY row in another table (attendance, fees, marks, ...) is reported and left alone.
+// Merges duplicate active students (same name + parent mobile + branch + class, class
+// spellings normalised so "4" == "4th"), e.g. the second import that stored class "4" next
+// to "4th". The same child in a different class/course is a separate enrolment and is kept.
+// Dry run unless --apply is passed; --apply copies the DB file first.
+// Keeps the copy with an admission number (else the oldest id). Attendance, fees, marks etc.
+// on the duplicate are moved onto the kept student (a row that would collide with one the
+// kept student already has is dropped), then the duplicate is deleted.
 //   node scripts/dedupeStudents.mjs [--db server/data.db] [--apply]
 import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
+import fs from 'fs';
 
 const args = process.argv.slice(2);
 const apply = args.includes('--apply');
 const dbPath = args.includes('--db') ? args[args.indexOf('--db') + 1] : 'server/data.db';
+if (apply) {
+  const backup = `${dbPath}.before-dedupe-${Date.now()}`;
+  fs.copyFileSync(dbPath, backup);
+  console.log(`Backup written: ${backup}`);
+}
+const normClass = (v) => String(v || '').toLowerCase().replace(/(\d+)\s*(st|nd|rd|th)\b/g, '$1').replace(/\s+/g, ' ').trim();
 const db = await open({ filename: dbPath, driver: sqlite3.Database });
 
 const tables = (await db.all("SELECT name FROM sqlite_master WHERE type='table' AND name != 'students'")).map((t) => t.name);
@@ -23,7 +33,7 @@ const JOIN_TABLES = ['parent_student', 'student_batches'];
 const students = await db.all(`SELECT id, fullName, className, batch, branchId, admissionNumber, primaryParentMobile FROM students WHERE status = 'Active'`);
 const groups = new Map();
 for (const s of students) {
-  const key = `${s.branchId}|${s.primaryParentMobile}|${String(s.fullName).trim().toLowerCase()}`;
+  const key = `${s.branchId}|${s.primaryParentMobile}|${String(s.fullName).trim().toLowerCase()}|${normClass(s.className)}`;
   groups.set(key, [...(groups.get(key) ?? []), s]);
 }
 
@@ -33,14 +43,17 @@ for (const group of groups.values()) {
   group.sort((a, b) => (b.admissionNumber ? 1 : 0) - (a.admissionNumber ? 1 : 0) || a.id.localeCompare(b.id));
   const [keep, ...dups] = group;
   for (const dup of dups) {
-    let blockedBy = null;
+    const label = `${dup.fullName} [${dup.id}, class ${dup.className}] duplicate of ${keep.id} (class ${keep.className})`;
+    console.log(`${apply ? 'MERGE' : 'WOULD MERGE'} ${label}`);
     for (const table of linked.filter((t) => !JOIN_TABLES.includes(t))) {
       const { c } = await db.get(`SELECT COUNT(*) c FROM "${table}" WHERE studentId = ?`, dup.id);
-      if (c) { blockedBy = `${table} (${c})`; break; }
+      if (!c) continue;
+      console.log(`         ${table}: ${c} row(s) -> ${keep.id}`);
+      if (apply) {
+        await db.run(`UPDATE OR IGNORE "${table}" SET studentId = ? WHERE studentId = ?`, keep.id, dup.id);
+        await db.run(`DELETE FROM "${table}" WHERE studentId = ?`, dup.id);
+      }
     }
-    const label = `${dup.fullName} [${dup.id}, class ${dup.className}] duplicate of ${keep.id} (class ${keep.className})`;
-    if (blockedBy) { console.log(`SKIP   ${label} - has data in ${blockedBy}`); continue; }
-    console.log(`${apply ? 'DELETE' : 'WOULD DELETE'} ${label}`);
     if (apply) {
       for (const table of JOIN_TABLES) if (linked.includes(table)) await db.run(`DELETE FROM "${table}" WHERE studentId = ?`, dup.id);
       await db.run('DELETE FROM students WHERE id = ?', dup.id);
@@ -48,5 +61,5 @@ for (const group of groups.values()) {
     removed++;
   }
 }
-console.log(`${removed} duplicate(s) ${apply ? 'removed' : 'found (dry run, pass --apply to delete)'}.`);
+console.log(`${removed} duplicate(s) ${apply ? 'merged' : 'found (dry run, pass --apply to merge)'}.`);
 await db.close();
