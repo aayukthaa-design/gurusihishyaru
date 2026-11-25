@@ -3,7 +3,17 @@ import { countAttendance } from './attendanceMath';
 
 export type TeacherAttendanceStatus = 'present' | 'absent' | 'holiday';
 export type SalaryStatus = 'Draft' | 'Paid';
-export type AuditAction = 'Created' | 'Updated' | 'Marked_Paid' | 'Unlocked';
+export type PayslipStatus = 'Not Pushed' | 'Pending Generation' | 'Generated';
+export type AuditAction =
+  | 'Created'
+  | 'Updated'
+  | 'Finalized'
+  | 'Pushed_To_Accountant'
+  | 'Payslip_Generated'
+  | 'Payslip_Regenerated'
+  | 'Regeneration_Authorized'
+  | 'Marked_Paid'
+  | 'Unlocked';
 
 export interface TeacherSalaryProfile {
   id: string;
@@ -72,6 +82,22 @@ export interface SalaryRecord {
   isLocked: boolean;
   lockedDate?: string;
   lockedBy?: string;
+  isFinalized?: boolean;
+  finalizedAt?: string;
+  finalizedBy?: string;
+  pushedToAccountant?: boolean;
+  pushedAt?: string;
+  pushedBy?: string;
+  payslipStatus?: PayslipStatus;
+  payslipGeneratedAt?: string;
+  payslipGeneratedBy?: string;
+  payslipGenerationCount?: number;
+  regenerationAuthorized?: boolean;
+  regenerationAuthorizedAt?: string;
+  regenerationAuthorizedBy?: string;
+  regenerationReason?: string;
+  casualLeaveTotal?: number | null;
+  casualLeaveUsed?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -186,12 +212,28 @@ export function calculateSalaryForTeacher(params: {
   return calculateSalaryFromClasses(params.classesConducted, params.salaryPerClass);
 }
 
-export async function fetchSalaryRecords(params?: { branchId?: string; teacherId?: string; month?: string; status?: string }): Promise<SalaryRecord[]> {
+export function calculateMonthlyFixedSalary(salaryAmount: number, workingDays: number, absentDays: number): number {
+  const gross = Number(salaryAmount || 0);
+  const days = Number(workingDays || 0);
+  const absent = Number(absentDays || 0);
+  return Math.max(0, Math.round(gross - (days > 0 ? (gross / days) * absent : 0)));
+}
+
+export async function fetchSalaryRecords(params?: {
+  branchId?: string;
+  teacherId?: string;
+  month?: string;
+  status?: string;
+  payslipStatus?: PayslipStatus;
+  pushedOnly?: boolean;
+}): Promise<SalaryRecord[]> {
   const qs = new URLSearchParams();
   if (params?.branchId) qs.set('branchId', params.branchId);
   if (params?.teacherId) qs.set('teacherId', params.teacherId);
   if (params?.month) qs.set('month', params.month);
   if (params?.status) qs.set('status', params.status);
+  if (params?.payslipStatus) qs.set('payslipStatus', params.payslipStatus);
+  if (params?.pushedOnly) qs.set('pushedOnly', '1');
   const query = qs.toString();
   const res = await apiFetch(`/api/salary-records${query ? `?${query}` : ''}`);
   if (!res.ok) return [];
@@ -199,7 +241,7 @@ export async function fetchSalaryRecords(params?: { branchId?: string; teacherId
   return Array.isArray(data) ? data : [];
 }
 
-// Creates (or updates, if still a Draft) the salary record for a teacher+month.
+// Creates (or updates, if still an unfinalized Draft) the salary record for a teacher+month.
 export async function saveSalaryRecord(params: {
   teacher: TeacherSalaryProfile;
   month: string;
@@ -208,6 +250,8 @@ export async function saveSalaryRecord(params: {
   attendance: AttendanceSummary;
   remarks?: string;
 }): Promise<SalaryRecord> {
+  const isMonthlyFixed = params.teacher.salaryType === 'Monthly Fixed';
+  const workingDays = params.classesConducted > 0 ? params.classesConducted : params.attendance.workingDays;
   const res = await apiFetch('/api/salary-records', {
     method: 'POST',
     body: {
@@ -223,8 +267,8 @@ export async function saveSalaryRecord(params: {
       allowance: params.teacher.allowance ?? 0,
       specialCourse: params.teacher.specialCourse ?? 0,
       referralBonus: params.teacher.referralBonus ?? 0,
-      classesConducted: params.teacher.salaryType === 'Monthly Fixed' ? params.attendance.workingDays : params.classesConducted,
-      salaryPerClass: params.teacher.salaryType === 'Monthly Fixed' ? 0 : params.salaryPerClass,
+      classesConducted: isMonthlyFixed ? workingDays : params.classesConducted,
+      salaryPerClass: isMonthlyFixed ? 0 : params.salaryPerClass,
       presentDays: params.attendance.present,
       halfDays: 0,
       absentDays: params.attendance.absent,
@@ -232,6 +276,33 @@ export async function saveSalaryRecord(params: {
     },
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to save salary record');
+  return res.json();
+}
+
+export async function finalizeSalaryRecord(id: number): Promise<SalaryRecord> {
+  const res = await apiFetch(`/api/salary-records/${id}/finalize`, { method: 'POST' });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to finalize salary record');
+  return res.json();
+}
+
+export async function pushSalaryRecordToAccountant(id: number): Promise<SalaryRecord> {
+  const res = await apiFetch(`/api/salary-records/${id}/push-to-accountant`, { method: 'POST' });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to push salary to accountant');
+  return res.json();
+}
+
+export async function generatePayslipRecord(id: number): Promise<SalaryRecord> {
+  const res = await apiFetch(`/api/salary-records/${id}/generate-payslip`, { method: 'POST' });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to generate payslip');
+  return res.json();
+}
+
+export async function authorizePayslipRegeneration(id: number, reason?: string): Promise<SalaryRecord> {
+  const res = await apiFetch(`/api/salary-records/${id}/authorize-regeneration`, {
+    method: 'POST',
+    body: { reason: reason || '' },
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to authorize payslip regeneration');
   return res.json();
 }
 

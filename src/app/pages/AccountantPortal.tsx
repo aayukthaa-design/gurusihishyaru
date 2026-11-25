@@ -1,9 +1,19 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation } from 'react-router';
 import { useTeachers } from '../lib/teacherService';
 import { generateSalarySlipData } from '../lib/reportExport';
 import { fetchCasualLeaveBalances } from '../lib/casualLeaveService';
-import { fetchSalaryRecords, fetchTeacherAttendance, markSalaryRecordPaid, summarizeTeacherAttendance, unlockSalaryRecord, type SalaryRecord, type TeacherAttendanceEntry } from '../lib/teacherSalaryService';
+import {
+  fetchSalaryRecords,
+  fetchTeacherAttendance,
+  generatePayslipRecord,
+  authorizePayslipRegeneration,
+  markSalaryRecordPaid,
+  summarizeTeacherAttendance,
+  unlockSalaryRecord,
+  type SalaryRecord,
+  type TeacherAttendanceEntry,
+} from '../lib/teacherSalaryService';
 import { Header } from '../components/Header';
 import { GreetingBanner } from '../components/GreetingBanner';
 import { useAuth } from '../auth/AuthContext';
@@ -13,7 +23,7 @@ import { fetchFeeStats } from '../lib/feeService';
 import { addNotification } from '../lib/notificationService';
 import { formatIndianCurrency } from '../lib/currency';
 import { 
-  ChevronRight, TrendingUp, TrendingDown, Plus, Search,
+  ChevronRight, TrendingUp, TrendingDown, Plus, Search, X,
   Download, Eye, Edit2, Trash2, BookOpen, Box, DollarSign, SlidersHorizontal,
   Upload, Lock, Unlock, FileText, CheckCircle, Package, AlertTriangle, RefreshCw, Wallet, CreditCard, ClipboardCheck, Boxes, FileSpreadsheet, Users
 } from 'lucide-react';
@@ -167,11 +177,19 @@ export function AccountantPortal() {
   const [salaryStatusFilter, setSalaryStatusFilter] = useState('');
   const [salaryRecords, setSalaryRecords] = useState<SalaryRecord[]>([]);
   const [salaryMonthAttendance, setSalaryMonthAttendance] = useState<TeacherAttendanceEntry[]>([]);
+  const [salaryBusyId, setSalaryBusyId] = useState<number | null>(null);
+  const [salaryBanner, setSalaryBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [previewSlipModal, setPreviewSlipModal] = useState<{
+    url: string;
+    fileName: string;
+    teacherName: string;
+    month: string;
+  } | null>(null);
 
   const refreshSalaryRecords = async () => {
     const branchId = isSuperAdmin ? (salaryBranchFilter || undefined) : myBranchId;
     const [records, attendanceEntries] = await Promise.all([
-      fetchSalaryRecords({ branchId, month: salaryMonth, status: salaryStatusFilter || undefined }),
+      fetchSalaryRecords({ branchId, month: salaryMonth, pushedOnly: true }),
       fetchTeacherAttendance({ branchId, month: salaryMonth }),
     ]);
     setSalaryRecords(records);
@@ -279,7 +297,7 @@ export function AccountantPortal() {
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const tabParam = params.get('tab');
-    if (tabParam && ['dashboard', 'ledger', 'inventory', 'allocations', 'reports'].includes(tabParam)) {
+    if (tabParam && ['dashboard', 'ledger', 'inventory', 'allocations', 'salaries', 'reports'].includes(tabParam)) {
       setActiveTab(tabParam as any);
     }
   }, [location.search]);
@@ -349,59 +367,167 @@ export function AccountantPortal() {
     loadAll();
   }, [branchFilter]);
 
+  const previewUrlRef = useRef<string | null>(null);
+  previewUrlRef.current = previewSlipModal?.url ?? null;
+
+  useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     refreshSalaryRecords();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSuperAdmin, myBranchId, salaryBranchFilter, salaryMonth, salaryStatusFilter]);
+  }, [isSuperAdmin, myBranchId, salaryBranchFilter, salaryMonth]);
 
-  // Draft salary records are created directly from the Teacher Attendance page
-  // (once classes/attendance are entered) — this tab only displays and processes
-  // records that already exist in the database.
+  // Only salary records finalized and pushed by Admin appear here.
   const salaryRows = useMemo(() => {
-    return teacherProfiles
-      .filter((teacher) => {
-        if (salaryBranchFilter && teacher.branchId !== salaryBranchFilter) return false;
-        if (!isSuperAdmin && teacher.branchId !== myBranchId) return false;
-        if (salaryTeacherFilter && teacher.id !== salaryTeacherFilter) return false;
+    return salaryRecords
+      .filter((record) => {
+        if (!record.pushedToAccountant) return false;
+        if (salaryBranchFilter && record.branchId !== salaryBranchFilter) return false;
+        if (!isSuperAdmin && record.branchId !== myBranchId) return false;
+        if (salaryTeacherFilter && record.teacherId !== salaryTeacherFilter) return false;
+        if (salaryStatusFilter === 'Pending Generation' && record.payslipStatus !== 'Pending Generation') return false;
+        if (salaryStatusFilter === 'Generated' && record.payslipStatus !== 'Generated') return false;
+        if (salaryStatusFilter === 'Regeneration Authorized' && !record.regenerationAuthorized) return false;
+        if ((salaryStatusFilter === 'Draft' || salaryStatusFilter === 'Paid') && record.status !== salaryStatusFilter) return false;
         return true;
       })
-      .map((teacher) => {
-        const record = salaryRecords.find((item) => item.teacherId === teacher.id) ?? null;
-        const attendance = summarizeTeacherAttendance(salaryMonthAttendance, teacher.id, salaryMonth);
+      .map((record) => {
+        const teacher = teacherProfiles.find((t) => t.id === record.teacherId);
+        const attendance = summarizeTeacherAttendance(salaryMonthAttendance, record.teacherId, salaryMonth);
         return { teacher, record, attendance };
-      })
-      .filter(({ record }) => Boolean(record));
-  }, [teacherProfiles, salaryRecords, salaryMonthAttendance, salaryMonth, salaryBranchFilter, salaryTeacherFilter, isSuperAdmin, myBranchId]);
+      });
+  }, [teacherProfiles, salaryRecords, salaryMonthAttendance, salaryMonth, salaryBranchFilter, salaryTeacherFilter, salaryStatusFilter, isSuperAdmin, myBranchId]);
+
+  const base64PdfToBlobUrl = (base64: string) => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    return URL.createObjectURL(blob);
+  };
+
+  const closePreviewModal = () => {
+    if (previewSlipModal?.url) {
+      URL.revokeObjectURL(previewSlipModal.url);
+    }
+    setPreviewSlipModal(null);
+  };
 
   const buildSalarySlipPdf = async (record: SalaryRecord) => {
-    const clRow = isSuperAdmin ? (await fetchCasualLeaveBalances()).find((r) => r.userId === record.teacherId) : undefined;
+    const hasSnapshotCl =
+      record.casualLeaveTotal !== undefined &&
+      record.casualLeaveTotal !== null &&
+      record.casualLeaveUsed !== undefined &&
+      record.casualLeaveUsed !== null;
+    let casualLeave = hasSnapshotCl
+      ? { total: Number(record.casualLeaveTotal), used: Number(record.casualLeaveUsed) }
+      : undefined;
+    if (!casualLeave && isSuperAdmin) {
+      const clRow = (await fetchCasualLeaveBalances()).find((r) => r.userId === record.teacherId);
+      if (clRow) casualLeave = { total: clRow.annualAllotment, used: clRow.leavesTaken };
+    }
     return generateSalarySlipData({
       record,
       teacher: teacherProfiles.find((t) => t.id === record.teacherId),
       branch: getBranchById(record.branchId),
-      casualLeave: clRow ? { total: clRow.annualAllotment, used: clRow.leavesTaken } : undefined,
+      casualLeave,
     });
   };
 
-  const handlePreviewSalarySlip = async (record: SalaryRecord) => {
+  const openPayslipPreview = async (record: SalaryRecord) => {
     const base64 = await buildSalarySlipPdf(record);
     if (!base64) {
-      alert('Unable to generate salary slip preview.');
+      alert('Unable to build salary slip preview.');
       return;
     }
-    window.open(`data:application/pdf;base64,${base64}`, '_blank', 'noopener');
+    const url = base64PdfToBlobUrl(base64);
+    if (previewSlipModal?.url) {
+      URL.revokeObjectURL(previewSlipModal.url);
+    }
+    const fileName = `Salary_Slip_${record.teacherName.replace(/\s+/g, '_')}_${record.month}.pdf`;
+    setPreviewSlipModal({
+      url,
+      fileName,
+      teacherName: record.teacherName,
+      month: record.month,
+    });
+  };
+
+  const handleGeneratePayslip = async (record: SalaryRecord) => {
+    if (salaryBusyId !== null) return;
+    setSalaryBusyId(record.id);
+    setSalaryBanner(null);
+    try {
+      const updated = await generatePayslipRecord(record.id);
+      await refreshSalaryRecords();
+      setSalaryBanner({
+        type: 'success',
+        message: `Payslip ${updated.payslipGenerationCount && updated.payslipGenerationCount > 1 ? 'regenerated' : 'generated'} for ${updated.teacherName} (${updated.month}). Ready for viewing and downloading.`,
+      });
+      await openPayslipPreview(updated);
+    } catch (err) {
+      setSalaryBanner({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Unable to generate payslip.',
+      });
+    } finally {
+      setSalaryBusyId(null);
+    }
+  };
+
+  const handleAuthorizeRegeneration = async (record: SalaryRecord) => {
+    if (!isSuperAdmin || salaryBusyId !== null) return;
+    const reason = window.prompt(`Optional reason for authorizing payslip regeneration for ${record.teacherName} (${record.month}):`, '');
+    if (reason === null) return;
+    setSalaryBusyId(record.id);
+    setSalaryBanner(null);
+    try {
+      const updated = await authorizePayslipRegeneration(record.id, reason);
+      await refreshSalaryRecords();
+      setSalaryBanner({
+        type: 'success',
+        message: `One-time payslip regeneration authorized for ${updated.teacherName} (${updated.month}). Accountant can click Regenerate once.`,
+      });
+    } catch (err) {
+      setSalaryBanner({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Unable to authorize regeneration.',
+      });
+    } finally {
+      setSalaryBusyId(null);
+    }
+  };
+
+  const handlePreviewSalarySlip = async (record: SalaryRecord) => {
+    if (record.payslipStatus !== 'Generated') {
+      alert('Click Generate first to create this payslip.');
+      return;
+    }
+    await openPayslipPreview(record);
   };
 
   const handleDownloadSalarySlip = async (record: SalaryRecord) => {
+    if (record.payslipStatus !== 'Generated') {
+      alert('Click Generate first to create this payslip.');
+      return;
+    }
     const base64 = await buildSalarySlipPdf(record);
     if (!base64) {
       alert('Unable to download salary slip.');
       return;
     }
+    const url = base64PdfToBlobUrl(base64);
     const link = document.createElement('a');
-    link.href = `data:application/pdf;base64,${base64}`;
+    link.href = url;
     link.download = `Salary_Slip_${record.teacherName.replace(/\s+/g, '_')}_${record.month}.pdf`;
     link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleMarkPaid = async (record: SalaryRecord) => {
@@ -415,7 +541,7 @@ export function AccountantPortal() {
 
     addNotification({
       title: 'Salary Paid',
-      message: `${record.teacherName}'s salary for ${salaryMonth} has been paid.`,
+      message: `${record.teacherName}'s salary for ${record.month} has been paid.`,
       type: 'success',
       roles: ['super_admin'],
       teacherIds: [record.teacherId],
@@ -428,10 +554,10 @@ export function AccountantPortal() {
     ledgerFormData.append('date', new Date().toISOString().split('T')[0]);
     ledgerFormData.append('type', 'Expense');
     ledgerFormData.append('category', 'Salary');
-    ledgerFormData.append('description', `Salary paid to ${record.teacherName} for ${salaryMonth}`);
+    ledgerFormData.append('description', `Salary paid to ${record.teacherName} for ${record.month}`);
     ledgerFormData.append('amount', String(updated.calculatedSalary));
     ledgerFormData.append('paymentMode', 'Bank Transfer');
-    ledgerFormData.append('referenceNumber', `${record.teacherId}-${salaryMonth}`);
+    ledgerFormData.append('referenceNumber', `${record.teacherId}-${record.month}`);
     ledgerFormData.append('enteredBy', user?.name || 'Accountant');
     ledgerFormData.append('branchId', record.branchId || branchFilter || myBranchId);
 
@@ -1795,8 +1921,8 @@ export function AccountantPortal() {
                 <div className="flex flex-col gap-3 border-b border-border pb-4">
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <div>
-                      <h3 className="text-lg font-bold text-foreground">Salary Management</h3>
-                      <p className="text-sm text-muted-foreground mt-1">Salary drafts are created from the Teacher Attendance page. Process them here and mark paid with ledger tracking.</p>
+                      <h3 className="text-lg font-bold text-foreground">Teacher Salaries &amp; Payslips</h3>
+                      <p className="text-sm text-muted-foreground mt-1">View finalized salary records pushed by Admin, generate payslips in the standard format, view or download payslips, and mark paid.</p>
                     </div>
                     <div className="flex items-center gap-2">
                       <input type="month" value={salaryMonth} onChange={(event) => setSalaryMonth(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm" />
@@ -1811,35 +1937,51 @@ export function AccountantPortal() {
                     )}
                     <select value={salaryTeacherFilter} onChange={(event) => setSalaryTeacherFilter(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm">
                       <option value="">All Teachers</option>
-                      {teacherProfiles.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.firstName} {teacher.lastName}</option>)}
+                      {teacherProfiles
+                        .filter((teacher) => (!salaryBranchFilter || teacher.branchId === salaryBranchFilter) && (isSuperAdmin || teacher.branchId === myBranchId))
+                        .map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.firstName} {teacher.lastName}</option>)}
                     </select>
                     <select value={salaryStatusFilter} onChange={(event) => setSalaryStatusFilter(event.target.value)} className="rounded-xl border border-input bg-input-background px-3 py-2 text-sm">
-                      <option value="">All Status</option>
-                      <option value="Draft">Draft</option>
+                      <option value="">All Pushed Records</option>
+                      <option value="Pending Generation">Pending Generation</option>
+                      <option value="Generated">Generated</option>
+                      <option value="Regeneration Authorized">Regeneration Authorized</option>
                       <option value="Paid">Paid</option>
                     </select>
                     <button onClick={refreshSalaryRecords} className="rounded-xl border border-border px-3 py-2 text-sm font-semibold hover:bg-secondary">Refresh Records</button>
                   </div>
                 </div>
 
+                {salaryBanner && (
+                  <div
+                    className={`rounded-xl border px-4 py-3 text-sm ${
+                      salaryBanner.type === 'success'
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300'
+                        : 'border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300'
+                    }`}
+                  >
+                    {salaryBanner.message}
+                  </div>
+                )}
+
                 <div className="grid gap-4 md:grid-cols-3">
                   <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
-                    <p className="text-sm text-muted-foreground">Draft salary slips</p>
-                    <p className="mt-2 text-2xl font-bold text-foreground">{salaryRows.filter((row) => row.record?.status === 'Draft').length}</p>
+                    <p className="text-sm text-muted-foreground">Pending Generation</p>
+                    <p className="mt-2 text-2xl font-bold text-amber-600">{salaryRecords.filter((r) => r.pushedToAccountant && r.payslipStatus === 'Pending Generation').length}</p>
                   </div>
                   <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
-                    <p className="text-sm text-muted-foreground">Paid salaries</p>
-                    <p className="mt-2 text-2xl font-bold text-green-600">{salaryRows.filter((row) => row.record?.status === 'Paid').length}</p>
+                    <p className="text-sm text-muted-foreground">Payslips Generated</p>
+                    <p className="mt-2 text-2xl font-bold text-emerald-600">{salaryRecords.filter((r) => r.pushedToAccountant && r.payslipStatus === 'Generated').length}</p>
                   </div>
                   <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
-                    <p className="text-sm text-muted-foreground">Total records</p>
-                    <p className="mt-2 text-2xl font-bold text-amber-600">{salaryRows.length}</p>
+                    <p className="text-sm text-muted-foreground">Paid Salaries</p>
+                    <p className="mt-2 text-2xl font-bold text-foreground">{salaryRecords.filter((r) => r.pushedToAccountant && r.status === 'Paid').length}</p>
                   </div>
                 </div>
 
                 {salaryRows.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-border bg-secondary/30 p-8 text-center text-sm text-muted-foreground">
-                    No salary drafts or payments available for selected filters. Ensure attendance and salary per class are recorded on the Teacher Attendance page.
+                    No finalized salary records pushed by Admin for the selected filters. Admin must finalize and push teacher salaries before payslips can be generated.
                   </div>
                 ) : (
                   <div className="overflow-x-auto rounded-2xl border border-border bg-card p-4 shadow-sm">
@@ -1850,83 +1992,152 @@ export function AccountantPortal() {
                           <th className="px-4 py-3 text-left font-semibold text-foreground">Employee ID</th>
                           <th className="px-4 py-3 text-left font-semibold text-foreground">Branch</th>
                           <th className="px-4 py-3 text-left font-semibold text-foreground">Salary Month</th>
-                          <th className="px-4 py-3 text-right font-semibold text-foreground">Classes Conducted</th>
-                          <th className="px-4 py-3 text-right font-semibold text-foreground">Salary Per Class</th>
+                          <th className="px-4 py-3 text-right font-semibold text-foreground">Classes / Days</th>
+                          <th className="px-4 py-3 text-right font-semibold text-foreground">Rate / Base</th>
                           <th className="px-4 py-3 text-right font-semibold text-foreground">Final Salary</th>
-                          <th className="px-4 py-3 text-left font-semibold text-foreground">Payment Status</th>
+                          <th className="px-4 py-3 text-left font-semibold text-foreground">Payslip Status</th>
+                          <th className="px-4 py-3 text-left font-semibold text-foreground">Payment</th>
                           <th className="px-4 py-3 text-left font-semibold text-foreground">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border">
                         {salaryRows.map(({ teacher, record }) => {
-                          if (!record) {
-                            // Teacher exists but no salary draft yet for this month — still
-                            // show the row so payroll can see who's outstanding.
-                            return (
-                              <tr key={teacher.id} className="hover:bg-secondary/10 transition-colors">
-                                <td className="px-4 py-3 font-medium text-foreground">{teacher.firstName} {teacher.lastName}</td>
-                                <td className="px-4 py-3 font-mono text-xs text-foreground">{teacher.id}</td>
-                                <td className="px-4 py-3 text-muted-foreground">{getBranchName(teacher.branchId) || '—'}</td>
-                                <td className="px-4 py-3 text-muted-foreground">{salaryMonth}</td>
-                                <td className="px-4 py-3 text-right text-muted-foreground">—</td>
-                                <td className="px-4 py-3 text-right text-muted-foreground">—</td>
-                                <td className="px-4 py-3 text-right text-muted-foreground">—</td>
-                                <td className="px-4 py-3 text-left">
-                                  <span className="inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">No draft</span>
-                                </td>
-                                <td className="px-4 py-3 text-xs text-muted-foreground">Set classes &amp; salary per class on the Teacher Attendance page.</td>
-                              </tr>
-                            );
-                          }
-                          const canMarkPaid = record.status === 'Draft';
-                          const canPreview = record.classesConducted > 0 && record.salaryPerClass > 0 || record.salaryType === 'Monthly Fixed';
-                          const branchName = getBranchName(teacher.branchId) || '—';
+                          const teacherName = teacher ? `${teacher.firstName} ${teacher.lastName}`.trim() : record.teacherName;
+                          const branchName = getBranchName(teacher?.branchId || record.branchId) || '—';
+                          const isGenerated = record.payslipStatus === 'Generated';
+                          const canRegenerate = isGenerated && Boolean(record.regenerationAuthorized);
+                          const canMarkPaid = record.status === 'Draft' && isGenerated;
+                          const isBusy = salaryBusyId === record.id;
 
                           return (
-                            <tr key={teacher.id} className="hover:bg-secondary/10 transition-colors">
-                              <td className="px-4 py-3 font-medium text-foreground">{teacher.firstName} {teacher.lastName}</td>
-                              <td className="px-4 py-3 font-mono text-xs text-foreground">{teacher.id}</td>
+                            <tr key={record.id} className="hover:bg-secondary/10 transition-colors">
+                              <td className="px-4 py-3 font-medium text-foreground">{teacherName}</td>
+                              <td className="px-4 py-3 font-mono text-xs text-foreground">{record.employeeId || record.teacherId}</td>
                               <td className="px-4 py-3 text-muted-foreground">{branchName}</td>
-                              <td className="px-4 py-3 text-muted-foreground">{salaryMonth}</td>
+                              <td className="px-4 py-3 text-muted-foreground">{record.month}</td>
                               <td className="px-4 py-3 text-right text-foreground">{record.classesConducted || '—'}</td>
-                              <td className="px-4 py-3 text-right text-foreground">{record.salaryPerClass ? `₹${record.salaryPerClass}` : '—'}</td>
+                              <td className="px-4 py-3 text-right text-foreground">
+                                {record.salaryType === 'Monthly Fixed'
+                                  ? `${formatIndianCurrency(record.salaryAmount ?? 0)} (Fixed)`
+                                  : record.salaryPerClass
+                                    ? `₹${record.salaryPerClass}/cls`
+                                    : '—'}
+                              </td>
                               <td className="px-4 py-3 text-right text-green-700 font-semibold">{formatIndianCurrency(record.calculatedSalary)}</td>
                               <td className="px-4 py-3 text-left">
-                                <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${record.status === 'Paid' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-700'}`}>
+                                {record.payslipStatus === 'Pending Generation' ? (
+                                  <div>
+                                    <span className="inline-flex rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                                      Pending Generation
+                                    </span>
+                                    {record.pushedBy && (
+                                      <p className="mt-1 text-[11px] text-muted-foreground">Pushed by {record.pushedBy}</p>
+                                    )}
+                                  </div>
+                                ) : canRegenerate ? (
+                                  <div>
+                                    <span className="inline-flex rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-800">
+                                      Regeneration Authorized
+                                    </span>
+                                    <p className="mt-1 text-[11px] text-muted-foreground">
+                                      Approved by {record.regenerationAuthorizedBy || 'Super Admin'}
+                                    </p>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    <span className="inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-800">
+                                      Generated{record.payslipGenerationCount && record.payslipGenerationCount > 1 ? ` (v${record.payslipGenerationCount})` : ''}
+                                    </span>
+                                    {record.payslipGeneratedBy && (
+                                      <p className="mt-1 text-[11px] text-muted-foreground">By {record.payslipGeneratedBy}</p>
+                                    )}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-left">
+                                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${record.status === 'Paid' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-700'}`}>
                                   {record.status}
                                 </span>
                               </td>
                               <td className="px-4 py-3">
                                 <div className="flex flex-wrap gap-2">
-                                  <button
-                                    onClick={() => handlePreviewSalarySlip(record)}
-                                    disabled={!canPreview}
-                                    className="rounded-xl border border-border bg-white px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    Preview Payslip
-                                  </button>
-                                  <button
-                                    onClick={() => handleDownloadSalarySlip(record)}
-                                    disabled={!canPreview}
-                                    className="rounded-xl border border-border bg-white px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    Download PDF
-                                  </button>
-                                  {record.isLocked && user?.role === 'super_admin' && (
+                                  {!isGenerated && (
                                     <button
+                                      type="button"
+                                      onClick={() => handleGeneratePayslip(record)}
+                                      disabled={isBusy}
+                                      className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      <FileText className="h-3.5 w-3.5" />
+                                      {isBusy ? 'Generating…' : 'Generate'}
+                                    </button>
+                                  )}
+
+                                  {isGenerated && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handlePreviewSalarySlip(record)}
+                                        className="inline-flex items-center gap-1 rounded-xl border border-border bg-white dark:bg-card px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary"
+                                      >
+                                        <Eye className="h-3.5 w-3.5" />
+                                        View Payslip
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDownloadSalarySlip(record)}
+                                        className="inline-flex items-center gap-1 rounded-xl border border-border bg-white dark:bg-card px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary"
+                                      >
+                                        <Download className="h-3.5 w-3.5" />
+                                        Download PDF
+                                      </button>
+                                    </>
+                                  )}
+
+                                  {canRegenerate && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleGeneratePayslip(record)}
+                                      disabled={isBusy}
+                                      className="inline-flex items-center gap-1 rounded-xl bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      <RefreshCw className="h-3.5 w-3.5" />
+                                      {isBusy ? 'Regenerating…' : 'Regenerate'}
+                                    </button>
+                                  )}
+
+                                  {isSuperAdmin && isGenerated && !record.regenerationAuthorized && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAuthorizeRegeneration(record)}
+                                      disabled={isBusy}
+                                      className="rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-800 hover:bg-sky-100 disabled:opacity-50"
+                                    >
+                                      Authorize Regen
+                                    </button>
+                                  )}
+
+                                  {record.isLocked && isSuperAdmin && (
+                                    <button
+                                      type="button"
                                       onClick={() => handleUnlock(record)}
-                                      className="rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-600"
+                                      disabled={isBusy}
+                                      className="rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
                                     >
                                       Unlock Salary
                                     </button>
                                   )}
-                                  <button
-                                    onClick={() => handleMarkPaid(record)}
-                                    disabled={!canMarkPaid}
-                                    className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    Mark Salary Paid
-                                  </button>
+
+                                  {isGenerated && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleMarkPaid(record)}
+                                      disabled={!canMarkPaid || isBusy}
+                                      className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      Mark Salary Paid
+                                    </button>
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -2653,6 +2864,44 @@ export function AccountantPortal() {
               <button type="submit" className="rounded-xl bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">Confirm Allocation</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {previewSlipModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="flex h-[88vh] w-full max-w-4xl flex-col rounded-2xl border border-border bg-card shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+              <div>
+                <h3 className="text-base font-bold text-foreground">
+                  Payslip Preview — {previewSlipModal.teacherName} ({previewSlipModal.month})
+                </h3>
+                <p className="text-xs text-muted-foreground">Generated from finalized Admin salary details using standard payslip format</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={previewSlipModal.url}
+                  download={previewSlipModal.fileName}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3.5 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download PDF
+                </a>
+                <button
+                  type="button"
+                  onClick={closePreviewModal}
+                  className="rounded-xl border border-border p-2 text-muted-foreground hover:bg-secondary hover:text-foreground"
+                  aria-label="Close payslip preview"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <iframe
+              src={previewSlipModal.url}
+              title={`Payslip ${previewSlipModal.teacherName} ${previewSlipModal.month}`}
+              className="flex-1 w-full bg-white"
+            />
+          </div>
         </div>
       )}
 

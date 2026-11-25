@@ -34,6 +34,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'casual_leave',            // review/approve teacher leave requests
       'student_management',      // view + export student lists (active/inactive)
       'teacher_management',      // view + export teacher/staff lists (active/inactive)
+      'teacher_attendance',      // manage teacher attendance & salary finalization/push
     ],
     permissions: [
       'create',
@@ -58,6 +59,7 @@ export const ROLE_CONFIG: Record<Role, RoleConfig> = {
       'parent_management',      // manage parent records
       'class_allocation',       // create/edit batches, assign teachers, manage batch students
       'attendance',             // daily attendance
+      'teacher_attendance',     // teacher attendance & salary finalize/push
       'exam_marks',             // exams and results
       'teacher_tasks',          // assign teacher work
       'timetable',              // schedule management
@@ -137,7 +139,8 @@ export const MODULE_ROUTES: Record<Module, string[]> = {
   parent_management:   ['/parents'],
   class_allocation:    ['/batches'],
   fee_management:      ['/fees'],
-  attendance:          ['/attendance', '/teacher-attendance'],
+  attendance:          ['/attendance'],
+  teacher_attendance:  ['/teacher-attendance'],
   exam_marks:          ['/exams'],
   inventory:           ['/inventory'],
   teacher_tasks:       ['/tasks'],
@@ -192,13 +195,6 @@ export function hasPermission(role: Role, module: Module, permission: Permission
 }
 
 export function canAccessRoute(role: Role, path: string): boolean {
-  // Marking Teacher Attendance is restricted to Admin/Super Admin — accountants
-  // and teachers still get in via the 'attendance' module below, but the page
-  // itself (TeacherAttendance.tsx) renders everything read-only for them.
-  if (path === '/teacher-attendance' || path.startsWith('/teacher-attendance')) {
-    return role === 'admin' || role === 'super_admin' || role === 'accountant';
-  }
-
   for (const [module, routes] of Object.entries(MODULE_ROUTES)) {
     if (routes.some((r) => path === r || path.startsWith(r + '/'))) {
       return hasModuleAccess(role, module as Module);

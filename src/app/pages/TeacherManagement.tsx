@@ -79,7 +79,7 @@ function TeacherForm({
     setSaving(false);
   };
 
-  const isSalaryEditable = user?.role === 'super_admin';
+  const isSalaryEditable = user?.role === 'super_admin' || user?.role === 'admin';
 
   return (
     <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
@@ -208,7 +208,7 @@ function TeacherForm({
 
 function TeacherProfile({ teacher, onClose }: { teacher: Teacher; onClose: () => void }) {
   const { user } = useAuth();
-  const canSeeSalary = user?.role === 'super_admin';
+  const canSeeSalary = user?.role === 'super_admin' || user?.role === 'admin';
   return (
     <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
       <div className="flex items-start justify-between mb-5">

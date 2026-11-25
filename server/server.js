@@ -3022,10 +3022,8 @@ async function main() {
       if (branchId) { query += ' AND u.branchId = ?'; params.push(branchId); }
       query += ' ORDER BY u.name';
       const rows = await db.all(query, ...params);
-      // Salary is payroll-sensitive: super_admin sets it and accountant needs it to run
-      // payroll, but admin only manages the non-financial parts of a teacher's profile —
-      // stripped here so it never reaches the client, not just hidden in the admin UI.
-      const canSeeSalary = req.user.roles.some((r) => ['super_admin', 'accountant'].includes(r));
+      // Super Admin, branch Admin (branch-scoped above), and Accountant can view teacher salary configuration.
+      const canSeeSalary = req.user.roles.some((r) => ['super_admin', 'admin', 'accountant'].includes(r));
       const mapped = rows.map(mapTeacherRow);
       res.json(canSeeSalary ? mapped : mapped.map(({ salaryType, salaryAmount, monthlySalary, salaryPerClass, allowance, specialCourse, referralBonus, ...rest }) => rest));
     } catch (err) {
@@ -3097,9 +3095,9 @@ async function main() {
     }
   });
 
-  // Payslip earnings split — super_admin only, like the rest of the salary fields.
+  // Payslip earnings split — super_admin and branch admin (branch-checked on write routes).
   async function saveEarningsSplit(req, teacherId, body) {
-    if (!req.user.roles.includes('super_admin')) return;
+    if (!req.user.roles.some((r) => ['super_admin', 'admin'].includes(r))) return;
     const n = (v) => Math.max(0, Number(v) || 0);
     if (body.allowance === undefined && body.specialCourse === undefined && body.referralBonus === undefined) return;
     await db.run('UPDATE teacher_profiles SET allowance=?, specialCourse=?, referralBonus=? WHERE id=?', n(body.allowance), n(body.specialCourse), n(body.referralBonus), teacherId);
@@ -3109,8 +3107,15 @@ async function main() {
     if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
       const existing = await db.get('SELECT * FROM users WHERE id = ?', req.params.id);
-      if (!existing) return res.status(404).json({ error: 'Teacher not found' });
+      if (!existing || !parseJsonList(existing.roles).includes('teacher')) return res.status(404).json({ error: 'Teacher not found' });
+      const isSuperAdmin = req.user.roles.includes('super_admin');
+      if (!isSuperAdmin && existing.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
       const body = req.body || {};
+      if (!isSuperAdmin && existing.status === 'Pending Approval' && body.status === 'Active') {
+        return res.status(403).json({ error: 'Only Super Admin can approve pending teachers' });
+      }
       const name = body.fullName || (body.firstName ? `${body.firstName} ${body.lastName || ''}`.trim() : existing.name);
       const email = body.email ?? existing.email;
       const mobile = body.mobile ?? body.phone ?? existing.mobile;
@@ -3169,6 +3174,11 @@ async function main() {
   app.delete('/api/teachers/:id', async (req, res) => {
     if (!req.user.roles.includes('super_admin') && !req.user.roles.includes('admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
+      const existing = await db.get('SELECT * FROM users WHERE id = ?', req.params.id);
+      if (!existing || !parseJsonList(existing.roles).includes('teacher')) return res.status(404).json({ error: 'Teacher not found' });
+      if (!req.user.roles.includes('super_admin') && existing.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
       await db.run(`UPDATE users SET status='Inactive', updatedAt=? WHERE id=?`, new Date().toISOString(), req.params.id);
       res.json({ success: true });
     } catch (err) {
@@ -7964,34 +7974,74 @@ async function main() {
   });
 
   // --- Salary / Payroll Endpoints ---
-  // Salary data is payroll-sensitive: only super_admin/accountant may browse the money
-  // fields broadly. Admin may browse the roster to see attendance-driven fields (e.g.
-  // classesConducted, used as "total days" for Monthly Fixed teachers) but not amounts.
-  // A teacher may only ever fetch their own records (their "My Salary Slips" self-service
-  // page, which does need the money fields) — parent/other roles get nothing.
+  // Workflow:
+  //   1. Admin / Super Admin enters draft salary details (POST /api/salary-records).
+  //   2. Admin / Super Admin finalizes the salary (POST /api/salary-records/:id/finalize).
+  //   3. Admin / Super Admin pushes the finalized salary to Accountant (POST /api/salary-records/:id/push-to-accountant).
+  //   4. Accountant (or Super Admin) views pushed records and clicks Generate (POST /api/salary-records/:id/generate-payslip).
+  //      Duplicate generation is blocked (409) unless Super Admin authorizes regeneration once (POST /api/salary-records/:id/authorize-regeneration).
+  //   5. Teachers only ever see payslips whose payslipStatus = 'Generated' (or legacy status = 'Paid').
+
+  function mapSalaryRecord(r) {
+    if (!r) return r;
+    return {
+      ...r,
+      isLocked: !!r.isLocked,
+      isFinalized: !!r.isFinalized,
+      pushedToAccountant: !!r.pushedToAccountant,
+      payslipStatus: r.payslipStatus || 'Not Pushed',
+      payslipGenerationCount: Number(r.payslipGenerationCount || 0),
+      regenerationAuthorized: !!r.regenerationAuthorized,
+      casualLeaveTotal: r.casualLeaveTotal === null || r.casualLeaveTotal === undefined ? null : Number(r.casualLeaveTotal),
+      casualLeaveUsed: r.casualLeaveUsed === null || r.casualLeaveUsed === undefined ? null : Number(r.casualLeaveUsed),
+    };
+  }
+
+  async function snapshotTeacherCasualLeave(teacherId) {
+    const row = await db.get(
+      'SELECT COALESCE(leavesTaken, 0) as leavesTaken, COALESCE(annualAllotment, 12) as annualAllotment FROM casual_leave_balances WHERE userId = ?',
+      teacherId
+    );
+    return {
+      casualLeaveTotal: row ? Number(row.annualAllotment) : 12,
+      casualLeaveUsed: row ? Number(row.leavesTaken) : 0,
+    };
+  }
+
   app.get('/api/salary-records', async (req, res) => {
     const roles = req.user.roles || [];
-    const isPayroll = roles.some((r) => ['super_admin', 'accountant'].includes(r));
-    const isAdmin = roles.includes('admin');
-    if (!isPayroll && !isAdmin && !roles.includes('teacher')) return res.status(403).json({ error: 'Forbidden' });
+    const hasSuperAdmin = roles.includes('super_admin');
+    const hasAdmin = roles.includes('admin');
+    const hasAccountant = roles.includes('accountant');
+    const hasTeacher = roles.includes('teacher');
+    const isStaff = hasSuperAdmin || hasAdmin || hasAccountant;
+    if (!isStaff && !hasTeacher) return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { month, status } = req.query;
-      const teacherId = (isPayroll || isAdmin) ? req.query.teacherId : req.user.sub;
+      const { month, status, payslipStatus, pushedOnly } = req.query;
+      const teacherId = isStaff ? req.query.teacherId : req.user.sub;
       const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM salary_records WHERE 1=1';
       const params = [];
-      // A teacher's own slips are scoped by teacherId alone — a branch clause would hide slips from a branch they were since moved from.
-      if (branchId && (isPayroll || isAdmin)) { query += ' AND branchId = ?'; params.push(branchId); }
+
+      if (!isStaff && hasTeacher) {
+        // Teachers only see their own slips once the Accountant has generated the payslip (or legacy Paid).
+        query += " AND (payslipStatus = 'Generated' OR status = 'Paid')";
+      } else {
+        // Non-super_admin staff (Admin, Accountant) are pinned to their own branch via resolveBranchId.
+        if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
+        const isAccountantOnly = hasAccountant && !hasSuperAdmin && !hasAdmin;
+        if (isAccountantOnly || pushedOnly === '1' || pushedOnly === 'true') {
+          query += ' AND pushedToAccountant = 1';
+        }
+      }
+
       if (month) { query += ' AND month = ?'; params.push(month); }
       if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
       if (status) { query += ' AND status = ?'; params.push(status); }
+      if (payslipStatus) { query += ' AND payslipStatus = ?'; params.push(payslipStatus); }
       query += ' ORDER BY month DESC, teacherName ASC';
       const rows = await db.all(query, ...params);
-      const mapped = rows.map((r) => ({ ...r, isLocked: !!r.isLocked }));
-      const result = isAdmin && !isPayroll
-        ? mapped.map(({ salaryAmount, salaryPerClass, calculatedSalary, remarks, allowance, specialCourse, referralBonus, ...rest }) => rest)
-        : mapped;
-      res.json(result);
+      res.json(rows.map(mapSalaryRecord));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -7999,11 +8049,13 @@ async function main() {
   });
 
   app.get('/api/salary-audit-log', async (req, res) => {
-    if (!req.user.roles.some((r) => ['super_admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.user.roles.some((r) => ['super_admin', 'admin', 'accountant'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const { teacherId, month } = req.query;
+      const branchId = resolveBranchId(req, req.query.branchId);
       let query = 'SELECT * FROM salary_audit_log WHERE 1=1';
       const params = [];
+      if (branchId) { query += ' AND branchId = ?'; params.push(branchId); }
       if (teacherId) { query += ' AND teacherId = ?'; params.push(teacherId); }
       if (month) { query += ' AND month = ?'; params.push(month); }
       query += ' ORDER BY timestamp DESC';
@@ -8031,52 +8083,409 @@ async function main() {
     }
   }
 
-  // Creates or updates a Draft salary record — used by both the Teacher Attendance
-  // page (saving classes/salary-per-class) and the Accountant Portal (Create Draft).
+  const salaryTableCols = await db.all('PRAGMA table_info(salary_records)');
+  const salaryColNames = new Set(salaryTableCols.map((c) => c.name));
+  const isFirstPayslipWorkflowMigration = !salaryColNames.has('payslipStatus');
+
+  const salaryWorkflowMigrations = [
+    "ALTER TABLE salary_records ADD COLUMN isFinalized INTEGER DEFAULT 0;",
+    "ALTER TABLE salary_records ADD COLUMN finalizedAt TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN finalizedBy TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN pushedToAccountant INTEGER DEFAULT 0;",
+    "ALTER TABLE salary_records ADD COLUMN pushedAt TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN pushedBy TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN payslipStatus TEXT DEFAULT 'Not Pushed';",
+    "ALTER TABLE salary_records ADD COLUMN payslipGeneratedAt TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN payslipGeneratedBy TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN payslipGenerationCount INTEGER DEFAULT 0;",
+    "ALTER TABLE salary_records ADD COLUMN regenerationAuthorized INTEGER DEFAULT 0;",
+    "ALTER TABLE salary_records ADD COLUMN regenerationAuthorizedAt TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN regenerationAuthorizedBy TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN regenerationReason TEXT;",
+    "ALTER TABLE salary_records ADD COLUMN casualLeaveTotal INTEGER;",
+    "ALTER TABLE salary_records ADD COLUMN casualLeaveUsed INTEGER;",
+  ];
+  for (const sql of salaryWorkflowMigrations) {
+    try { await db.exec(sql); } catch (e) {}
+  }
+
+  if (isFirstPayslipWorkflowMigration) {
+    try {
+      await db.run(`
+        UPDATE salary_records
+        SET isFinalized = 1,
+            finalizedAt = COALESCE(lockedDate, paidDate, updatedAt, createdAt),
+            finalizedBy = COALESCE(lockedBy, paidBy, 'System'),
+            pushedToAccountant = 1,
+            pushedAt = COALESCE(lockedDate, paidDate, updatedAt, createdAt),
+            pushedBy = COALESCE(lockedBy, paidBy, 'System'),
+            payslipStatus = 'Generated',
+            payslipGeneratedAt = COALESCE(paidDate, lockedDate, updatedAt, createdAt),
+            payslipGeneratedBy = COALESCE(paidBy, lockedBy, 'System'),
+            payslipGenerationCount = 1
+        WHERE status = 'Paid' OR isLocked = 1
+      `);
+    } catch (e) {
+      console.error('salary_records workflow backfill failed:', e);
+    }
+  }
+
+  // Creates or updates an unfinalized Draft salary record — Admin / Super Admin only.
+  // Accountant cannot enter or edit salary details.
   app.post('/api/salary-records', async (req, res) => {
-    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.user.roles.some((r) => ['super_admin', 'admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const b = req.body || {};
       if (!b.teacherId || !b.month) return res.status(400).json({ error: 'teacherId and month are required' });
-      const branchId = resolveBranchId(req, b.branchId);
+
+      const teacherRow = await db.get(
+        'SELECT u.id, u.name, u.roles, u.branchId, tp.department, tp.salaryType, tp.salaryAmount, tp.monthlySalary, tp.salaryPerClass, tp.allowance, tp.specialCourse, tp.referralBonus FROM users u LEFT JOIN teacher_profiles tp ON tp.id = u.id WHERE u.id = ?',
+        b.teacherId
+      );
+      if (!teacherRow || !parseJsonList(teacherRow.roles).includes('teacher')) {
+        return res.status(404).json({ error: 'Teacher not found' });
+      }
+
+      const isSuperAdmin = req.user.roles.includes('super_admin');
+      if (!isSuperAdmin && teacherRow.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const branchId = resolveBranchId(req, teacherRow.branchId || b.branchId);
 
       const existing = await db.get('SELECT * FROM salary_records WHERE teacherId = ? AND month = ?', b.teacherId, b.month);
-      if (existing && existing.isLocked) return res.status(409).json({ error: 'Salary is locked for this teacher and month.' });
+      if (existing && (existing.isLocked || existing.isFinalized || existing.pushedToAccountant || existing.status === 'Paid')) {
+        return res.status(409).json({
+          error: existing.pushedToAccountant
+            ? 'Salary has already been finalized and pushed to Accountant for this teacher and month. Super Admin must unlock it first.'
+            : existing.isFinalized
+              ? 'Salary is finalized for this teacher and month. Push to Accountant or ask Super Admin to unlock to edit.'
+              : 'Salary is locked for this teacher and month.',
+        });
+      }
 
       const now = new Date().toISOString();
-      // Monthly Fixed: loss of pay = per-day rate (salary / working days) x absent days. Approved leave is not LOP.
+      const salaryType = b.salaryType || teacherRow.salaryType || 'Monthly Fixed';
+      const salaryAmount = b.salaryAmount !== undefined && b.salaryAmount !== null ? Number(b.salaryAmount) : Number(teacherRow.monthlySalary ?? teacherRow.salaryAmount ?? 0);
+      const salaryPerClass = b.salaryPerClass !== undefined && b.salaryPerClass !== null ? Number(b.salaryPerClass) : Number(teacherRow.salaryPerClass ?? 0);
+      const classesConducted = Number(b.classesConducted || 0);
+      const presentDays = Number(b.presentDays || 0);
+      const halfDays = Number(b.halfDays || 0);
       const absentDays = Number(b.absentDays || 0);
-      const monthlyWorkingDays = Number(b.classesConducted || 0);
-      const calculatedSalary = b.salaryType === 'Monthly Fixed'
-        ? Math.max(0, Math.round(Number(b.salaryAmount || 0) - (monthlyWorkingDays > 0 ? (Number(b.salaryAmount || 0) / monthlyWorkingDays) * absentDays : 0)))
-        : Number(b.classesConducted || 0) * Number(b.salaryPerClass || 0);
+
+      if (![salaryAmount, salaryPerClass, classesConducted, presentDays, halfDays, absentDays].every((v) => Number.isFinite(v) && v >= 0)) {
+        return res.status(400).json({ error: 'Salary and attendance values must be valid non-negative numbers.' });
+      }
+
+      // Monthly Fixed: loss of pay = per-day rate (salary / working days) x absent days. Approved leave is not LOP.
+      const monthlyWorkingDays = classesConducted;
+      const calculatedSalary = salaryType === 'Monthly Fixed'
+        ? Math.max(0, Math.round(salaryAmount - (monthlyWorkingDays > 0 ? (salaryAmount / monthlyWorkingDays) * absentDays : 0)))
+        : classesConducted * salaryPerClass;
+
+      const clSnapshot = await snapshotTeacherCasualLeave(b.teacherId);
+      const n = (v) => Math.max(0, Number(v) || 0);
+      const allowance = n(b.allowance ?? teacherRow.allowance ?? 0);
+      const specialCourse = n(b.specialCourse ?? teacherRow.specialCourse ?? 0);
+      const referralBonus = n(b.referralBonus ?? teacherRow.referralBonus ?? 0);
+      const teacherName = b.teacherName || teacherRow.name || '';
+      const department = b.department ?? teacherRow.department ?? null;
 
       await db.run(
-        `INSERT INTO salary_records (teacherId, teacherName, employeeId, branchId, department, designation, month, salaryType, salaryAmount, salaryPerClass, classesConducted, presentDays, halfDays, calculatedSalary, absentDays, status, remarks, isLocked, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, 0, ?, ?)
+        `INSERT INTO salary_records (
+           teacherId, teacherName, employeeId, branchId, department, designation, month,
+           salaryType, salaryAmount, salaryPerClass, classesConducted, presentDays, halfDays,
+           calculatedSalary, absentDays, status, remarks, isLocked,
+           isFinalized, pushedToAccountant, payslipStatus, payslipGenerationCount, regenerationAuthorized,
+           casualLeaveTotal, casualLeaveUsed, createdAt, updatedAt
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, 0, 0, 0, 'Not Pushed', 0, 0, ?, ?, ?, ?)
          ON CONFLICT(teacherId, month) DO UPDATE SET
            teacherName=excluded.teacherName, employeeId=excluded.employeeId, branchId=excluded.branchId,
            department=excluded.department, designation=excluded.designation, salaryType=excluded.salaryType,
            salaryAmount=excluded.salaryAmount, salaryPerClass=excluded.salaryPerClass, classesConducted=excluded.classesConducted,
            presentDays=excluded.presentDays, halfDays=excluded.halfDays, calculatedSalary=excluded.calculatedSalary, absentDays=excluded.absentDays,
-           remarks=excluded.remarks, updatedAt=excluded.updatedAt`,
-        b.teacherId, b.teacherName || '', b.employeeId || b.teacherId, branchId, b.department || null, b.designation || null,
-        b.month, b.salaryType || null, Number(b.salaryAmount || 0), Number(b.salaryPerClass || 0), Number(b.classesConducted || 0),
-        Number(b.presentDays || 0), Number(b.halfDays || 0), calculatedSalary, absentDays, b.remarks || '', now, now
+           remarks=excluded.remarks, casualLeaveTotal=excluded.casualLeaveTotal, casualLeaveUsed=excluded.casualLeaveUsed,
+           isFinalized=0, pushedToAccountant=0, payslipStatus='Not Pushed', isLocked=0,
+           updatedAt=excluded.updatedAt`,
+        b.teacherId, teacherName, b.employeeId || b.teacherId, branchId, department, b.designation || null,
+        b.month, salaryType, salaryAmount, salaryPerClass, classesConducted,
+        presentDays, halfDays, calculatedSalary, absentDays, b.remarks || '',
+        clSnapshot.casualLeaveTotal, clSnapshot.casualLeaveUsed, now, now
       );
 
-      const n = (v) => Math.max(0, Number(v) || 0);
-      await db.run('UPDATE salary_records SET allowance=?, specialCourse=?, referralBonus=? WHERE teacherId = ? AND month = ?', n(b.allowance), n(b.specialCourse), n(b.referralBonus), b.teacherId, b.month);
+      await db.run(
+        'UPDATE salary_records SET allowance=?, specialCourse=?, referralBonus=? WHERE teacherId = ? AND month = ?',
+        allowance, specialCourse, referralBonus, b.teacherId, b.month
+      );
       const saved = await db.get('SELECT * FROM salary_records WHERE teacherId = ? AND month = ?', b.teacherId, b.month);
 
       await writeSalaryAuditLog({
-        teacherId: b.teacherId, teacherName: b.teacherName, month: b.month,
+        teacherId: b.teacherId, teacherName, month: b.month,
         action: existing ? 'Updated' : 'Created',
         previousValue: existing?.calculatedSalary, newValue: calculatedSalary,
         changedBy: req.user.name, userRole: req.user.roles[0], branchId,
       });
 
-      res.json({ ...saved, isLocked: !!saved.isLocked });
+      res.json(mapSalaryRecord(saved));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Finalize a Draft salary record — locks edits and prepares it to be pushed to Accountant.
+  app.post('/api/salary-records/:id/finalize', async (req, res) => {
+    if (!req.user.roles.some((r) => ['super_admin', 'admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Salary record not found' });
+      if (!req.user.roles.includes('super_admin') && record.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (record.pushedToAccountant) {
+        return res.status(409).json({ error: 'Salary record is already pushed to Accountant.' });
+      }
+      if (record.isFinalized) {
+        return res.status(409).json({ error: 'Salary record is already finalized.' });
+      }
+      if (record.status === 'Paid') {
+        return res.status(409).json({ error: 'Salary record is already marked as paid.' });
+      }
+
+      if (record.salaryType === 'Monthly Fixed') {
+        if (!(Number(record.salaryAmount) > 0 && Number(record.classesConducted) > 0)) {
+          return res.status(400).json({ error: 'Cannot finalize monthly fixed salary without a configured monthly salary and valid working days.' });
+        }
+      } else {
+        if (!(Number(record.classesConducted) > 0 && Number(record.salaryPerClass) > 0)) {
+          return res.status(400).json({ error: 'Cannot finalize salary with zero classes conducted or zero salary per class.' });
+        }
+      }
+
+      const clSnapshot = await snapshotTeacherCasualLeave(record.teacherId);
+      const now = new Date().toISOString();
+      const actor = req.user.name || 'Admin';
+      const result = await db.run(
+        `UPDATE salary_records
+         SET isFinalized = 1,
+             finalizedAt = ?,
+             finalizedBy = ?,
+             isLocked = 1,
+             lockedDate = COALESCE(lockedDate, ?),
+             lockedBy = COALESCE(lockedBy, ?),
+             casualLeaveTotal = ?,
+             casualLeaveUsed = ?,
+             updatedAt = ?
+         WHERE id = ? AND isFinalized = 0 AND pushedToAccountant = 0`,
+        now, actor, now, actor, clSnapshot.casualLeaveTotal, clSnapshot.casualLeaveUsed, now, req.params.id
+      );
+      if (!result.changes) {
+        return res.status(409).json({ error: 'Salary record could not be finalized.' });
+      }
+      const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+
+      await writeSalaryAuditLog({
+        teacherId: record.teacherId, teacherName: record.teacherName, month: record.month,
+        action: 'Finalized', previousValue: record.calculatedSalary, newValue: record.calculatedSalary,
+        changedBy: actor, userRole: req.user.roles[0], branchId: record.branchId,
+      });
+
+      res.json(mapSalaryRecord(updated));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Push a finalized salary record to Accountant for payslip generation.
+  app.post('/api/salary-records/:id/push-to-accountant', async (req, res) => {
+    if (!req.user.roles.some((r) => ['super_admin', 'admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Salary record not found' });
+      if (!req.user.roles.includes('super_admin') && record.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (!record.isFinalized) {
+        return res.status(400).json({ error: 'Only finalized salary records can be pushed to the Accountant. Please finalize the salary first.' });
+      }
+      if (record.pushedToAccountant) {
+        return res.status(409).json({ error: 'This salary record has already been pushed to the Accountant.' });
+      }
+
+      const now = new Date().toISOString();
+      const actor = req.user.name || 'Admin';
+      const result = await db.run(
+        `UPDATE salary_records
+         SET pushedToAccountant = 1,
+             pushedAt = ?,
+             pushedBy = ?,
+             payslipStatus = 'Pending Generation',
+             isLocked = 1,
+             lockedDate = COALESCE(lockedDate, ?),
+             lockedBy = COALESCE(lockedBy, ?),
+             updatedAt = ?
+         WHERE id = ? AND isFinalized = 1 AND pushedToAccountant = 0`,
+        now, actor, now, actor, now, req.params.id
+      );
+      if (!result.changes) {
+        return res.status(409).json({ error: 'Salary record is already pushed or not finalized.' });
+      }
+      const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+
+      await writeSalaryAuditLog({
+        teacherId: record.teacherId, teacherName: record.teacherName, month: record.month,
+        action: 'Pushed_To_Accountant', newValue: record.calculatedSalary,
+        changedBy: actor, userRole: req.user.roles[0], branchId: record.branchId,
+      });
+
+      try {
+        await db.run(
+          `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          newNotificationId(),
+          `Salary Ready for Payslip — ${record.teacherName}`,
+          `${actor} finalized and pushed ${record.teacherName}'s salary (${record.month}) to Accountant for payslip generation.`,
+          `Teacher: ${record.teacherName} (${record.employeeId || record.teacherId})\nMonth: ${record.month}\nNet Salary: ₹${record.calculatedSalary}`,
+          'info', 'medium',
+          JSON.stringify(['accountant']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+          actor, req.user.sub, req.user.roles[0] || 'admin', 'salary_pushed_to_accountant',
+          'Accountant', 'accountant', record.branchId || null, 'unread', 0, now
+        );
+      } catch (notifErr) {
+        console.error('Push-to-accountant notification error:', notifErr);
+      }
+
+      res.json(mapSalaryRecord(updated));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Accountant (or Super Admin) generates the payslip for a finalized & pushed salary record.
+  // Duplicate generation for the same teacher & month is rejected with 409 unless Super Admin authorized regeneration.
+  app.post('/api/salary-records/:id/generate-payslip', async (req, res) => {
+    if (!req.user.roles.some((r) => ['accountant', 'super_admin'].includes(r))) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Salary record not found' });
+      if (!req.user.roles.includes('super_admin') && record.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (!record.isFinalized || !record.pushedToAccountant) {
+        return res.status(409).json({ error: 'Salary record must be finalized and pushed by Admin before payslip generation.' });
+      }
+      const isAuthorizedRegen = record.payslipStatus === 'Generated' && !!record.regenerationAuthorized;
+      if (record.payslipStatus === 'Generated' && !record.regenerationAuthorized) {
+        return res.status(409).json({ error: 'Payslip already generated for this teacher and salary period. Super Admin authorization is required to regenerate.' });
+      }
+
+      const now = new Date().toISOString();
+      const actor = req.user.name || 'Accountant';
+      const prevCount = Number(record.payslipGenerationCount || 0);
+      const result = await db.run(
+        `UPDATE salary_records
+         SET payslipStatus = 'Generated',
+             payslipGeneratedAt = ?,
+             payslipGeneratedBy = ?,
+             payslipGenerationCount = COALESCE(payslipGenerationCount, 0) + 1,
+             regenerationAuthorized = 0,
+             updatedAt = ?
+         WHERE id = ? AND isFinalized = 1 AND pushedToAccountant = 1
+           AND (payslipStatus = 'Pending Generation' OR regenerationAuthorized = 1)`,
+        now, actor, now, req.params.id
+      );
+      if (!result.changes) {
+        return res.status(409).json({ error: 'Payslip already generated for this teacher and salary period.' });
+      }
+      const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+
+      await writeSalaryAuditLog({
+        teacherId: record.teacherId, teacherName: record.teacherName, month: record.month,
+        action: isAuthorizedRegen ? 'Payslip_Regenerated' : 'Payslip_Generated',
+        previousValue: prevCount, newValue: prevCount + 1,
+        changedBy: actor, userRole: req.user.roles[0], branchId: record.branchId,
+      });
+
+      try {
+        await db.run(
+          `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          newNotificationId(),
+          `Payslip Generated — ${record.month}`,
+          `Your payslip for ${record.month} has been ${isAuthorizedRegen ? 'regenerated' : 'generated'} and is now available for download.`,
+          `Month: ${record.month}\nNet Salary: ₹${record.calculatedSalary}`,
+          'success', 'medium',
+          JSON.stringify([]), JSON.stringify([record.teacherId]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+          actor, req.user.sub, req.user.roles[0] || 'accountant', 'payslip_generated',
+          'Teacher', 'teacher', record.branchId || null, 'unread', 0, now
+        );
+      } catch (notifErr) {
+        console.error('Payslip generated notification error:', notifErr);
+      }
+
+      res.json(mapSalaryRecord(updated));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'failed' });
+    }
+  });
+
+  // Super Admin authorizes one-time payslip regeneration for a previously generated record.
+  app.post('/api/salary-records/:id/authorize-regeneration', async (req, res) => {
+    if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Only Super Admin can authorize payslip regeneration.' });
+    try {
+      const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+      if (!record) return res.status(404).json({ error: 'Salary record not found' });
+      if (!record.pushedToAccountant || record.payslipStatus !== 'Generated') {
+        return res.status(409).json({ error: 'Only an already generated payslip can be authorized for regeneration.' });
+      }
+      if (record.regenerationAuthorized) {
+        return res.status(409).json({ error: 'Regeneration is already authorized for this payslip.' });
+      }
+
+      const reason = String(req.body?.reason || '').trim().slice(0, 300);
+      const now = new Date().toISOString();
+      const actor = req.user.name || 'Super Admin';
+      await db.run(
+        `UPDATE salary_records
+         SET regenerationAuthorized = 1,
+             regenerationAuthorizedAt = ?,
+             regenerationAuthorizedBy = ?,
+             regenerationReason = ?,
+             updatedAt = ?
+         WHERE id = ?`,
+        now, actor, reason, now, req.params.id
+      );
+      const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
+
+      await writeSalaryAuditLog({
+        teacherId: record.teacherId, teacherName: record.teacherName, month: record.month,
+        action: 'Regeneration_Authorized',
+        previousValue: record.payslipGenerationCount || 1,
+        newValue: record.payslipGenerationCount || 1,
+        changedBy: actor, userRole: req.user.roles[0], branchId: record.branchId,
+      });
+
+      try {
+        await db.run(
+          `INSERT INTO notifications (id, title, message, description, type, priority, roles, teacherIds, classNames, userIds, studentIds, sender, senderId, senderRole, notificationType, recipient, recipientRole, branchId, status, read, createdAt)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          newNotificationId(),
+          `Payslip Regeneration Authorized — ${record.teacherName}`,
+          `${actor} authorized one-time payslip regeneration for ${record.teacherName} (${record.month}).${reason ? ` Reason: ${reason}` : ''}`,
+          `Teacher: ${record.teacherName}\nMonth: ${record.month}${reason ? `\nReason: ${reason}` : ''}`,
+          'info', 'medium',
+          JSON.stringify(['accountant']), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]), JSON.stringify([]),
+          actor, req.user.sub, req.user.roles[0] || 'super_admin', 'payslip_regeneration_authorized',
+          'Accountant', 'accountant', record.branchId || null, 'unread', 0, now
+        );
+      } catch (notifErr) {
+        console.error('Authorize regeneration notification error:', notifErr);
+      }
+
+      res.json(mapSalaryRecord(updated));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
@@ -8088,11 +8497,17 @@ async function main() {
     try {
       const record = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
       if (!record) return res.status(404).json({ error: 'Salary record not found' });
+      if (!req.user.roles.includes('super_admin') && record.branchId !== req.user.branchId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (!record.pushedToAccountant || record.payslipStatus !== 'Generated') {
+        return res.status(409).json({ error: 'Generate the payslip before marking salary as paid.' });
+      }
       if (record.status === 'Paid') return res.status(409).json({ error: 'Salary already marked as paid.' });
 
       const now = new Date().toISOString();
       await db.run(
-        `UPDATE salary_records SET status = 'Paid', paidDate = ?, paidBy = ?, isLocked = 1, lockedDate = ?, lockedBy = ?, updatedAt = ? WHERE id = ?`,
+        `UPDATE salary_records SET status = 'Paid', paidDate = ?, paidBy = ?, isLocked = 1, lockedDate = COALESCE(lockedDate, ?), lockedBy = COALESCE(lockedBy, ?), updatedAt = ? WHERE id = ?`,
         now, req.user.name, now, req.user.name, now, req.params.id
       );
       const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
@@ -8103,15 +8518,15 @@ async function main() {
         changedBy: req.user.name, userRole: req.user.roles[0], branchId: record.branchId,
       });
 
-      res.json({ ...updated, isLocked: !!updated.isLocked });
+      res.json(mapSalaryRecord(updated));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });
     }
   });
 
-  // Unlocking a paid/locked salary record is Super Admin only — it reverses a
-  // payroll decision that accountants shouldn't be able to undo unilaterally.
+  // Unlocking a finalized/pushed/paid salary record is Super Admin only — it returns
+  // the record to editable Draft state so Admin can revise figures and re-finalize/re-push.
   app.post('/api/salary-records/:id/unlock', async (req, res) => {
     if (!req.user.roles.includes('super_admin')) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -8121,7 +8536,15 @@ async function main() {
       const now = new Date().toISOString();
       const nextStatus = record.status === 'Paid' ? 'Draft' : record.status;
       await db.run(
-        `UPDATE salary_records SET isLocked = 0, status = ?, updatedAt = ? WHERE id = ?`,
+        `UPDATE salary_records
+         SET isLocked = 0,
+             isFinalized = 0,
+             pushedToAccountant = 0,
+             payslipStatus = 'Not Pushed',
+             regenerationAuthorized = 0,
+             status = ?,
+             updatedAt = ?
+         WHERE id = ?`,
         nextStatus, now, req.params.id
       );
       const updated = await db.get('SELECT * FROM salary_records WHERE id = ?', req.params.id);
@@ -8131,7 +8554,7 @@ async function main() {
         action: 'Unlocked', changedBy: req.user.name, userRole: req.user.roles[0], branchId: record.branchId,
       });
 
-      res.json({ ...updated, isLocked: !!updated.isLocked });
+      res.json(mapSalaryRecord(updated));
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'failed' });

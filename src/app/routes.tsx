@@ -143,7 +143,7 @@ export const router = createBrowserRouter([
       {
         path: 'teacher-attendance',
         element: (
-          <Protected module="attendance">
+          <Protected module="teacher_attendance">
             <TeacherAttendance />
           </Protected>
         ),

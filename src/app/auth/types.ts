@@ -24,6 +24,7 @@ export type Module =
   | 'class_allocation'
   | 'fee_management'
   | 'attendance'
+  | 'teacher_attendance'
   | 'exam_marks'
   | 'inventory'
   | 'teacher_tasks'
